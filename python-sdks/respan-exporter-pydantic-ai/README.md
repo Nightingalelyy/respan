@@ -65,3 +65,41 @@ telemetry = RespanTelemetry(app_name="my-app", api_key="YOUR_RESPAN_API_KEY")
 agent = Agent('openai:gpt-4o')
 instrument_pydantic_ai(agent=agent)
 ```
+
+## Development
+
+### Setup
+
+Clone the repo and install the package with its local dependencies:
+
+```bash
+cd python-sdks/respan-exporter-pydantic-ai
+pip install -e ../respan-tracing -e .
+```
+
+### Running Tests
+
+**Unit tests** — verify instrumentation wiring without network calls:
+
+```bash
+pytest tests/test_instrument.py -v
+```
+
+**Integration test** — sends a real LLM call through Respan and verifies spans are captured. Requires API keys:
+
+```bash
+IS_REAL_GATEWAY_TESTING_ENABLED=1 \
+RESPAN_API_KEY="your-respan-key" \
+OPENAI_API_KEY="your-openai-key" \
+pytest tests/test_real_gateway_integration.py -v
+```
+
+The integration test is skipped by default. Set `IS_REAL_GATEWAY_TESTING_ENABLED=1` to opt in.
+
+**All tests:**
+
+```bash
+pytest tests/ -v
+```
+
+Integration tests auto-skip when env vars are not set, so this is always safe to run.
