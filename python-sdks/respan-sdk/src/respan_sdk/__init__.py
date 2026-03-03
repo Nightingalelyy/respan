@@ -30,7 +30,7 @@ from .utils.pre_processing import (
     validate_and_separate_log_and_llm_params,
 )
 
-__version__ = "1.0.0"
+__version__ = "2.5.0"
 
 __all__ = [
     # Public types (recommended)

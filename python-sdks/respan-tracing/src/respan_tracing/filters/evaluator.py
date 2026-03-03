@@ -7,6 +7,7 @@ Supports the same operator vocabulary as the Respan platform's FilterParamDict.
 import re
 import logging
 from typing import Any, Dict, Optional
+from respan_sdk import FilterParamDict
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +146,7 @@ def apply_operator(log_value: Any, operator_str: str, rule_value: Any) -> bool:
 
 def evaluate_export_filter(
     span_data: Dict[str, Any],
-    export_filter: Optional[Dict[str, Any]],
+    export_filter: Optional[FilterParamDict],
 ) -> bool:
     """Evaluate an export filter dict against span data.
 

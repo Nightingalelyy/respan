@@ -1,5 +1,6 @@
-from typing import Optional, Union, List, Dict, Any
+from typing import Optional, Union, List
 from opentelemetry.semconv_ai import TraceloopSpanKindValues
+from respan_sdk import FilterParamDict
 from .base import create_entity_method
 
 
@@ -8,7 +9,7 @@ def workflow(
     version: Optional[int] = None,
     method_name: Optional[str] = None,
     processors: Optional[Union[str, List[str]]] = None,
-    export_filter: Optional[Dict[str, Any]] = None,
+    export_filter: Optional[FilterParamDict] = None,
 ):
     """Respan workflow decorator
 
@@ -38,7 +39,7 @@ def task(
     version: Optional[int] = None,
     method_name: Optional[str] = None,
     processors: Optional[Union[str, List[str]]] = None,
-    export_filter: Optional[Dict[str, Any]] = None,
+    export_filter: Optional[FilterParamDict] = None,
 ):
     """Respan task decorator
 
@@ -68,7 +69,7 @@ def agent(
     version: Optional[int] = None,
     method_name: Optional[str] = None,
     processors: Optional[Union[str, List[str]]] = None,
-    export_filter: Optional[Dict[str, Any]] = None,
+    export_filter: Optional[FilterParamDict] = None,
 ):
     """Respan agent decorator
 
@@ -98,7 +99,7 @@ def tool(
     version: Optional[int] = None,
     method_name: Optional[str] = None,
     processors: Optional[Union[str, List[str]]] = None,
-    export_filter: Optional[Dict[str, Any]] = None,
+    export_filter: Optional[FilterParamDict] = None,
 ):
     """Respan tool decorator
 

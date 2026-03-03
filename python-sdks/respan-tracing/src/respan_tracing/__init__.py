@@ -5,6 +5,7 @@ from .contexts.span import respan_span_attributes
 from .instruments import Instruments
 from .utils.logging import get_respan_logger, get_main_logger
 from respan_sdk.respan_types.param_types import RespanParams
+from respan_sdk import FilterParamDict, MetricFilterParam, FilterBundle
 
 __all__ = [
     "RespanTelemetry",
@@ -17,6 +18,9 @@ __all__ = [
     "respan_span_attributes",
     "Instruments",
     "RespanParams",
+    "FilterParamDict",
+    "MetricFilterParam",
+    "FilterBundle",
     "get_respan_logger",
     "get_main_logger",
 ]

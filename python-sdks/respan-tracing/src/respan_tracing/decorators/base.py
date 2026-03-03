@@ -1,13 +1,14 @@
 import json
 import inspect
 from functools import wraps
-from typing import Optional, TypeVar, Callable, Any, Dict, ParamSpec, Awaitable
+from typing import Optional, TypeVar, Callable, Any, ParamSpec, Awaitable
 from opentelemetry import trace, context as context_api
 from opentelemetry.trace.status import Status, StatusCode
 from opentelemetry.semconv_ai import TraceloopSpanKindValues, SpanAttributes
 from respan_sdk.constants.llm_logging import (
     LogMethodChoices
 )
+from respan_sdk import FilterParamDict
 from respan_sdk.respan_types.span_types import RespanSpanAttributes
 from respan_tracing.core import RespanTracer
 from respan_tracing.constants.context_constants import (
@@ -43,7 +44,7 @@ def _setup_span(
     span_kind: str,
     version: Optional[int] = None,
     processors=None,
-    export_filter: Optional[Dict[str, Any]] = None,
+    export_filter: Optional[FilterParamDict] = None,
 ):
     """Setup OpenTelemetry span and context"""
     # Ensure span_kind is a string
@@ -169,7 +170,7 @@ def create_entity_method(
     method_name: Optional[str] = None,
     span_kind: str = "task",
     processors=None,
-    export_filter: Optional[Dict[str, Any]] = None,
+    export_filter: Optional[FilterParamDict] = None,
 ) -> Callable[[F], F]:
     """Create entity decorator for methods or classes"""
 
@@ -199,7 +200,7 @@ def _create_entity_method_decorator(
     version: Optional[int] = None,
     span_kind: str = "task",
     processors=None,
-    export_filter: Optional[Dict[str, Any]] = None,
+    export_filter: Optional[FilterParamDict] = None,
 ) -> Callable[[F], F]:
     """Create method decorator"""
 
@@ -297,7 +298,7 @@ def _create_entity_class(
     method_name: str,
     span_kind: str = "task",
     processors=None,
-    export_filter: Optional[Dict[str, Any]] = None,
+    export_filter: Optional[FilterParamDict] = None,
 ):
     """Create class decorator"""
 
