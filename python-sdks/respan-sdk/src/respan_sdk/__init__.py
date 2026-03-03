@@ -15,12 +15,22 @@ from .respan_types import (
     Usage,
 )
 
+from .respan_types.filter_types import (
+    MetricFilterParam,
+    FilterBundle,
+    FilterParamDict,
+    MetricFilterParamPydantic,
+    FilterBundlePydantic,
+    FilterParamDictPydantic,
+)
+from .respan_types.mixin_types.filter_mixin import MetricFilterValueType
+
 from .utils.pre_processing import (
     validate_and_separate_params,
     validate_and_separate_log_and_llm_params,
 )
 
-__version__ = "1.0.0"
+__version__ = "2.5.0"
 
 __all__ = [
     # Public types (recommended)
@@ -37,6 +47,15 @@ __all__ = [
     "Message",
     "Usage",
     
+    # Filter types
+    "MetricFilterParam",
+    "FilterBundle",
+    "FilterParamDict",
+    "MetricFilterValueType",
+    "MetricFilterParamPydantic",
+    "FilterBundlePydantic",
+    "FilterParamDictPydantic",
+
     # Utility functions
     "validate_and_separate_params",
     "validate_and_separate_log_and_llm_params",
