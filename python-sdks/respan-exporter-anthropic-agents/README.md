@@ -69,13 +69,13 @@ exporter = RespanAnthropicAgentsExporter(
 
 Runnable examples with full setup instructions:
 
-- **Python examples root:** [anthropic_agents_python_example](https://github.com/Keywords-AI/keywordsai-example-projects/tree/main/anthropic_agents_python_example)
+- **Python examples root:** [python/tracing/anthropic-agents-sdk](https://github.com/respanai/respan-example-projects/tree/main/python/tracing/anthropic-agents-sdk)
 - **Python basic scripts:**
-  - [hello_world.py](https://github.com/Keywords-AI/keywordsai-example-projects/blob/main/anthropic_agents_python_example/basic/hello_world.py)
-  - [wrapped_query.py](https://github.com/Keywords-AI/keywordsai-example-projects/blob/main/anthropic_agents_python_example/basic/wrapped_query.py)
-  - [tool_use.py](https://github.com/Keywords-AI/keywordsai-example-projects/blob/main/anthropic_agents_python_example/basic/tool_use.py)
-  - [gateway.py](https://github.com/Keywords-AI/keywordsai-example-projects/blob/main/anthropic_agents_python_example/basic/gateway.py)
-- **TypeScript examples root:** [anthropic_agents_typescript_example](https://github.com/Keywords-AI/keywordsai-example-projects/tree/main/anthropic_agents_typescript_example)
+  - [hello_world_test.py](https://github.com/respanai/respan-example-projects/blob/main/python/tracing/anthropic-agents-sdk/basic/hello_world_test.py)
+  - [wrapped_query_test.py](https://github.com/respanai/respan-example-projects/blob/main/python/tracing/anthropic-agents-sdk/basic/wrapped_query_test.py)
+  - [tool_use_test.py](https://github.com/respanai/respan-example-projects/blob/main/python/tracing/anthropic-agents-sdk/basic/tool_use_test.py)
+  - [gateway_test.py](https://github.com/respanai/respan-example-projects/blob/main/python/tracing/anthropic-agents-sdk/basic/gateway_test.py)
+- **TypeScript examples root:** [typescript/tracing/anthropic-agents-sdk](https://github.com/respanai/respan-example-projects/tree/main/typescript/tracing/anthropic-agents-sdk)
 
 ## Dev Guide
 

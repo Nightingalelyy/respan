@@ -64,13 +64,13 @@ const exporter = new RespanAnthropicAgentsExporter({
 
 Runnable examples with full setup instructions:
 
-- **TypeScript examples root:** [anthropic_agents_typescript_example](https://github.com/Keywords-AI/keywordsai-example-projects/tree/main/anthropic_agents_typescript_example)
+- **TypeScript examples root:** [typescript/tracing/anthropic-agents-sdk](https://github.com/respanai/respan-example-projects/tree/main/typescript/tracing/anthropic-agents-sdk)
 - **TypeScript basic scripts:**
-  - [hello_world.ts](https://github.com/Keywords-AI/keywordsai-example-projects/blob/main/anthropic_agents_typescript_example/hello_world.ts)
-  - [wrapped_query.ts](https://github.com/Keywords-AI/keywordsai-example-projects/blob/main/anthropic_agents_typescript_example/wrapped_query.ts)
-  - [tool_use.ts](https://github.com/Keywords-AI/keywordsai-example-projects/blob/main/anthropic_agents_typescript_example/tool_use.ts)
-  - [gateway.ts](https://github.com/Keywords-AI/keywordsai-example-projects/blob/main/anthropic_agents_typescript_example/gateway.ts)
-- **Python examples root:** [anthropic_agents_python_example](https://github.com/Keywords-AI/keywordsai-example-projects/tree/main/anthropic_agents_python_example)
+  - [hello_world_test.ts](https://github.com/respanai/respan-example-projects/blob/main/typescript/tracing/anthropic-agents-sdk/hello_world_test.ts)
+  - [wrapped_query_test.ts](https://github.com/respanai/respan-example-projects/blob/main/typescript/tracing/anthropic-agents-sdk/wrapped_query_test.ts)
+  - [tool_use_test.ts](https://github.com/respanai/respan-example-projects/blob/main/typescript/tracing/anthropic-agents-sdk/tool_use_test.ts)
+  - [gateway_test.ts](https://github.com/respanai/respan-example-projects/blob/main/typescript/tracing/anthropic-agents-sdk/gateway_test.ts)
+- **Python examples root:** [python/tracing/anthropic-agents-sdk](https://github.com/respanai/respan-example-projects/tree/main/python/tracing/anthropic-agents-sdk)
 
 ## Dev Guide
 
