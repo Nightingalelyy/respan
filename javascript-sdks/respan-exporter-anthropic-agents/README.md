@@ -49,10 +49,20 @@ const exporter = new RespanAnthropicAgentsExporter({
 
 ### Constructor Parameters
 
+Recommended pattern (matches the runnable examples):
+
 ```typescript
 const exporter = new RespanAnthropicAgentsExporter({
-  apiKey: "your_respan_key",                         // Overrides RESPAN_API_KEY
-  endpoint: "https://api.respan.ai/api/v1/traces/ingest", // Full ingest endpoint URL
+  apiKey: "your_respan_key", // Optional; falls back to RESPAN_API_KEY
+  endpoint: `${baseUrl}/api/v1/traces/ingest`, // Build from RESPAN_BASE_URL
+});
+```
+
+Advanced overrides:
+
+```typescript
+const exporter = new RespanAnthropicAgentsExporter({
+  endpoint: "https://custom-host/api/v1/traces/ingest", // Full ingest endpoint URL
   timeoutMs: 15000,
   maxRetries: 3,
   baseDelaySeconds: 1,

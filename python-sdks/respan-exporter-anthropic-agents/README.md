@@ -51,19 +51,34 @@ asyncio.run(main())
 
 ### Constructor Parameters
 
-All configuration can also be passed directly to the constructor (takes priority over environment variables):
+All configuration can also be passed directly to the constructor.
+
+Recommended pattern (matches the runnable examples):
 
 ```python
 exporter = RespanAnthropicAgentsExporter(
-    api_key="your_respan_key",       # Overrides RESPAN_API_KEY
-    base_url="https://api.respan.ai", # Overrides RESPAN_BASE_URL
-    endpoint="https://custom/ingest", # Full endpoint URL (overrides base_url)
+    api_key="your_respan_key",        # Optional; falls back to RESPAN_API_KEY
+    base_url="https://api.respan.ai", # Optional; falls back to RESPAN_BASE_URL
+)
+```
+
+Optional advanced override:
+
+```python
+exporter = RespanAnthropicAgentsExporter(
+    endpoint="https://custom-host/api/v1/traces/ingest",  # Full ingest URL
     timeout_seconds=15,
     max_retries=3,
     base_delay_seconds=1.0,
     max_delay_seconds=30.0,
 )
 ```
+
+Resolution order:
+- `api_key`: constructor `api_key` -> `RESPAN_API_KEY`
+- `endpoint`: constructor `endpoint` -> derived from constructor `base_url` -> derived from `RESPAN_BASE_URL`
+
+Note: if both `endpoint` and `base_url` are provided, `endpoint` takes precedence.
 
 ## Examples
 
