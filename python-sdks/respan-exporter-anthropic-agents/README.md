@@ -30,41 +30,15 @@ RESPAN_API_KEY=your_respan_key
 RESPAN_BASE_URL=https://api.respan.ai/api
 
 # Inference/proxy routing (Anthropic SDK)
-ANTHROPIC_BASE_URL=http://localhost:8000/api
+# Optional: set only if you use a custom proxy/gateway base URL
+# ANTHROPIC_BASE_URL=https://your-anthropic-base-url
 ANTHROPIC_API_KEY=your_inference_key
 ANTHROPIC_AUTH_TOKEN=your_inference_key
 ```
 
 `RESPAN_BASE_URL` controls telemetry export only. The exporter automatically appends `/api/v1/traces/ingest` to build the full ingest endpoint.
-
-### Constructor Parameters (Optional)
-
-All configuration can also be passed directly to the constructor.
-
-Recommended pattern (matches the runnable examples):
-
-```python
-exporter = RespanAnthropicAgentsExporter(
-    api_key="your_respan_key",        # Optional; falls back to RESPAN_API_KEY
-    base_url="https://api.respan.ai", # Optional; falls back to RESPAN_BASE_URL
-)
-```
-
-Local gateway/proxy override:
-
-```python
-exporter = RespanAnthropicAgentsExporter(
-    api_key="your_respan_key",
-    base_url="http://localhost:8000/api",
-)
-```
-
-Resolution order:
-- `api_key`: constructor `api_key` -> `RESPAN_API_KEY`
-- `endpoint`: constructor `endpoint` -> derived from constructor `base_url` -> derived from `RESPAN_BASE_URL`
-
-In normal usage you should set `base_url` (or `RESPAN_BASE_URL`) and let the exporter derive the ingest endpoint automatically.
-`endpoint` exists for internal/advanced cases and takes precedence over `base_url` if both are set.
+In normal usage, instantiate `RespanAnthropicAgentsExporter()` with no arguments and configure via environment variables.
+`ANTHROPIC_BASE_URL` is optional. If you use a gateway/proxy, set it to that gateway's Anthropic-compatible base URL.
 
 ## Quickstart
 
@@ -81,25 +55,25 @@ from respan_exporter_anthropic_agents.respan_anthropic_agents_exporter import (
 )
 
 respan_api_key = os.environ["RESPAN_API_KEY"]
-respan_base_url = os.getenv("RESPAN_BASE_URL", "https://api.respan.ai/api").rstrip("/")
-anthropic_base_url = os.getenv("ANTHROPIC_BASE_URL", f"{respan_base_url}/anthropic")
+anthropic_base_url = os.getenv("ANTHROPIC_BASE_URL")
 anthropic_api_key = os.getenv("ANTHROPIC_API_KEY", respan_api_key)
+anthropic_auth_token = os.getenv("ANTHROPIC_AUTH_TOKEN", anthropic_api_key)
 
-exporter = RespanAnthropicAgentsExporter(
-    api_key=respan_api_key,
-    base_url=respan_base_url,
-)
+exporter = RespanAnthropicAgentsExporter()
 
 async def main() -> None:
+    anthropic_env = {
+        "ANTHROPIC_API_KEY": anthropic_api_key,
+        "ANTHROPIC_AUTH_TOKEN": anthropic_auth_token,
+    }
+    if anthropic_base_url:
+        anthropic_env["ANTHROPIC_BASE_URL"] = anthropic_base_url
+
     options = exporter.with_options(
         options=ClaudeAgentOptions(
             allowed_tools=["Read", "Glob", "Grep"],
             permission_mode="acceptEdits",
-            env={
-                "ANTHROPIC_BASE_URL": anthropic_base_url,
-                "ANTHROPIC_API_KEY": anthropic_api_key,
-                "ANTHROPIC_AUTH_TOKEN": os.getenv("ANTHROPIC_AUTH_TOKEN", anthropic_api_key),
-            },
+            env=anthropic_env,
         )
     )
 

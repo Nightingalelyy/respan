@@ -31,51 +31,14 @@ RESPAN_API_KEY=your_respan_key
 RESPAN_BASE_URL=https://api.respan.ai/api
 
 # Inference/proxy routing (Anthropic SDK)
-ANTHROPIC_BASE_URL=http://localhost:8000/api
+# Optional: set only if you use a custom proxy/gateway base URL
+# ANTHROPIC_BASE_URL=https://your-anthropic-base-url
 ANTHROPIC_API_KEY=your_inference_key
 ANTHROPIC_AUTH_TOKEN=your_inference_key
 ```
 
-`RESPAN_BASE_URL` controls telemetry export only. To use it with the TypeScript exporter, pass it as the `endpoint` constructor param:
-
-```typescript
-const baseUrl = (process.env.RESPAN_BASE_URL ?? "https://api.respan.ai").replace(/\/+$/, "");
-const ingestEndpoint = baseUrl.endsWith("/api")
-  ? `${baseUrl}/v1/traces/ingest`
-  : `${baseUrl}/api/v1/traces/ingest`;
-
-const exporter = new RespanAnthropicAgentsExporter({
-  endpoint: ingestEndpoint,
-});
-```
-
-### Constructor Parameters (Optional)
-
-Recommended pattern (matches the runnable examples):
-
-```typescript
-const baseUrl = (process.env.RESPAN_BASE_URL ?? "https://api.respan.ai").replace(/\/+$/, "");
-const ingestEndpoint = baseUrl.endsWith("/api")
-  ? `${baseUrl}/v1/traces/ingest`
-  : `${baseUrl}/api/v1/traces/ingest`;
-
-const exporter = new RespanAnthropicAgentsExporter({
-  apiKey: "your_respan_key", // Optional; falls back to RESPAN_API_KEY
-  endpoint: ingestEndpoint, // Build from RESPAN_BASE_URL
-});
-```
-
-Advanced overrides:
-
-```typescript
-const exporter = new RespanAnthropicAgentsExporter({
-  endpoint: "https://custom-host/api/v1/traces/ingest", // Full ingest endpoint URL
-  timeoutMs: 15000,
-  maxRetries: 3,
-  baseDelaySeconds: 1,
-  maxDelaySeconds: 30,
-});
-```
+`RESPAN_BASE_URL` controls telemetry export only. In normal usage, instantiate `RespanAnthropicAgentsExporter()` with no arguments and configure via environment variables.
+`ANTHROPIC_BASE_URL` is optional. If you use a gateway/proxy, set it to that gateway's Anthropic-compatible base URL.
 
 ## Quickstart
 
@@ -87,25 +50,23 @@ Save this as `quickstart.ts`:
 import { RespanAnthropicAgentsExporter } from "@respan/exporter-anthropic-agents";
 
 const respanApiKey = process.env.RESPAN_API_KEY!;
-const respanBaseUrl = (process.env.RESPAN_BASE_URL ?? "https://api.respan.ai/api").replace(/\/+$/, "");
-const anthropicBaseUrl = process.env.ANTHROPIC_BASE_URL ?? `${respanBaseUrl}/anthropic`;
+const anthropicBaseUrl = process.env.ANTHROPIC_BASE_URL;
 const anthropicApiKey = process.env.ANTHROPIC_API_KEY ?? respanApiKey;
+const anthropicAuthToken = process.env.ANTHROPIC_AUTH_TOKEN ?? anthropicApiKey;
 
-const exporter = new RespanAnthropicAgentsExporter({
-  apiKey: respanApiKey,
-  endpoint: `${respanBaseUrl}/v1/traces/ingest`,
-});
+const exporter = new RespanAnthropicAgentsExporter();
+const anthropicEnv = {
+  ANTHROPIC_API_KEY: anthropicApiKey,
+  ANTHROPIC_AUTH_TOKEN: anthropicAuthToken,
+  ...(anthropicBaseUrl ? { ANTHROPIC_BASE_URL: anthropicBaseUrl } : {}),
+};
 
 for await (const message of exporter.query({
   prompt: "Review this repository and summarize architecture.",
   options: {
     allowedTools: ["Read", "Glob", "Grep"],
     permissionMode: "acceptEdits",
-    env: {
-      ANTHROPIC_BASE_URL: anthropicBaseUrl,
-      ANTHROPIC_API_KEY: anthropicApiKey,
-      ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN ?? anthropicApiKey,
-    },
+    env: anthropicEnv,
   },
 })) {
   console.log(message);
