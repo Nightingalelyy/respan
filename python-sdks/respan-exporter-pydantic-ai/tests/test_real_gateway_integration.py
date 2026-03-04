@@ -13,9 +13,15 @@ except ImportError:
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 
 from respan_exporter_pydantic_ai import instrument_pydantic_ai
-from respan_tracing import RespanTelemetry
+from respan_tracing import RespanTelemetry, workflow, task
 from respan_tracing.core.tracer import RespanTracer
 from respan_tracing.testing import InMemorySpanExporter
+
+# Optional: load .env for local runs (python-dotenv not required for package)
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None  # type: ignore[misc, assignment]
 
 REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..")
@@ -41,11 +47,8 @@ if PYTHON_SDK_SRC not in sys.path:
 
 def _load_env_from_dotenv() -> None:
     """Load optional dotenv files when python-dotenv is available."""
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
+    if load_dotenv is None:
         return
-
     repository_dotenv_path = os.path.join(REPO_ROOT, ".env")
     load_dotenv(dotenv_path=repository_dotenv_path, override=False)
     load_dotenv(override=False)
@@ -104,17 +107,26 @@ class RespanPydanticAIGatewayIntegrationTests(unittest.IsolatedAsyncioTestCase):
             SimpleSpanProcessor(span_exporter)
         )
 
-        openai_api_key = os.getenv("OPENAI_API_KEY")
-        if not openai_api_key:
-            self.skipTest("Set OPENAI_API_KEY for real integration test.")
+        # Use Respan gateway for LLM calls so only RESPAN_API_KEY is needed.
+        # Point OpenAI client at Respan gateway; auth with Respan key.
+        os.environ["OPENAI_BASE_URL"] = gateway_base_url
+        os.environ["OPENAI_API_KEY"] = respan_api_key
 
         configured_model = os.getenv("RESPAN_GATEWAY_MODEL") or "openai:gpt-4o-mini"
         agent = Agent(model=configured_model)
 
         instrument_pydantic_ai(agent=agent)
 
+        @task(name="agent_run")
+        async def run_agent():
+            return await agent.run("Reply with exactly \"gateway_ok\".")
+
+        @workflow(name="pydantic_ai_gateway_test")
+        async def run_workflow():
+            return await run_agent()
+
         try:
-            result = await agent.run('Reply with exactly "gateway_ok".')
+            result = await run_workflow()
 
             self.assertIsNotNone(
                 result.output,

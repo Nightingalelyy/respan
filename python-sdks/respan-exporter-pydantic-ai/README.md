@@ -1,105 +1,129 @@
 # Respan Exporter for Pydantic AI
 
-**[respan.ai](https://respan.ai)** | **[Documentation](https://docs.respan.ai)** | **[PyPI](https://pypi.org/project/respan-exporter-pydantic-ai/)**
+**[respan.ai](https://respan.ai)** · **[Documentation](https://docs.respan.ai)** · **[PyPI](https://pypi.org/project/respan-exporter-pydantic-ai/)**
 
-This package provides a Respan exporter for the [Pydantic AI](https://ai.pydantic.dev/) framework.
-It seamlessly instruments Pydantic AI's agents using OpenTelemetry underneath so that all traces, spans, and metrics
-are sent to Respan using standard semantic conventions.
+Instrument [Pydantic AI](https://ai.pydantic.dev/) agents with Respan: traces, spans, and metrics are sent to Respan via OpenTelemetry and standard semantic conventions. Requires [respan-tracing](https://pypi.org/project/respan-tracing/) (installed automatically).
 
-**Requirements:** This package requires [respan-tracing](https://pypi.org/project/respan-tracing/) for telemetry setup; it is installed automatically as a dependency. For a full install from PyPI: `pip install respan-exporter-pydantic-ai respan-tracing`.
+---
 
-## Installation
+## Configuration
+
+### Environment variables
+
+| Variable | Description |
+|----------|-------------|
+| `RESPAN_API_KEY` | Respan API key (used when `api_key` is not passed to `RespanTelemetry`) |
+| `RESPAN_BASE_URL` | Respan API base URL (default: `https://api.respan.ai/api`) |
+| `RESPAN_GATEWAY_BASE_URL` | Same as `RESPAN_BASE_URL`; use when routing LLM calls through Respan gateway |
+
+Example: `export RESPAN_API_KEY="your-respan-key"` so you don’t need to pass `api_key` in code.
+
+### RespanTelemetry
+
+Initialize once before calling `instrument_pydantic_ai()`:
+
+- `app_name` — Application name shown in Respan.
+- `api_key` — Optional if `RESPAN_API_KEY` is set.
+- `base_url` — Optional; overrides `RESPAN_BASE_URL`.
+- `is_enabled` — Set to `False` to disable tracing.
+- `is_batching_enabled` — Batch export (default: typically `True`); set `False` for immediate flush in tests.
+
+### instrument_pydantic_ai()
+
+| Argument | Description |
+|----------|-------------|
+| `agent` | Optional. If provided, only that agent is instrumented; if `None`, all agents are instrumented globally. |
+| `include_content` | Include message content in telemetry (default: `True`). |
+| `include_binary_content` | Include binary content in telemetry (default: `True`). |
+
+**Using Respan as LLM gateway** (no OpenAI key): set `OPENAI_BASE_URL` and `OPENAI_API_KEY` to your Respan gateway URL and Respan API key so Pydantic AI’s OpenAI client talks to Respan instead of OpenAI directly.
+
+---
+
+## Quickstart
 
 ```bash
 pip install respan-exporter-pydantic-ai
 ```
 
-(`respan-tracing` is installed automatically as a dependency.)
-
-## Configuration
-
-You can pass the Respan API key explicitly or use environment variables:
-
-| Option | Description |
-|--------|-------------|
-| `RESPAN_API_KEY` | API key for Respan (used when `api_key` is not passed to `RespanTelemetry`) |
-| `RESPAN_BASE_URL` | Optional; API base URL (default: `https://api.respan.ai/api`) |
-
-Example: `export RESPAN_API_KEY="your-respan-key"` so you don't need to pass `api_key` inline.
-
-## Usage
-
 ```python
-from pydantic_ai.agent import Agent
+from pydantic_ai import Agent
 from respan_tracing import RespanTelemetry
 from respan_exporter_pydantic_ai import instrument_pydantic_ai
 
-# 1. Initialize Respan Telemetry (required)
-# Pass api_key or set RESPAN_API_KEY in the environment
+# 1. Initialize Respan (pass api_key or set RESPAN_API_KEY)
 telemetry = RespanTelemetry(app_name="my-app", api_key="YOUR_RESPAN_API_KEY")
 
-# 2. Instrument Pydantic AI
+# 2. Instrument Pydantic AI (global: all agents)
 instrument_pydantic_ai()
 
-# 3. Create and use your Agent
-agent = Agent('openai:gpt-4o')
-
-result = agent.run_sync('What is the capital of France?')
+# 3. Use your agent
+agent = Agent("openai:gpt-4o")
+result = agent.run_sync("What is the capital of France?")
 print(result.output)
 ```
 
-**Tested with:** Pydantic AI 0.x using the `InstrumentationSettings` API (e.g. `version=2`). If you use an older Pydantic AI release, behavior may differ.
-
-## Instrumenting Specific Agents
-
-If you only want to instrument specific agents instead of globally, initialize Respan telemetry first, then instrument the agent:
+To instrument a single agent instead of globally:
 
 ```python
-from respan_tracing import RespanTelemetry
-from respan_exporter_pydantic_ai import instrument_pydantic_ai
-from pydantic_ai.agent import Agent
-
-# After initializing RespanTelemetry as shown above:
-telemetry = RespanTelemetry(app_name="my-app", api_key="YOUR_RESPAN_API_KEY")
-
-agent = Agent('openai:gpt-4o')
+agent = Agent("openai:gpt-4o")
 instrument_pydantic_ai(agent=agent)
 ```
 
-## Development
+---
+
+## Further reading
+
+- **Respan:** [respan.ai](https://respan.ai), [Documentation](https://docs.respan.ai)
+- **Pydantic AI:** [ai.pydantic.dev](https://ai.pydantic.dev/), [Models (OpenAI)](https://ai.pydantic.dev/models/openai/)
+- **respan-tracing:** [PyPI](https://pypi.org/project/respan-tracing/), [GitHub](https://github.com/respanai/respan) — decorators (`@workflow`, `@task`), manual spans, and export options
+- **OpenTelemetry:** [Semantic Conventions for LLM spans](https://opentelemetry.io/docs/semconv/ai/llm-spans/)
+
+---
+
+## Dev guide
 
 ### Setup
 
-Clone the repo and install the package with its local dependencies:
+From the repo root:
 
 ```bash
 cd python-sdks/respan-exporter-pydantic-ai
-pip install -e ../respan-tracing -e .
+poetry install
+# or: pip install -e ../respan-tracing -e .
 ```
 
-### Running Tests
+### Unit tests
 
-**Unit tests** — verify instrumentation wiring without network calls:
+No network; validates instrumentation wiring:
 
 ```bash
-pytest tests/test_instrument.py -v
+poetry run pytest tests/test_instrument.py -v
 ```
 
-**Integration test** — sends a real LLM call through Respan and verifies spans are captured. Requires API keys:
+### Integration test (real gateway)
+
+Sends a real LLM call through the Respan gateway and checks that spans (including a trace tree) are captured. Only `RESPAN_API_KEY` is required:
 
 ```bash
-IS_REAL_GATEWAY_TESTING_ENABLED=1 \
-RESPAN_API_KEY="your-respan-key" \
-OPENAI_API_KEY="your-openai-key" \
-pytest tests/test_real_gateway_integration.py -v
+IS_REAL_GATEWAY_TESTING_ENABLED=1 RESPAN_API_KEY="your-respan-key" \
+  poetry run pytest tests/test_real_gateway_integration.py -v -s
 ```
 
-The integration test is skipped by default. Set `IS_REAL_GATEWAY_TESTING_ENABLED=1` to opt in.
+Optional env: `RESPAN_GATEWAY_BASE_URL` or `RESPAN_BASE_URL` (default `https://api.respan.ai/api`), `RESPAN_GATEWAY_MODEL` (default `openai:gpt-4o-mini`). The test is skipped unless `IS_REAL_GATEWAY_TESTING_ENABLED=1`.
 
-**All tests:**
+### Run script (trace tree)
+
+Same gateway-only flow; produces a trace tree (workflow → task → LLM spans) on the Respan dashboard:
 
 ```bash
-pytest tests/ -v
+RESPAN_API_KEY="your-respan-key" poetry run python scripts/run_real_gateway_test.py
 ```
 
-Integration tests auto-skip when env vars are not set, so this is always safe to run.
+### All tests
+
+```bash
+poetry run pytest tests/ -v
+```
+
+Integration tests auto-skip when the required env vars are not set.
