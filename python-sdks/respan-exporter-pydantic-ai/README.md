@@ -127,7 +127,7 @@ IS_REAL_GATEWAY_TESTING_ENABLED=1 RESPAN_API_KEY="your-respan-key" \
   poetry run pytest tests/test_real_gateway_integration.py -v -s
 ```
 
-Optional env: `RESPAN_GATEWAY_BASE_URL` or `RESPAN_BASE_URL` (default `https://api.respan.ai`), `RESPAN_GATEWAY_MODEL` (default `openai:gpt-4o-mini`). The test is skipped unless `IS_REAL_GATEWAY_TESTING_ENABLED=1`.
+Optional env: `RESPAN_BASE_URL` (default `https://api.respan.ai`), `RESPAN_GATEWAY_MODEL` (default `openai:gpt-4o-mini`). The test is skipped unless `IS_REAL_GATEWAY_TESTING_ENABLED=1`.
 
 ### Run script (trace tree)
 

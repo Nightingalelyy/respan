@@ -15,11 +15,10 @@ from respan_exporter_pydantic_ai import instrument_pydantic_ai
 from respan_tracing import RespanTelemetry, workflow, task
 
 
-def _gateway_base_url() -> str:
+def _respan_base_url() -> str:
     raw = (
-        os.getenv("RESPAN_GATEWAY_BASE_URL")
-        or os.getenv("RESPAN_BASE_URL")
-        or "https://api.respan.ai/api"
+        os.getenv("RESPAN_BASE_URL")
+        or "https://api.respan.ai"
     )
     return raw.rstrip("/")
 
@@ -40,14 +39,14 @@ async def main() -> None:
         print("Error: Set RESPAN_API_KEY (used for both gateway and telemetry).")
         return
 
-    gateway_url = _gateway_base_url()
-    os.environ["OPENAI_BASE_URL"] = gateway_url
+    base_url = _respan_base_url()
+    os.environ["OPENAI_BASE_URL"] = f"{base_url}/api"
     os.environ["OPENAI_API_KEY"] = respan_api_key
 
     telemetry = RespanTelemetry(
         app_name="pydantic-ai-native-span-test",
         api_key=respan_api_key,
-        base_url=gateway_url,
+        base_url=base_url,
         is_enabled=True,
         is_batching_enabled=False,
     )

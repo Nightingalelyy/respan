@@ -32,12 +32,11 @@ def _load_env_from_dotenv() -> None:
     load_dotenv(override=False)
 
 
-def _resolve_gateway_base_url() -> str:
-    """Resolve base URL for gateway and exporter endpoint resolution."""
+def _resolve_base_url() -> str:
+    """Resolve Respan base URL (without /api suffix)."""
     raw_base_url = (
-        os.getenv("RESPAN_GATEWAY_BASE_URL")
-        or os.getenv("RESPAN_BASE_URL")
-        or "https://api.respan.ai/api"
+        os.getenv("RESPAN_BASE_URL")
+        or "https://api.respan.ai"
     )
     return raw_base_url.rstrip("/")
 
@@ -63,7 +62,7 @@ async def test_real_gateway_query_exports_payloads() -> None:
 
     RespanTracer.reset_instance()
 
-    gateway_base_url = _resolve_gateway_base_url()
+    base_url = _resolve_base_url()
 
     # Use InMemorySpanExporter to capture spans without depending on
     # the HTTP client used by the OTLP exporter.
@@ -72,7 +71,7 @@ async def test_real_gateway_query_exports_payloads() -> None:
     telemetry = RespanTelemetry(
         app_name="integration-test-pydantic-ai",
         api_key=respan_api_key,
-        base_url=gateway_base_url,
+        base_url=base_url,
         is_enabled=True,
         is_batching_enabled=False,
     )
@@ -85,7 +84,7 @@ async def test_real_gateway_query_exports_payloads() -> None:
 
     # Use Respan gateway for LLM calls so only RESPAN_API_KEY is needed.
     # Point OpenAI client at Respan gateway; auth with Respan key.
-    os.environ["OPENAI_BASE_URL"] = gateway_base_url
+    os.environ["OPENAI_BASE_URL"] = f"{base_url}/api"
     os.environ["OPENAI_API_KEY"] = respan_api_key
 
     configured_model = os.getenv("RESPAN_GATEWAY_MODEL") or "openai:gpt-4o-mini"
