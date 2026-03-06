@@ -88,12 +88,25 @@ def _convert_attribute_value(value: Any) -> Optional[Dict[str, Any]]:
     return {OTLP_STRING_VALUE: str(value)}
 
 
+# Attributes that duplicate data already captured in child spans.
+# pydantic_ai.all_messages — full conversation history on the parent "agent run"
+#   span; the same content is already in gen_ai.input/output.messages on each
+#   "chat <model>" child span.
+# logfire.json_schema — Pydantic-AI/Logfire internal metadata, not useful in Respan.
+_STRIPPED_ATTRIBUTES = frozenset({
+    "pydantic_ai.all_messages",
+    "logfire.json_schema",
+})
+
+
 def _convert_attributes(attributes: Any) -> List[Dict[str, Any]]:
     """Convert a mapping of attributes to OTLP JSON key-value list."""
     if not attributes:
         return []
     result = []
     for key, value in attributes.items():
+        if key in _STRIPPED_ATTRIBUTES:
+            continue
         converted = _convert_attribute_value(value)
         if converted is not None:
             result.append({OTLP_ATTR_KEY: str(key), OTLP_ATTR_VALUE: converted})
