@@ -18,7 +18,7 @@ from respan_tracing import RespanTelemetry, workflow, task
 def _respan_base_url() -> str:
     raw = (
         os.getenv("RESPAN_BASE_URL")
-        or "https://api.respan.ai"
+        or "https://api.respan.ai/api"
     )
     return raw.rstrip("/")
 
@@ -40,7 +40,7 @@ async def main() -> None:
         return
 
     base_url = _respan_base_url()
-    os.environ["OPENAI_BASE_URL"] = f"{base_url}/api"
+    os.environ["OPENAI_BASE_URL"] = base_url
     os.environ["OPENAI_API_KEY"] = respan_api_key
 
     telemetry = RespanTelemetry(

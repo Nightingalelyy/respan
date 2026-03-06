@@ -33,10 +33,10 @@ def _load_env_from_dotenv() -> None:
 
 
 def _resolve_base_url() -> str:
-    """Resolve Respan base URL (without /api suffix)."""
+    """Resolve Respan base URL."""
     raw_base_url = (
         os.getenv("RESPAN_BASE_URL")
-        or "https://api.respan.ai"
+        or "https://api.respan.ai/api"
     )
     return raw_base_url.rstrip("/")
 
@@ -84,7 +84,7 @@ async def test_real_gateway_query_exports_payloads() -> None:
 
     # Use Respan gateway for LLM calls so only RESPAN_API_KEY is needed.
     # Point OpenAI client at Respan gateway; auth with Respan key.
-    os.environ["OPENAI_BASE_URL"] = f"{base_url}/api"
+    os.environ["OPENAI_BASE_URL"] = base_url
     os.environ["OPENAI_API_KEY"] = respan_api_key
 
     configured_model = os.getenv("RESPAN_GATEWAY_MODEL") or "openai:gpt-4o-mini"
