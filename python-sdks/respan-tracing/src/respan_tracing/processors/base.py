@@ -1,5 +1,5 @@
 import json
-from typing import Optional, Callable, Dict, Any, List
+from typing import Optional, Callable, Dict, Any, List, Sequence
 from contextvars import ContextVar
 import logging
 
@@ -9,9 +9,11 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcess
 from opentelemetry.context import Context
 from opentelemetry.semconv_ai import SpanAttributes
 
-from respan_sdk.respan_types.span_types import RespanSpanAttributes
+from respan_sdk.respan_types.span_types import RespanSpanAttributes, SpanLink
+from respan_sdk.utils.data_processing.id_processing import format_span_id
+from respan_tracing.contexts.span import span_link_to_otel
 from respan_tracing.constants.generic_constants import SDK_PREFIX
-from respan_tracing.constants.tracing import EXPORT_FILTER_ATTR
+from respan_tracing.constants.tracing import EXPORT_FILTER_ATTR, SPAN_BUFFER_TRACER_NAME
 from respan_tracing.constants.context_constants import (
     TRACE_GROUP_ID_KEY,
     PARAMS_KEY
@@ -344,7 +346,8 @@ class SpanBuffer:
         self, 
         span_name: str, 
         attributes: Optional[Dict[str, Any]] = None,
-        kind: Optional[trace.SpanKind] = None
+        kind: Optional[trace.SpanKind] = None,
+        links: Optional[Sequence[SpanLink | trace.Link]] = None,
     ) -> str:
         """
         Create a span that goes to the local queue (not auto-exported).
@@ -353,17 +356,33 @@ class SpanBuffer:
             span_name: Name of the span
             attributes: Optional attributes to set on the span
             kind: Optional span kind (default: INTERNAL)
+            links: Optional list of SDK SpanLink or OpenTelemetry Link objects
         
         Returns:
             The span ID as a hex string
         """
-        tracer = trace.get_tracer("respan.span_buffer")
+        tracer = trace.get_tracer(SPAN_BUFFER_TRACER_NAME)
         
         # Set span kind
         span_kind = kind or trace.SpanKind.INTERNAL
+        otel_links: List[trace.Link] = []
+        for link in links or []:
+            if isinstance(link, SpanLink):
+                otel_links.append(span_link_to_otel(link))
+                continue
+            if isinstance(link, trace.Link):
+                otel_links.append(link)
+                continue
+            raise TypeError(
+                "links must contain SpanLink or opentelemetry.trace.Link instances"
+            )
         
         # Create span in context
-        with tracer.start_as_current_span(span_name, kind=span_kind) as span:
+        with tracer.start_as_current_span(
+            span_name,
+            kind=span_kind,
+            links=otel_links,
+        ) as span:
             # Set trace ID if we can (note: trace_id is already set by the tracer)
             # We just use the provided trace_id for logging/tracking purposes
             
@@ -378,7 +397,7 @@ class SpanBuffer:
                         )
             
             # Span goes to local queue when this context exits
-            span_id = format(span.get_span_context().span_id, '016x')
+            span_id = format_span_id(span.get_span_context().span_id)
             logger.debug(f"[SpanBuffer] Created span '{span_name}' with ID {span_id}")
             
         return span_id

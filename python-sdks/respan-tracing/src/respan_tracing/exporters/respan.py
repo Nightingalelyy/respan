@@ -10,6 +10,7 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.trace import StatusCode
 
 from respan_sdk.constants import RESPAN_DOGFOOD_HEADER
+from respan_sdk.utils.data_processing.id_processing import format_trace_id, format_span_id
 from respan_sdk.constants.otlp_constants import (
     OTLP_BOOL_VALUE,
     OTLP_INT_VALUE,
@@ -30,6 +31,11 @@ from respan_sdk.constants.otlp_constants import (
     OTLP_ATTRIBUTES_KEY,
     OTLP_STATUS_KEY,
     OTLP_EVENTS_KEY,
+    OTLP_LINKS_KEY,
+    OTLP_FLAGS_KEY,
+    OTLP_TRACE_STATE_KEY,
+    OTLP_DROPPED_ATTRIBUTES_COUNT_KEY,
+    OTLP_REMOTE_LINK_FLAG,
     OTLP_RESOURCE_SPANS_KEY,
     OTLP_SCOPE_SPANS_KEY,
     OTLP_RESOURCE_KEY,
@@ -117,8 +123,8 @@ def _span_to_otlp_json(span: ReadableSpan) -> Dict[str, Any]:
     """Convert a ReadableSpan (or ModifiedSpan) to OTLP JSON span dict."""
     ctx = span.get_span_context()
 
-    trace_id = format(ctx.trace_id, "032x") if ctx else ""
-    span_id = format(ctx.span_id, "016x") if ctx else ""
+    trace_id = format_trace_id(ctx.trace_id) if ctx else ""
+    span_id = format_span_id(ctx.span_id) if ctx else ""
 
     # Parent span ID
     parent_span_id = ""
@@ -126,7 +132,7 @@ def _span_to_otlp_json(span: ReadableSpan) -> Dict[str, Any]:
     if parent is not None:
         parent_sid = getattr(parent, "span_id", None)
         if parent_sid:
-            parent_span_id = format(parent_sid, "016x")
+            parent_span_id = format_span_id(parent_sid)
 
     # Timestamps as nanosecond strings
     start_time_ns = str(span.start_time) if span.start_time else "0"
@@ -163,6 +169,33 @@ def _span_to_otlp_json(span: ReadableSpan) -> Dict[str, Any]:
             event_dict[OTLP_ATTRIBUTES_KEY] = event_attrs
         events.append(event_dict)
 
+    links = []
+    for link in getattr(span, "links", ()) or ():
+        link_ctx = getattr(link, "context", None)
+        if link_ctx is None:
+            continue
+
+        link_dict = {
+            OTLP_TRACE_ID_KEY: format_trace_id(link_ctx.trace_id),
+            OTLP_SPAN_ID_KEY: format_span_id(link_ctx.span_id),
+            OTLP_ATTRIBUTES_KEY: _convert_attributes(getattr(link, "attributes", None)),
+            OTLP_FLAGS_KEY: int(link_ctx.trace_flags) | (
+                OTLP_REMOTE_LINK_FLAG if getattr(link_ctx, "is_remote", False) else 0
+            ),
+        }
+
+        trace_state = getattr(link_ctx, "trace_state", None)
+        if trace_state:
+            trace_state_header = trace_state.to_header()
+            if trace_state_header:
+                link_dict[OTLP_TRACE_STATE_KEY] = trace_state_header
+
+        dropped_attributes = getattr(link, "dropped_attributes", 0) or 0
+        if dropped_attributes:
+            link_dict[OTLP_DROPPED_ATTRIBUTES_COUNT_KEY] = dropped_attributes
+
+        links.append(link_dict)
+
     result = {
         OTLP_TRACE_ID_KEY: trace_id,
         OTLP_SPAN_ID_KEY: span_id,
@@ -179,6 +212,8 @@ def _span_to_otlp_json(span: ReadableSpan) -> Dict[str, Any]:
         result[OTLP_STATUS_KEY] = status_dict
     if events:
         result[OTLP_EVENTS_KEY] = events
+    if links:
+        result[OTLP_LINKS_KEY] = links
 
     return result
 
