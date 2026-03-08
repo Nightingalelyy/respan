@@ -1,15 +1,18 @@
-from typing import Any, Dict, Optional, Union
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, Generator, List, Optional, Union
 from opentelemetry import trace, context as context_api
 from opentelemetry.trace.span import Span
 from opentelemetry.trace import Status, StatusCode
 
-from respan_sdk.respan_types.span_types import RESPAN_SPAN_ATTRIBUTES_MAP, RespanSpanAttributes
+from respan_sdk import FilterParamDict
+from respan_sdk.respan_types.span_types import RESPAN_SPAN_ATTRIBUTES_MAP, RespanSpanAttributes, SpanLink
 from respan_sdk.respan_types.param_types import RespanParams
 from pydantic import ValidationError
 
 from .tracer import RespanTracer
 from ..processors import SpanBuffer
 from ..utils.logging import get_respan_logger
+from ..utils.span_setup import setup_span, cleanup_span, LinksParam
 
 
 from ..constants.generic_constants import LOGGER_NAME_CLIENT
@@ -299,7 +302,85 @@ class RespanClient:
             ```
         """
         return self._tracer.get_tracer()
-    
+
+    @contextmanager
+    def start_span(
+        self,
+        name: str,
+        kind: str = "task",
+        processors: Optional[Union[str, List[str]]] = None,
+        export_filter: Optional[FilterParamDict] = None,
+        links: LinksParam = None,
+        version: Optional[int] = None,
+    ) -> Generator[Span, None, None]:
+        """
+        Context manager for creating spans with full Respan metadata.
+
+        This is the imperative equivalent of the @workflow/@task/@agent/@tool
+        decorators. Use it when the span name or kind must be determined at
+        runtime (e.g., dynamic task loops).
+
+        Handles all the same concerns as the decorators:
+        - ``processors`` attribute for FilteringSpanProcessor routing
+        - ``TRACELOOP_ENTITY_NAME`` attribute and OTel context propagation
+        - ``TRACELOOP_WORKFLOW_NAME`` inheritance for child spans
+        - Span links (static list or callable)
+        - Error recording and status propagation
+
+        Args:
+            name: Span name (equivalent to the decorator ``name`` parameter).
+            kind: Span kind — ``"workflow"``, ``"task"``, ``"agent"``, or
+                ``"tool"``. Controls context propagation behavior (workflow/agent
+                kinds propagate entity name to children). Defaults to ``"task"``.
+            processors: Processor name(s) to route this span to (e.g.,
+                ``"dogfood"`` or ``["dogfood", "debug"]``).
+            export_filter: Optional filter dict for conditional export.
+            links: Span links — a list of ``SpanLink`` objects or a callable
+                returning one.
+            version: Optional version number.
+
+        Yields:
+            The active ``Span`` object.
+
+        Example:
+            ```python
+            from respan_tracing import get_client
+
+            client = get_client()
+
+            # Imperative workflow span with processor routing
+            with client.start_span("workflow_execution", kind="workflow", processors="dogfood") as span:
+                span.set_attribute("workflow_count", 3)
+
+                # Child spans inherit workflow_name automatically
+                with client.start_span("step_1", kind="task", processors="dogfood") as task_span:
+                    task_span.set_attribute("task_type", "condition")
+                    # ... execute task ...
+            ```
+        """
+        if not self._tracer.is_enabled or not RespanTracer.is_initialized():
+            logger.warning("Respan Telemetry not initialized or disabled.")
+            yield None
+            return
+
+        span, ctx_token, entity_name_token, entity_path_token = setup_span(
+            entity_name=name,
+            span_kind=kind,
+            version=version,
+            processors=processors,
+            export_filter=export_filter,
+            links=links,
+        )
+
+        try:
+            yield span
+        except Exception as e:
+            span.set_status(Status(StatusCode.ERROR, str(e)))
+            span.record_exception(e)
+            raise
+        finally:
+            cleanup_span(span, ctx_token, entity_name_token, entity_path_token)
+
     def get_span_buffer(self, trace_id: str) -> SpanBuffer:
         """
         Get an OpenTelemetry-compliant context manager for buffering spans with manual export control.
