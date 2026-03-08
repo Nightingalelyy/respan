@@ -1586,3 +1586,112 @@ else:
 - ✅ **Thread-safe isolation**: Uses context variables for proper isolation
 
 See [`examples/span_buffer_example.py`](examples/span_buffer_example.py) for complete working examples.
+
+### Span Links on Decorators
+
+*New in v2.5.0*
+
+Span links create non-hierarchical relationships between spans — unlike parent-child, they connect spans across traces without implying causation. Common use cases include pause/resume workflows, fan-in/fan-out patterns, and batch processing.
+
+All four decorators (`@workflow`, `@task`, `@agent`, `@tool`) support a `links` parameter, and the `attach_span_links()` API lets callers attach links without modifying the decorated function.
+
+#### Static Links
+
+Pass links known at definition time:
+
+```python
+from respan_tracing import task, SpanLink
+
+@task(links=[SpanLink(
+    trace_id="0123456789abcdef0123456789abcdef",
+    span_id="0123456789abcdef",
+    attributes={"link.type": "reference"},
+)])
+def my_task():
+    return "ok"
+```
+
+#### Dynamic Links (Callable)
+
+Pass a callable that resolves links at each invocation:
+
+```python
+from respan_tracing import workflow, SpanLink
+
+def get_resume_links():
+    # Load trace/span IDs from database, message queue, etc.
+    return [SpanLink(
+        trace_id=load_saved_trace_id(),
+        span_id=load_saved_span_id(),
+        attributes={"link.type": "resume"},
+    )]
+
+@workflow(name="workflow_execution", links=get_resume_links)
+def execute():
+    ...
+```
+
+The callable is invoked fresh on every call, so each execution gets its own links.
+
+#### Context-Based Links (`attach_span_links`)
+
+The most ergonomic pattern — decouples link producers from span consumers:
+
+```python
+from respan_tracing import workflow, attach_span_links, SpanLink
+
+@workflow(name="workflow_execution")
+def execute():
+    ...
+
+# Caller attaches links before invoking the decorated function
+attach_span_links([SpanLink(
+    trace_id=saved_trace_id,
+    span_id=saved_span_id,
+    attributes={"link.type": "resume"},
+)])
+execute()  # Decorator picks up and consumes the links
+```
+
+Links attached via `attach_span_links()` are consumed once — the next decorated span picks them up and clears them. Subsequent calls won't see stale links.
+
+#### Merging Links
+
+Explicit `links=` parameter and context-attached links are merged:
+
+```python
+@task(links=[static_link])
+def my_task():
+    ...
+
+attach_span_links([context_link])
+my_task()  # Span gets both static_link AND context_link
+```
+
+#### Cross-Session Linking (Pause/Resume)
+
+Span links are just metadata — two hex string IDs. The linked span doesn't need to exist in memory. For workflows that pause and resume across processes or sessions, persist the IDs and reconstruct the link:
+
+```python
+# Session 1: Workflow pauses — save span context
+client = get_client()
+trace_id = client.get_current_trace_id()
+span_id = client.get_current_span_id()
+save_to_db(trace_id=trace_id, span_id=span_id)
+
+# Session 2: Workflow resumes — load and link
+saved = load_from_db()
+attach_span_links([SpanLink(
+    trace_id=saved["trace_id"],
+    span_id=saved["span_id"],
+    attributes={"link.type": "resume"},
+)])
+
+@workflow(name="workflow_execution")
+def execute():
+    ...  # New trace, but linked back to the paused trace
+
+execute()
+```
+
+The backend resolves the link by matching IDs across stored spans and renders the relationship in the trace UI.
