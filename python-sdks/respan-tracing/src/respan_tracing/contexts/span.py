@@ -1,7 +1,7 @@
 from contextlib import contextmanager
 import logging
-from typing import Any, Dict, Union
-from opentelemetry import trace
+from typing import Any, Dict, List, Union
+from opentelemetry import trace, context as context_api
 from opentelemetry.trace.span import Span
 from pydantic import ValidationError
 from respan_sdk.respan_types.span_types import (
@@ -19,8 +19,9 @@ from respan_tracing.utils.logging import get_respan_logger
 
 
 from ..constants.generic_constants import LOGGER_NAME_SPAN
+from ..constants.context_constants import PENDING_SPAN_LINKS_KEY
 
-__all__ = ["SpanLink", "span_link_to_otel", "respan_span_attributes"]
+__all__ = ["SpanLink", "span_link_to_otel", "respan_span_attributes", "attach_span_links"]
 
 logger = get_respan_logger(LOGGER_NAME_SPAN)
 
@@ -41,6 +42,39 @@ def span_link_to_otel(link: SpanLink) -> trace.Link:
         trace_state=trace.TraceState(),
     )
     return trace.Link(context=span_context, attributes=link.attributes)
+
+
+def attach_span_links(links: List[SpanLink]) -> None:
+    """Attach span links to the current OTel context for the next decorated span.
+
+    Links stored via this function are consumed (cleared) when the next
+    decorator-created span starts. This decouples link producers from span
+    consumers — any caller can attach links without the decorated function
+    needing to know.
+
+    Args:
+        links: List of SpanLink objects to attach to the next span.
+    """
+    if not links:
+        return
+    # Merge with any previously attached links in this context
+    existing = context_api.get_value(PENDING_SPAN_LINKS_KEY) or []
+    merged = list(existing) + list(links)
+    context_api.attach(context_api.set_value(PENDING_SPAN_LINKS_KEY, merged))
+
+
+def consume_span_links() -> List[trace.Link]:
+    """Read and clear pending span links from the OTel context.
+
+    Returns converted OTel Link objects. Clears the context key so links
+    are only consumed once.
+    """
+    pending: List[SpanLink] = context_api.get_value(PENDING_SPAN_LINKS_KEY) or []
+    if not pending:
+        return []
+    # Clear pending links from context
+    context_api.attach(context_api.set_value(PENDING_SPAN_LINKS_KEY, None))
+    return [span_link_to_otel(link) for link in pending]
 
 
 @contextmanager

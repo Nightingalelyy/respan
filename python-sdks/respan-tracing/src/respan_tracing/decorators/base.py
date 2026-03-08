@@ -1,7 +1,7 @@
 import json
 import inspect
 from functools import wraps
-from typing import Optional, TypeVar, Callable, Any, ParamSpec, Awaitable
+from typing import Optional, TypeVar, Callable, Any, List, ParamSpec, Awaitable, Union
 from opentelemetry import trace, context as context_api
 from opentelemetry.trace.status import Status, StatusCode
 from opentelemetry.semconv_ai import TraceloopSpanKindValues, SpanAttributes
@@ -9,14 +9,17 @@ from respan_sdk.constants.llm_logging import (
     LogMethodChoices
 )
 from respan_sdk import FilterParamDict
-from respan_sdk.respan_types.span_types import RespanSpanAttributes
+from respan_sdk.respan_types.span_types import RespanSpanAttributes, SpanLink
 from respan_tracing.core import RespanTracer
+from respan_tracing.contexts.span import span_link_to_otel, consume_span_links
 from respan_tracing.constants.context_constants import (
     WORKFLOW_NAME_KEY,
     ENTITY_PATH_KEY,
     ENABLE_CONTENT_TRACING_KEY
 )
 from respan_tracing.constants.tracing import EXPORT_FILTER_ATTR
+
+LinksParam = Optional[Union[List[SpanLink], Callable[[], List[SpanLink]]]]
 
 
 P = ParamSpec("P")
@@ -45,6 +48,7 @@ def _setup_span(
     version: Optional[int] = None,
     processors=None,
     export_filter: Optional[FilterParamDict] = None,
+    links: LinksParam = None,
 ):
     """Setup OpenTelemetry span and context"""
     # Ensure span_kind is a string
@@ -68,10 +72,19 @@ def _setup_span(
         entity_path = f"{entity_path}.{entity_name}" if entity_path else entity_name
         context_api.attach(context_api.set_value(SpanAttributes.TRACELOOP_ENTITY_PATH, entity_path))
 
+    # Resolve span links: explicit param + context-attached
+    otel_links: List[trace.Link] = []
+    # 1. Resolve explicit links param (static list or callable)
+    explicit_links = links() if callable(links) else (links or [])
+    for link in explicit_links:
+        otel_links.append(span_link_to_otel(link))
+    # 2. Consume context-attached links (from attach_span_links())
+    otel_links.extend(consume_span_links())
+
     # Get tracer and start span
     tracer = RespanTracer().get_tracer()
     span_name = f"{entity_name}.{span_kind_str}"
-    span = tracer.start_span(span_name)
+    span = tracer.start_span(span_name, links=otel_links or None)
 
     # Set span attributes
     span.set_attribute(SpanAttributes.TRACELOOP_SPAN_KIND, span_kind_str)
@@ -171,6 +184,7 @@ def create_entity_method(
     span_kind: str = "task",
     processors=None,
     export_filter: Optional[FilterParamDict] = None,
+    links: LinksParam = None,
 ) -> Callable[[F], F]:
     """Create entity decorator for methods or classes"""
 
@@ -183,6 +197,7 @@ def create_entity_method(
             span_kind=span_kind,
             processors=processors,
             export_filter=export_filter,
+            links=links,
         )
     else:
         # Method decorator
@@ -192,6 +207,7 @@ def create_entity_method(
             span_kind=span_kind,
             processors=processors,
             export_filter=export_filter,
+            links=links,
         )
 
 
@@ -201,6 +217,7 @@ def _create_entity_method_decorator(
     span_kind: str = "task",
     processors=None,
     export_filter: Optional[FilterParamDict] = None,
+    links: LinksParam = None,
 ) -> Callable[[F], F]:
     """Create method decorator"""
 
@@ -218,6 +235,7 @@ def _create_entity_method_decorator(
                         version=version,
                         processors=processors,
                         export_filter=export_filter,
+                        links=links,
                     )
                     _handle_span_input(span, args, kwargs)
 
@@ -242,6 +260,7 @@ def _create_entity_method_decorator(
                         version=version,
                         processors=processors,
                         export_filter=export_filter,
+                        links=links,
                     )
                     _handle_span_input(span, args, kwargs)
 
@@ -267,6 +286,7 @@ def _create_entity_method_decorator(
                     version=version,
                     processors=processors,
                     export_filter=export_filter,
+                    links=links,
                 )
                 _handle_span_input(span, args, kwargs)
 
@@ -299,6 +319,7 @@ def _create_entity_class(
     span_kind: str = "task",
     processors=None,
     export_filter: Optional[FilterParamDict] = None,
+    links: LinksParam = None,
 ):
     """Create class decorator"""
 
@@ -315,6 +336,7 @@ def _create_entity_class(
             span_kind=span_kind,
             processors=processors,
             export_filter=export_filter,
+            links=links,
         )(original_method)
 
         # Replace the method

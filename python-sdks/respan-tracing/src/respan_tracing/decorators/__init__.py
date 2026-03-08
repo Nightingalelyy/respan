@@ -1,7 +1,8 @@
-from typing import Optional, Union, List
+from typing import Optional, Union, List, Callable
 from opentelemetry.semconv_ai import TraceloopSpanKindValues
 from respan_sdk import FilterParamDict
-from .base import create_entity_method
+from respan_sdk.respan_types.span_types import SpanLink
+from .base import create_entity_method, LinksParam
 
 
 def workflow(
@@ -10,6 +11,7 @@ def workflow(
     method_name: Optional[str] = None,
     processors: Optional[Union[str, List[str]]] = None,
     export_filter: Optional[FilterParamDict] = None,
+    links: LinksParam = None,
 ):
     """Respan workflow decorator
 
@@ -23,6 +25,8 @@ def workflow(
                       Uses AND logic — all conditions must match. Each key is a span attribute
                       name mapping to {"operator": str, "value": any}.
                       Example: {"status_code": {"operator": "", "value": "ERROR"}}
+        links: Optional span links. Can be a list of SpanLink objects (static) or a
+               callable returning a list of SpanLink objects (resolved at call time).
     """
     return create_entity_method(
         name=name,
@@ -31,6 +35,7 @@ def workflow(
         span_kind=TraceloopSpanKindValues.WORKFLOW,
         processors=processors,
         export_filter=export_filter,
+        links=links,
     )
 
 
@@ -40,6 +45,7 @@ def task(
     method_name: Optional[str] = None,
     processors: Optional[Union[str, List[str]]] = None,
     export_filter: Optional[FilterParamDict] = None,
+    links: LinksParam = None,
 ):
     """Respan task decorator
 
@@ -53,6 +59,8 @@ def task(
                       Uses AND logic — all conditions must match. Each key is a span attribute
                       name mapping to {"operator": str, "value": any}.
                       Example: {"status_code": {"operator": "", "value": "ERROR"}}
+        links: Optional span links. Can be a list of SpanLink objects (static) or a
+               callable returning a list of SpanLink objects (resolved at call time).
     """
     return create_entity_method(
         name=name,
@@ -61,6 +69,7 @@ def task(
         span_kind=TraceloopSpanKindValues.TASK,
         processors=processors,
         export_filter=export_filter,
+        links=links,
     )
 
 
@@ -70,6 +79,7 @@ def agent(
     method_name: Optional[str] = None,
     processors: Optional[Union[str, List[str]]] = None,
     export_filter: Optional[FilterParamDict] = None,
+    links: LinksParam = None,
 ):
     """Respan agent decorator
 
@@ -83,6 +93,8 @@ def agent(
                       Uses AND logic — all conditions must match. Each key is a span attribute
                       name mapping to {"operator": str, "value": any}.
                       Example: {"status_code": {"operator": "", "value": "ERROR"}}
+        links: Optional span links. Can be a list of SpanLink objects (static) or a
+               callable returning a list of SpanLink objects (resolved at call time).
     """
     return create_entity_method(
         name=name,
@@ -91,6 +103,7 @@ def agent(
         span_kind=TraceloopSpanKindValues.AGENT,
         processors=processors,
         export_filter=export_filter,
+        links=links,
     )
 
 
@@ -100,6 +113,7 @@ def tool(
     method_name: Optional[str] = None,
     processors: Optional[Union[str, List[str]]] = None,
     export_filter: Optional[FilterParamDict] = None,
+    links: LinksParam = None,
 ):
     """Respan tool decorator
 
@@ -113,6 +127,8 @@ def tool(
                       Uses AND logic — all conditions must match. Each key is a span attribute
                       name mapping to {"operator": str, "value": any}.
                       Example: {"status_code": {"operator": "", "value": "ERROR"}}
+        links: Optional span links. Can be a list of SpanLink objects (static) or a
+               callable returning a list of SpanLink objects (resolved at call time).
     """
     return create_entity_method(
         name=name,
@@ -121,4 +137,5 @@ def tool(
         span_kind=TraceloopSpanKindValues.TOOL,
         processors=processors,
         export_filter=export_filter,
+        links=links,
     )
