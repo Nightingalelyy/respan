@@ -179,12 +179,8 @@ class BufferingSpanProcessor(SpanProcessor):
         buffer = _active_span_buffer.get()
         
         if buffer is not None and buffer._is_buffering:
-            # Route to the buffer's local queue
-            logger.debug(
-                f"[SpanBuffer] Buffering span '{span.name}' "
-                f"for trace {buffer.trace_id}"
-            )
-            buffer._local_queue.append(span)
+            # Route to the buffer's local queue (deduplicated)
+            buffer.buffer_span(span)
         else:
             # No active buffer - use original processor (normal export)
             self.original_processor.on_end(span)
@@ -295,6 +291,7 @@ class SpanBuffer:
         """
         self.trace_id = trace_id
         self._local_queue: List[ReadableSpan] = []
+        self._seen_span_ids: set = set()
         self._is_buffering = False
         self._context_token = None
         self._tracer_provider = tracer_provider
@@ -406,10 +403,39 @@ class SpanBuffer:
             
         return span_id
     
+    def buffer_span(self, span: ReadableSpan) -> bool:
+        """
+        Add a span to the buffer, deduplicating by span_id.
+
+        Multiple BufferingSpanProcessor instances (one per processor chain)
+        all intercept on_end() and share this buffer via the ContextVar.
+        Without dedup, each processor adds the same span → N copies.
+
+        Args:
+            span: The span to buffer
+
+        Returns:
+            True if the span was added, False if it was a duplicate.
+        """
+        span_id = span.get_span_context().span_id
+        if span_id in self._seen_span_ids:
+            logger.debug(
+                f"[SpanBuffer] Skipping duplicate span '{span.name}' "
+                f"(span_id={format_span_id(span_id)}) for trace {self.trace_id}"
+            )
+            return False
+        self._seen_span_ids.add(span_id)
+        self._local_queue.append(span)
+        logger.debug(
+            f"[SpanBuffer] Buffering span '{span.name}' "
+            f"for trace {self.trace_id}"
+        )
+        return True
+
     def get_all_spans(self) -> List[ReadableSpan]:
         """
         Get all spans from the local queue.
-        
+
         Returns:
             List of all buffered spans
         """
@@ -460,11 +486,12 @@ class SpanBuffer:
     def clear_spans(self):
         """
         Clear all spans from the local queue without exporting.
-        
+
         Useful for discarding buffered spans if you decide not to export them.
         """
         span_count = len(self._local_queue)
         self._local_queue.clear()
+        self._seen_span_ids.clear()
         logger.debug(f"[SpanBuffer] Cleared {span_count} spans from queue")
     
     def get_span_count(self) -> int:

@@ -101,5 +101,97 @@ class TestSpanBufferAutoFlush:
         assert flush_order == [("process", False)]
 
 
+class TestSpanBufferDedup:
+    """Tests for SpanBuffer deduplication.
+
+    The bug: N BufferingSpanProcessor instances (one per processor chain) all
+    share the same SpanBuffer via ContextVar. Each one calls buffer.buffer_span()
+    when a span ends. Without dedup, the same span gets appended N times,
+    causing N duplicate exports on replay.
+    """
+
+    def test_buffer_span_deduplicates_by_span_id(self):
+        """Same span appended multiple times → only first is kept."""
+        buffer = SpanBuffer(trace_id="trace-dedup")
+        buffer.__enter__()
+
+        mock_span = MagicMock()
+        mock_span.get_span_context.return_value.span_id = 0xDEADBEEF
+        mock_span.name = "test_span"
+
+        assert buffer.buffer_span(mock_span) is True
+        assert buffer.buffer_span(mock_span) is False
+        assert buffer.buffer_span(mock_span) is False
+        assert buffer.get_span_count() == 1
+
+        buffer.__exit__(None, None, None)
+
+    def test_different_spans_not_deduped(self):
+        """Spans with different span_ids are all kept."""
+        buffer = SpanBuffer(trace_id="trace-multi")
+        buffer.__enter__()
+
+        spans = []
+        for i in range(5):
+            mock_span = MagicMock()
+            mock_span.get_span_context.return_value.span_id = i + 1
+            mock_span.name = f"span_{i}"
+            spans.append(mock_span)
+            assert buffer.buffer_span(mock_span) is True
+
+        assert buffer.get_span_count() == 5
+        buffer.__exit__(None, None, None)
+
+    def test_clear_spans_resets_dedup_tracking(self):
+        """After clear_spans(), the same span_id can be buffered again."""
+        buffer = SpanBuffer(trace_id="trace-clear")
+
+        mock_span = MagicMock()
+        mock_span.get_span_context.return_value.span_id = 0xCAFE
+        mock_span.name = "test_span"
+
+        buffer.buffer_span(mock_span)
+        assert buffer.get_span_count() == 1
+
+        buffer.clear_spans()
+        assert buffer.get_span_count() == 0
+
+        assert buffer.buffer_span(mock_span) is True
+        assert buffer.get_span_count() == 1
+
+    def test_multiple_processors_single_buffer(self):
+        """Simulate N BufferingSpanProcessors sharing one buffer via ContextVar.
+
+        This is the exact scenario that caused the 3x duplicate root spans:
+        3 processor chains → 3 BufferingSpanProcessor instances → each calls
+        buffer.buffer_span() → only the first should succeed.
+        """
+        from respan_tracing.processors.base import (
+            BufferingSpanProcessor,
+            _active_span_buffer,
+        )
+
+        # Create 3 processors (simulating production/debug/dogfood chains)
+        processors = [
+            BufferingSpanProcessor(MagicMock()) for _ in range(3)
+        ]
+
+        buffer = SpanBuffer(trace_id="trace-multi-proc")
+        buffer.__enter__()
+
+        # Create a span that ends → all 3 processors call on_end
+        mock_span = MagicMock()
+        mock_span.get_span_context.return_value.span_id = 0xBEEF
+        mock_span.name = "root_span"
+
+        for proc in processors:
+            proc.on_end(mock_span)
+
+        # Only 1 copy should be in the buffer, not 3
+        assert buffer.get_span_count() == 1
+
+        buffer.__exit__(None, None, None)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
