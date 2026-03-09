@@ -11,6 +11,9 @@ from respan_sdk.constants.otlp_constants import (
     OTLP_STRING_VALUE,
     OTLP_TRACE_ID_KEY,
 )
+from respan_sdk.respan_types.span_types import RespanSpanAttributes
+
+LINK_TIMESTAMP_ATTR = RespanSpanAttributes.LINK_TIMESTAMP.value
 from respan_tracing import RespanTelemetry, SpanLink, span_link_to_otel, get_client
 from respan_tracing.core.tracer import RespanTracer
 from respan_tracing.exporters.respan import _span_to_otlp_json
@@ -168,3 +171,41 @@ def test_otlp_json_serializes_span_links(clean_exporter):
         for item in link_payload["attributes"]
     }
     assert serialized_attributes == {"link.type": "resume"}
+
+
+def test_span_link_timestamp_merged_into_attributes():
+    """SpanLink.timestamp should be auto-merged into OTel link attributes."""
+    link = SpanLink(
+        trace_id="a" * 32,
+        span_id="b" * 16,
+        attributes={"link.type": "resume"},
+        timestamp="2026-03-08T12:00:00Z",
+    )
+    otel_link = span_link_to_otel(link)
+    assert otel_link.attributes[LINK_TIMESTAMP_ATTR] == "2026-03-08T12:00:00Z"
+    assert otel_link.attributes["link.type"] == "resume"
+
+
+def test_span_link_no_timestamp_no_extra_attribute():
+    """SpanLink without timestamp should not add respan.link.timestamp."""
+    link = SpanLink(
+        trace_id="a" * 32,
+        span_id="b" * 16,
+        attributes={"link.type": "resume"},
+    )
+    otel_link = span_link_to_otel(link)
+    assert LINK_TIMESTAMP_ATTR not in otel_link.attributes
+    assert otel_link.attributes == {"link.type": "resume"}
+
+
+def test_span_link_timestamp_does_not_mutate_original_attributes():
+    """Merging timestamp must not mutate the original SpanLink.attributes dict."""
+    original_attrs = {"link.type": "resume"}
+    link = SpanLink(
+        trace_id="a" * 32,
+        span_id="b" * 16,
+        attributes=original_attrs,
+        timestamp="2026-03-08T12:00:00Z",
+    )
+    span_link_to_otel(link)
+    assert LINK_TIMESTAMP_ATTR not in original_attrs

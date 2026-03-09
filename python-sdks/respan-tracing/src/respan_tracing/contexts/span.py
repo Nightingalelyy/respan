@@ -9,6 +9,7 @@ from respan_sdk.respan_types.span_types import (
     RespanSpanAttributes,
     SpanLink,
 )
+LINK_TIMESTAMP_ATTR = RespanSpanAttributes.LINK_TIMESTAMP.value
 from respan_sdk.respan_types.param_types import RespanParams
 from respan_sdk.utils.data_processing.id_processing import (
     SPAN_ID_HEX_LENGTH,
@@ -41,7 +42,11 @@ def span_link_to_otel(link: SpanLink) -> trace.Link:
         trace_flags=trace_flags,
         trace_state=trace.TraceState(),
     )
-    return trace.Link(context=span_context, attributes=link.attributes)
+    # Merge timestamp into attributes if provided (enables efficient CH lookups)
+    attrs = dict(link.attributes)
+    if link.timestamp:
+        attrs[LINK_TIMESTAMP_ATTR] = link.timestamp
+    return trace.Link(context=span_context, attributes=attrs)
 
 
 def attach_span_links(links: List[SpanLink]) -> None:
