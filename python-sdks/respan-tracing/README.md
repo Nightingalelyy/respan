@@ -590,7 +590,9 @@ The SDK uses **OpenTelemetry entry point auto-discovery** — any installed `ope
 
 ### Installing Instrumentation Packages
 
-**Important:** To trace a specific library, you need to install the corresponding OpenTelemetry instrumentation package.
+**Important:** Auto-instrumentation packages are **not bundled** with `respan-tracing` (as of v2.9.0). To trace a specific library, you must install the corresponding OpenTelemetry instrumentation package yourself.
+
+> **Note:** `opentelemetry-instrumentation-openai` has known compatibility issues with the OpenAI Responses API streaming path. If you use the Responses API with streaming, you may want to skip installing it and use `@trace` decorators instead (see [Manual Tracing](#decorators-trace-and-workflow)).
 
 The SDK uses the **OpenTelemetry standard** instrumentation packages:
 
