@@ -1,12 +1,39 @@
+import json
+from types import SimpleNamespace
+
 import pytest
+from opentelemetry.instrumentation.openai.shared import chat_wrappers
+from opentelemetry.semconv_ai import SpanAttributes
 from pydantic_ai.agent import Agent
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.models.instrumented import InstrumentationSettings
 from respan_exporter_pydantic_ai import instrument_pydantic_ai
+from respan_exporter_pydantic_ai.constants import (
+    RESPAN_RESPONSE_FORMAT_ATTR,
+    RESPAN_TOOLS_ATTR,
+    PYDANTIC_AI_OPENAI_HANDLE_REQUEST_PATCH_MARKER,
+)
+from respan_exporter_pydantic_ai.instrument import (
+    _build_gateway_trace_extra_body,
+    _inject_gateway_trace_extra_body,
+)
+from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT, LOG_TYPE_TASK, LOG_TYPE_TOOL, LogMethodChoices
+from respan_sdk.respan_types.base_types import RespanBaseModel
+from respan_sdk.respan_types.span_types import RespanSpanAttributes
+from respan_sdk.utils.data_processing.id_processing import format_trace_id, format_span_id
 from respan_tracing import RespanTelemetry
 from respan_tracing.core.tracer import RespanTracer
+from respan_tracing.decorators import workflow
 from respan_tracing.testing import InMemorySpanExporter
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+
+
+class StructuredAnswer(RespanBaseModel):
+    answer: str
+
+
+def lookup_weather(query: str) -> str:
+    return f"Sunny in {query}"
 
 @pytest.fixture(autouse=True)
 def reset_tracer():
@@ -32,7 +59,7 @@ def test_instrument_global():
     spans = span_exporter.get_finished_spans()
     
     assert len(spans) > 0
-    assert any("gen_ai.system" in (s.attributes or {}) for s in spans)
+    assert any("respan.entity.log_type" in (s.attributes or {}) for s in spans)
 
 def test_instrument_disabled():
     """When telemetry is disabled, instrumentation is skipped."""
@@ -82,4 +109,223 @@ def test_instrument_specific_agent():
     
     spans = span_exporter.get_finished_spans()
     assert len(spans) > 0, "Instrumented agent should produce spans"
+
+
+def test_instrument_patches_openai_gateway_request_hook():
+    telemetry = RespanTelemetry(app_name="test-app", api_key="test-key", is_enabled=True, is_batching_enabled=False)
+
+    instrument_pydantic_ai()
+
+    assert telemetry.tracer is not None
+    assert getattr(
+        chat_wrappers,
+        PYDANTIC_AI_OPENAI_HANDLE_REQUEST_PATCH_MARKER,
+        False,
+    ) is True
+
+
+def test_gateway_trace_extra_body_only_targets_respan_gateway(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("RESPAN_BASE_URL", "https://api.respan.ai/api")
+
+    span = SimpleNamespace(
+        name="openai.chat",
+        parent=SimpleNamespace(span_id=0x3456),
+        attributes={SpanAttributes.TRACELOOP_WORKFLOW_NAME: "calculator_agent_run"},
+        get_span_context=lambda: SimpleNamespace(trace_id=0x1234, span_id=0x2345),
+    )
+    kwargs = {}
+
+    _inject_gateway_trace_extra_body(
+        span=span,
+        kwargs=kwargs,
+        instance=SimpleNamespace(_client=SimpleNamespace(base_url="https://api.respan.ai/api/")),
+    )
+
+    assert kwargs["extra_body"]["trace_unique_id"] == format_trace_id(0x1234)
+    assert kwargs["extra_body"]["span_unique_id"] == format_span_id(0x2345)
+    assert kwargs["extra_body"]["span_parent_id"] == format_span_id(0x3456)
+    assert kwargs["extra_body"]["span_name"] == "openai.chat"
+    assert kwargs["extra_body"]["span_workflow_name"] == "calculator_agent_run"
+    assert "disable_log" not in kwargs["extra_body"]
+
+
+def test_gateway_trace_extra_body_preserves_existing_extra_body(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("RESPAN_BASE_URL", "https://api.respan.ai/api")
+
+    span = SimpleNamespace(
+        name="openai.chat",
+        parent=SimpleNamespace(span_id=0x3456),
+        attributes={SpanAttributes.TRACELOOP_WORKFLOW_NAME: "calculator_agent_run"},
+        get_span_context=lambda: SimpleNamespace(trace_id=0x1234, span_id=0x2345),
+    )
+    kwargs = {
+        "extra_body": {
+            "customer_identifier": "user_123",
+            "span_name": "custom.chat",
+            "span_workflow_name": "custom_workflow",
+        }
+    }
+
+    _inject_gateway_trace_extra_body(
+        span=span,
+        kwargs=kwargs,
+        instance=SimpleNamespace(_client=SimpleNamespace(base_url="https://api.respan.ai/api/")),
+    )
+
+    assert kwargs["extra_body"]["customer_identifier"] == "user_123"
+    assert kwargs["extra_body"]["span_name"] == "custom.chat"
+    assert kwargs["extra_body"]["span_workflow_name"] == "custom_workflow"
+    assert kwargs["extra_body"]["trace_unique_id"] == format_trace_id(0x1234)
+    assert kwargs["extra_body"]["span_unique_id"] == format_span_id(0x2345)
+
+
+def test_gateway_trace_extra_body_skips_non_respan_gateway(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("RESPAN_BASE_URL", "https://api.respan.ai/api")
+
+    span = SimpleNamespace(
+        name="openai.chat",
+        parent=SimpleNamespace(span_id=0x3456),
+        attributes={SpanAttributes.TRACELOOP_WORKFLOW_NAME: "calculator_agent_run"},
+        get_span_context=lambda: SimpleNamespace(trace_id=0x1234, span_id=0x2345),
+    )
+    kwargs = {}
+
+    _inject_gateway_trace_extra_body(
+        span=span,
+        kwargs=kwargs,
+        instance=SimpleNamespace(_client=SimpleNamespace(base_url="https://example.com/openai/")),
+    )
+
+    assert kwargs == {}
+
+
+def test_build_gateway_trace_extra_body_formats_span_ids():
+    span = SimpleNamespace(
+        name="openai.chat",
+        parent=SimpleNamespace(span_id=0x3456),
+        attributes={SpanAttributes.TRACELOOP_WORKFLOW_NAME: "calculator_agent_run"},
+        get_span_context=lambda: SimpleNamespace(trace_id=0x1234, span_id=0x2345),
+    )
+
+    assert _build_gateway_trace_extra_body(span=span) == {
+        "trace_unique_id": format_trace_id(0x1234),
+        "span_unique_id": format_span_id(0x2345),
+        "span_parent_id": format_span_id(0x3456),
+        "span_name": "openai.chat",
+        "span_workflow_name": "calculator_agent_run",
+    }
+
+
+def test_pydantic_ai_span_extracts_tools_and_response_format():
+    telemetry = RespanTelemetry(
+        app_name="test-app",
+        is_enabled=True,
+        is_batching_enabled=False,
+    )
+
+    span_exporter = InMemorySpanExporter()
+    telemetry.add_processor(
+        exporter=span_exporter,
+        is_batching_enabled=False,
+    )
+
+    agent = Agent(
+        model=TestModel(custom_output_args={"answer": "ok"}),
+        output_type=StructuredAnswer,
+        tools=[lookup_weather],
+    )
+
+    instrument_pydantic_ai(agent=agent)
+
+    result = agent.run_sync("What is the weather?")
+    assert result.output.answer == "ok"
+
+    telemetry.flush()
+    spans = span_exporter.get_finished_spans()
+    chat_span = next(
+        span
+        for span in spans
+        if (span.attributes or {}).get(RespanSpanAttributes.LOG_TYPE.value) == LOG_TYPE_CHAT
+    )
+
+    assert RESPAN_TOOLS_ATTR not in chat_span.attributes
+    assert RESPAN_RESPONSE_FORMAT_ATTR not in chat_span.attributes
+    assert "gen_ai.input.messages" not in chat_span.attributes
+    assert "gen_ai.output.messages" not in chat_span.attributes
+    assert "gen_ai.operation.name" not in chat_span.attributes
+    assert "gen_ai.system" not in chat_span.attributes
+    assert chat_span.attributes["full_request"]
+    assert chat_span.attributes["full_response"]
+    assert (
+        chat_span.attributes[RespanSpanAttributes.LOG_TYPE.value] == LOG_TYPE_CHAT
+    )
+    assert (
+        chat_span.attributes[RespanSpanAttributes.LOG_METHOD.value]
+        == LogMethodChoices.TRACING_INTEGRATION.value
+    )
+
+
+def test_pydantic_ai_tool_span_maps_to_respan_fields():
+    telemetry = RespanTelemetry(
+        app_name="test-app",
+        is_enabled=True,
+        is_batching_enabled=False,
+    )
+
+    span_exporter = InMemorySpanExporter()
+    telemetry.add_processor(
+        exporter=span_exporter,
+        is_batching_enabled=False,
+    )
+
+    agent = Agent(model=TestModel(call_tools="all", custom_output_text="done"))
+
+    @agent.tool_plain
+    def add(a: int, b: int) -> int:
+        return a + b
+
+    @workflow(name="calculator_agent_run")
+    def run_agent() -> str:
+        return agent.run_sync("Use the add tool to compute 1 + 2.").output
+
+    instrument_pydantic_ai(agent=agent)
+
+    assert run_agent() == "done"
+
+    telemetry.flush()
+    spans = span_exporter.get_finished_spans()
+    tool_span = next(
+        span
+        for span in spans
+        if span.name == "execute_tool add"
+        and (span.attributes or {}).get(RespanSpanAttributes.LOG_TYPE.value) == LOG_TYPE_TOOL
+    )
+    running_tools_span = next(
+        span
+        for span in spans
+        if span.name == "running tools"
+    )
+
+    assert "gen_ai.tool.name" not in tool_span.attributes
+    assert "gen_ai.tool.call.id" not in tool_span.attributes
+    assert "logfire.msg" not in tool_span.attributes
+    assert tool_span.attributes["span_tools"] == ["add"]
+    assert tool_span.name == "execute_tool add"
+    tool_input = json.loads(tool_span.attributes["input"])
+    assert set(tool_input) == {"a", "b"}
+    assert json.loads(tool_span.attributes["output"]) == tool_input["a"] + tool_input["b"]
+    assert tool_span.attributes[SpanAttributes.TRACELOOP_SPAN_KIND] == "tool"
+    assert tool_span.attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "add"
+    assert tool_span.attributes[RespanSpanAttributes.LOG_TYPE.value] == LOG_TYPE_TOOL
+    assert (
+        tool_span.attributes[RespanSpanAttributes.LOG_METHOD.value]
+        == LogMethodChoices.TRACING_INTEGRATION.value
+    )
+    assert running_tools_span.attributes["span_tools"] == ["add"]
+    assert running_tools_span.attributes[SpanAttributes.TRACELOOP_SPAN_KIND] == "task"
+    assert (
+        running_tools_span.attributes[RespanSpanAttributes.LOG_TYPE.value]
+        == LOG_TYPE_TASK
+    )
+    assert RESPAN_TOOLS_ATTR not in running_tools_span.attributes
 
