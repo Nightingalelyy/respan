@@ -732,7 +732,10 @@ Even with `instruments=set()`, you can still:
 - ✅ Use `@workflow` and `@task` decorators
 - ✅ Create manual spans with `tracer.start_as_current_span()`
 - ✅ Use `get_client()` to update spans
+- ✅ Safety patches for known OTel bugs still apply (see below)
 - ❌ Won't automatically trace OpenAI/Anthropic/etc calls
+
+> **Note (v2.8.4+):** Even when you disable all auto-instrumentation with `instruments=set()`, the SDK still applies safety patches for known bugs in `opentelemetry-instrumentation-openai`. This is intentional — in environments like Django/gunicorn, other code (middleware, post-fork hooks, third-party libraries) can activate OTel instrumentors outside your control. The safety patches prevent crashes (e.g., `AsyncAPIResponse` missing `.id` in the Responses API streaming path) regardless of how instrumentation was activated.
 
 ### Instrumentation Best Practices
 

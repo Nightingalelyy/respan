@@ -134,12 +134,50 @@ def init_instrumentations(
         except Exception as e:
             logger.warning(f"Failed to initialize {name} instrumentation: {e}")
 
+    # Always apply safety patches for known OTel wrapper bugs, regardless of
+    # which instruments were requested.  Other code (Django middleware, gunicorn
+    # post-fork hooks, 3rd-party libs) can call instrument() outside our control.
+    # Patching unconditionally prevents crashes if that happens.
+    _patch_otel_responses_parse()
+
     if instrument_count == 0:
         logger.warning("No instrumentations were successfully initialized")
         return False
 
     logger.info(f"Successfully initialized {instrument_count} instrumentations")
     return True
+
+
+def _patch_otel_responses_parse():
+    """Fix parse_response for openai >= 2.x Responses API streaming.
+
+    opentelemetry-instrumentation-openai's ``responses_wrappers.py`` calls
+    ``parse_response(response)`` then accesses ``parsed_response.id``.
+    With the Responses API streaming path, the response is an
+    ``AsyncAPIResponse`` (raw httpx wrapper) which ``parse_response``
+    passes through unchanged, crashing on ``.id``.
+
+    This patch makes ``parse_response`` handle both ``AsyncAPIResponse``
+    and ``APIResponse`` by calling ``.parse()`` before returning.
+    """
+    try:
+        from opentelemetry.instrumentation.openai.v1 import (
+            responses_wrappers as rw,
+        )
+        from openai._response import AsyncAPIResponse, APIResponse
+
+        _original = rw.parse_response
+
+        def _safe_parse_response(response):
+            if isinstance(response, (AsyncAPIResponse, APIResponse)):
+                return response.parse()
+            return _original(response)
+
+        rw.parse_response = _safe_parse_response
+        logger.debug("respan-tracing: patched parse_response for AsyncAPIResponse")
+    except Exception:
+        # openai or OTel package not installed — nothing to patch
+        pass
 
 
 # ---------------------------------------------------------------------------
