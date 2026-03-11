@@ -1,6 +1,5 @@
 import base64
 import json
-from collections import defaultdict
 from collections.abc import Mapping
 from typing import Dict, Optional, Sequence, List, Any
 
@@ -77,136 +76,10 @@ class ModifiedSpan:
         return getattr(self._original_span, name)
 
 
-_PYDANTIC_AI_SCOPE_NAME = "pydantic-ai"
-_OPENAI_CHAT_SPAN_NAMES = frozenset({"openai.chat"})
-_PYDANTIC_AI_CHAT_REQUIRED_FIELDS = frozenset({
-    "full_request",
-    "full_response",
-})
-
-def _get_span_identity(span: ReadableSpan) -> Optional[tuple[int, int]]:
-    context = span.get_span_context()
-    trace_id = getattr(context, "trace_id", None)
-    span_id = getattr(context, "span_id", None)
-    if trace_id is None or span_id is None:
-        return None
-    return trace_id, span_id
-
-
-def _get_parent_identity(span: ReadableSpan) -> Optional[tuple[int, int]]:
-    parent = getattr(span, "parent", None)
-    parent_span_id = getattr(parent, "span_id", None)
-    if parent_span_id is None:
-        return None
-
-    parent_trace_id = getattr(parent, "trace_id", None)
-    if parent_trace_id is None:
-        context = span.get_span_context()
-        parent_trace_id = getattr(context, "trace_id", None)
-    if parent_trace_id is None:
-        return None
-
-    return parent_trace_id, parent_span_id
-
-
-def _get_scope_name(span: ReadableSpan) -> Optional[str]:
-    scope = getattr(span, "instrumentation_scope", None)
-    scope_name = getattr(scope, "name", None)
-    if isinstance(scope_name, str) and scope_name:
-        return scope_name
-    return None
-
-
-
-def _is_pydantic_ai_chat_wrapper_span(span: ReadableSpan) -> bool:
-    if _get_scope_name(span) != _PYDANTIC_AI_SCOPE_NAME:
-        return False
-
-    attributes = getattr(span, "attributes", {}) or {}
-    if attributes.get("respan.entity.log_type") != "chat":
-        return False
-
-    return all(
-        attributes.get(field_name) is not None
-        for field_name in _PYDANTIC_AI_CHAT_REQUIRED_FIELDS
-    )
-
-
-def _is_openai_chat_span(span: ReadableSpan) -> bool:
-    return getattr(span, "name", None) in _OPENAI_CHAT_SPAN_NAMES
-
-
-def _drop_openai_chat_children(
-    spans: Sequence[ReadableSpan],
-) -> List[ReadableSpan]:
-    """Drop `openai.chat` child spans that are children of pydantic-ai chat
-    wrapper spans.  The wrapper already carries the clean, extracted attributes
-    (`full_request`, `full_response`, token counts, etc.) so the raw
-    `openai.chat` span with its many `gen_ai.*` custom properties is redundant.
-    Any children of the dropped `openai.chat` span are reparented to the
-    wrapper so the trace tree stays intact."""
-
-    spans_list = list(spans)
-    children_by_parent: dict[tuple[int, int], list[ReadableSpan]] = defaultdict(list)
-
-    for span in spans_list:
-        parent_identity = _get_parent_identity(span)
-        if parent_identity is not None:
-            children_by_parent[parent_identity].append(span)
-
-    openai_identities_to_drop: set[tuple[int, int]] = set()
-    reparent_map: dict[tuple[int, int], Any] = {}
-
-    for wrapper_span in spans_list:
-        if not _is_pydantic_ai_chat_wrapper_span(wrapper_span):
-            continue
-
-        wrapper_identity = _get_span_identity(wrapper_span)
-        if wrapper_identity is None:
-            continue
-
-        wrapper_context = getattr(wrapper_span, "get_span_context", lambda: None)()
-
-        for child in children_by_parent.get(wrapper_identity, []):
-            if not _is_openai_chat_span(child):
-                continue
-            child_identity = _get_span_identity(child)
-            if child_identity is None:
-                continue
-            openai_identities_to_drop.add(child_identity)
-            reparent_map[child_identity] = wrapper_context
-
-    if not openai_identities_to_drop:
-        return spans_list
-
-    result: List[ReadableSpan] = []
-    for span in spans_list:
-        span_identity = _get_span_identity(span)
-        if span_identity in openai_identities_to_drop:
-            continue
-
-        parent_identity = _get_parent_identity(span)
-        if parent_identity in openai_identities_to_drop and parent_identity in reparent_map:
-            result.append(
-                ModifiedSpan(
-                    original_span=span,
-                    overrides={
-                        "parent": reparent_map[parent_identity],
-                        "_parent": reparent_map[parent_identity],
-                    },
-                )
-            )
-        else:
-            result.append(span)
-
-    return result
-
-
 def _prepare_spans_for_export(spans: Sequence[ReadableSpan]) -> List[ReadableSpan]:
-    merged_spans = _drop_openai_chat_children(spans=spans)
     prepared_spans: List[ReadableSpan] = []
 
-    for span in merged_spans:
+    for span in spans:
         if is_root_span_candidate(span):
             logger.debug("Making span a root span: %s", span.name)
             prepared_spans.append(

@@ -41,16 +41,13 @@ OTEL_SCOPE_NAME_ATTR = "otel.scope.name"
 OTEL_SCOPE_VERSION_ATTR = "otel.scope.version"
 MODEL_NAME_ATTR = "model_name"
 
-# Attributes emitted by opentelemetry-instrumentation-openai
+# Attributes emitted by opentelemetry-instrumentation-openai (stripped if present)
 OPENAI_LLM_HEADERS_ATTR = "llm.headers"
 OPENAI_LLM_REQUEST_REASONING_EFFORT_ATTR = "llm.request.reasoning_effort"
 OPENAI_SYSTEM_FINGERPRINT_ATTR = "gen_ai.openai.system_fingerprint"
 OPENAI_RESPONSE_SERVICE_TIER_ATTR = "openai.response.service_tier"
 OPENAI_CACHE_READ_INPUT_TOKENS_ATTR = "gen_ai.usage.cache_read_input_tokens"
 OPENAI_REASONING_TOKENS_ATTR = "llm.usage.reasoning_tokens"
-
-# Span name prefix emitted by opentelemetry-instrumentation-openai
-OPENAI_CHAT_SPAN_NAME_PREFIX = "openai.chat"
 
 # ── Well-known span names emitted by Pydantic AI ───────────────────────────
 

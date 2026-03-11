@@ -81,18 +81,17 @@ Traces appear in the [Respan dashboard](https://app.respan.ai). Open a trace to 
 
 ## Dev Guide
 
-### OpenAI instrumentation dependency
+### Token extraction (no OpenAI instrumentation needed)
 
-This package lists `opentelemetry-instrumentation-openai` as a **mandatory** dependency.
-`respan-tracing >=2.9.0` no longer bundles it, but this exporter still relies on
-OpenAI instrumentation to extract token usage (`prompt_tokens`, `completion_tokens`)
-as first-class metrics. Pydantic AI's own token attributes are currently mapped to
-metadata fields only, so removing the OpenAI instrumentor would cause token counts
-to disappear from span aggregation.
+This package extracts token usage directly from Pydantic AI's own
+`gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens` span attributes and
+promotes them to first-class `prompt_tokens` / `completion_tokens` metrics.
 
-**If you want to drop the OpenAI instrumentation dependency**, you must first
-refactor the token extraction so that Pydantic AI's `gen_ai.usage.*` attributes
-are promoted to top-level usage metrics (not just metadata). This is a larger change.
+**`opentelemetry-instrumentation-openai` is NOT required.** Pydantic AI emits
+token counts for all providers (OpenAI, Anthropic, Google, etc.) natively, so a
+separate OpenAI instrumentor would only create duplicate spans and double-count
+tokens. If you have it installed and want to block it, pass
+`block_instruments={Instruments.OPENAI}` when initializing `RespanTelemetry`.
 
 ### Setup
 

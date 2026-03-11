@@ -28,7 +28,6 @@ from respan_exporter_pydantic_ai.constants import (
     DEFAULT_RESPAN_GATEWAY_BASE_URL,
     ENRICHMENT_STRIP_ATTRS,
     MODEL_NAME_ATTR,
-    OPENAI_CHAT_SPAN_NAME_PREFIX,
     RESPAN_RESPONSE_FORMAT_ATTR,
     RESPAN_TOOLS_ATTR,
     PYDANTIC_AI_ADD_PROCESSOR_PATCH_MARKER,
@@ -439,11 +438,6 @@ def _extract_log_type(span: ReadableSpan, attributes: dict[str, Any]) -> Optiona
     running_tool_names = _extract_tool_name_sequence(attributes=attributes)
     if span.name == PYDANTIC_AI_RUNNING_TOOLS_SPAN_NAME and running_tool_names:
         return LOG_TYPE_TASK
-
-    # Auto-instrumented OpenAI spans (opentelemetry-instrumentation-openai)
-    # don't set gen_ai.operation.name but are identifiable by span name.
-    if span.name.startswith(OPENAI_CHAT_SPAN_NAME_PREFIX):
-        return LOG_TYPE_CHAT
 
     return None
 
