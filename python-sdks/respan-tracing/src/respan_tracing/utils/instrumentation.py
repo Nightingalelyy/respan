@@ -157,8 +157,11 @@ def _patch_otel_responses_parse():
     ``AsyncAPIResponse`` (raw httpx wrapper) which ``parse_response``
     passes through unchanged, crashing on ``.id``.
 
-    This patch makes ``parse_response`` handle both ``AsyncAPIResponse``
-    and ``APIResponse`` by calling ``.parse()`` before returning.
+    We patch ``parse_response`` to call ``_parse()`` (sync) on
+    ``AsyncAPIResponse``.  By the time OTel's wrapper calls
+    ``parse_response``, the HTTP response body has already been
+    received, so the sync ``_parse()`` can read ``response.json()``
+    without awaiting.
     """
     try:
         from opentelemetry.instrumentation.openai.v1 import (
@@ -169,7 +172,9 @@ def _patch_otel_responses_parse():
         _original = rw.parse_response
 
         def _safe_parse_response(response):
-            if isinstance(response, (AsyncAPIResponse, APIResponse)):
+            if isinstance(response, AsyncAPIResponse):
+                return response._parse()
+            if isinstance(response, APIResponse):
                 return response.parse()
             return _original(response)
 
