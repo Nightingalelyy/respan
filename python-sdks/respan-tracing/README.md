@@ -907,6 +907,25 @@ def important_task():
 - ✅ **Single or multiple**: `processors="debug"` or `processors=["debug", "analytics"]`
 - ✅ **Standard OTEL**: Uses OpenTelemetry's native multi-processor support
 
+**Processors Inheritance:**
+
+Child spans automatically inherit `processors` from their parent when not explicitly set. This means you only need to set `processors` on the top-level workflow — all child tasks inherit the routing automatically:
+
+```python
+@kai.workflow(name="my_pipeline", processors=["production", "debug"])
+def pipeline():
+    @kai.task(name="step_1")  # Inherits processors=["production", "debug"]
+    def step_1():
+        pass
+
+    @kai.task(name="step_2", processors="debug")  # Explicit override
+    def step_2():
+        pass
+
+    step_1()  # → Routes to both production and debug
+    step_2()  # → Routes to debug only
+```
+
 **Use cases:**
 - Send critical spans to production, debug spans to local file
 - Route spans to multiple analytics systems
@@ -918,7 +937,7 @@ def important_task():
 For complex routing logic beyond simple name matching, provide a custom `filter_fn`.
 
 **Important:** When both `name` and `filter_fn` are provided, **BOTH conditions must be True**:
-- The span must have the processor name in its `processors` attribute (from decorator)
+- The span must have the processor name in its `respan.processors` attribute (set via decorator or inherited from parent)
 - The custom `filter_fn` must return `True`
 
 This ensures decorator-based routing always works, while allowing additional filtering logic.
