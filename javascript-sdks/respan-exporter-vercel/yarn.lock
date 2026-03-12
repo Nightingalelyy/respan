@@ -62,22 +62,22 @@ __metadata:
     "@opentelemetry/api": "npm:^1.9.0"
     "@opentelemetry/core": "npm:^2.0.1"
     "@opentelemetry/sdk-trace-base": "npm:^2.0.1"
-    "@respan/respan-sdk": "npm:^1.0.0"
+    "@respan/respan-sdk": "npm:^1.1.2"
     "@types/node": "npm:^24.0.1"
     typescript: "npm:^5.9.2"
   languageName: unknown
   linkType: soft
 
-"@respan/respan-sdk@npm:^1.0.0":
-  version: 1.0.1
-  resolution: "@respan/respan-sdk@npm:1.0.1"
+"@respan/respan-sdk@npm:^1.1.2":
+  version: 1.1.2
+  resolution: "@respan/respan-sdk@npm:1.1.2"
   dependencies:
     "@opentelemetry/api": "npm:^1.9.0"
     "@opentelemetry/core": "npm:^2.0.1"
     "@opentelemetry/sdk-trace-base": "npm:^2.0.1"
     typescript: "npm:^5.8.3"
     zod: "npm:^4.1.12"
-  checksum: 10c0/4400f7b9d942950295cbcdb5db940bece5ea53aee34aa9c3387a1858cf156848212a39af1b5b7a85e461f1cff38066292f5de6df23ac37d0c2faa8d0b041e99d
+  checksum: 10c0/9fa892804973714c5ce885ffd1e1716ac88325d123762ab1aad9bdf877c1ea83194e6461a5f055ca2b5b5f48df6514bf4194789059928f071d3499905f826ef3
   languageName: node
   linkType: hard
 

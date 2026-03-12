@@ -540,7 +540,7 @@ export class RespanExporter implements SpanExporter {
     span: ReadableSpan,
     spans: ReadableSpan[]
   ): ReadableSpan | undefined {
-    const parentId = span.parentSpanId;
+    const parentId = span.parentSpanContext?.spanId;
     if (!parentId) return undefined;
     return spans.find((s) => s.spanContext().spanId === parentId);
   }
