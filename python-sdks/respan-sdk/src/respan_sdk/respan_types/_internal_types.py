@@ -265,6 +265,14 @@ class BasicLLMParams(RespanBaseModel):
 
 class LiteLLMCompletionParams(BasicLLMParams):
     thinking: Optional[dict] = None
+    speed: Optional[str] = None  # Anthropic fast mode: "fast" or "standard"
+
+    @field_validator("speed", mode="before")
+    @classmethod
+    def _coerce_speed(cls, v):
+        if v is not None:
+            return str(v)
+        return v
 
 
 class Usage(RespanBaseModel):
