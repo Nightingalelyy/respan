@@ -320,6 +320,7 @@ class RespanParams(RespanBaseModel, PreprocessLogDataMixin):
     prompt_unit_price: Optional[float] = None
     completion_unit_price: Optional[float] = None
     used_custom_credential: Optional[bool] = None
+    service_tier: Optional[str] = None  # Provider service tier (e.g. "priority", "default", "flex")
     # endregion: cost related
 
     # region: time period
