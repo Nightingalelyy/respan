@@ -192,7 +192,7 @@ class OpenAIInstrumentor:
     name = "openai"
 
     def __init__(self) -> None:
-        self._instrumented = False
+        self._is_instrumented = False
 
     def activate(self) -> None:
         """Instrument the OpenAI SDK via OTEL and patch prompt capture."""
@@ -202,7 +202,7 @@ class OpenAIInstrumentor:
             instrumentor = OTELOpenAI()
             if not instrumentor.is_instrumented_by_opentelemetry:
                 instrumentor.instrument()
-            self._instrumented = True
+            self._is_instrumented = True
 
             # Apply sync prompt-capture patch
             try:
@@ -218,11 +218,11 @@ class OpenAIInstrumentor:
 
     def deactivate(self) -> None:
         """Deactivate the instrumentation."""
-        if self._instrumented:
+        if self._is_instrumented:
             try:
                 from opentelemetry.instrumentation.openai import OpenAIInstrumentor as OTELOpenAI
                 OTELOpenAI().uninstrument()
             except Exception:
                 pass
-            self._instrumented = False
+            self._is_instrumented = False
         logger.info("OpenAI SDK instrumentation deactivated")
