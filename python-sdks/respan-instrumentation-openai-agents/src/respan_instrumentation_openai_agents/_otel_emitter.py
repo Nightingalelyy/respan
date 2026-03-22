@@ -29,6 +29,8 @@ from agents.tracing.span_data import (
 from agents.tracing.spans import Span, SpanImpl
 from agents.tracing.traces import Trace
 
+from opentelemetry.semconv_ai import SpanAttributes, LLMRequestTypeValues
+
 from respan_sdk.constants.llm_logging import (
     LOG_TYPE_AGENT,
     LOG_TYPE_CUSTOM,
@@ -40,12 +42,6 @@ from respan_sdk.constants.llm_logging import (
     LOG_TYPE_WORKFLOW,
 )
 from respan_sdk.constants.span_attributes import (
-    GEN_AI_REQUEST_MODEL,
-    GEN_AI_SYSTEM,
-    GEN_AI_USAGE_COMPLETION_TOKENS,
-    GEN_AI_USAGE_PROMPT_TOKENS,
-    LLM_REQUEST_TYPE,
-    LLM_REQUEST_TYPE_CHAT,
     RESPAN_LOG_TYPE,
     RESPAN_METADATA_AGENT_NAME,
     RESPAN_METADATA_FROM_AGENT,
@@ -54,12 +50,6 @@ from respan_sdk.constants.span_attributes import (
     RESPAN_METADATA_TRIGGERED,
     RESPAN_SPAN_HANDOFFS,
     RESPAN_SPAN_TOOLS,
-    TRACELOOP_ENTITY_INPUT,
-    TRACELOOP_ENTITY_NAME,
-    TRACELOOP_ENTITY_OUTPUT,
-    TRACELOOP_ENTITY_PATH,
-    TRACELOOP_SPAN_KIND,
-    TRACELOOP_WORKFLOW_NAME,
 )
 from respan_sdk.utils.serialization import serialize_value
 from respan_tracing.utils.span_factory import build_readable_span, inject_span
@@ -102,9 +92,9 @@ def _base_attrs(
 ) -> Dict[str, Any]:
     """Build the common attribute dict shared by all emitters."""
     return {
-        TRACELOOP_SPAN_KIND: span_kind,
-        TRACELOOP_ENTITY_NAME: entity_name,
-        TRACELOOP_ENTITY_PATH: entity_path,
+        SpanAttributes.TRACELOOP_SPAN_KIND: span_kind,
+        SpanAttributes.TRACELOOP_ENTITY_NAME: entity_name,
+        SpanAttributes.TRACELOOP_ENTITY_PATH: entity_path,
         RESPAN_LOG_TYPE: log_type,
     }
 
@@ -130,7 +120,7 @@ def emit_trace(trace_obj: Trace) -> None:
         entity_path="",  # root — no parent path
         log_type=LOG_TYPE_WORKFLOW,
     )
-    attrs[TRACELOOP_WORKFLOW_NAME] = trace_obj.name or "trace"
+    attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] = trace_obj.name or "trace"
 
     span = build_readable_span(
         name=f"{trace_obj.name}.workflow",
@@ -151,7 +141,7 @@ def emit_agent(item: SpanImpl, span_data: AgentSpanData) -> None:
         entity_path=name,
         log_type=LOG_TYPE_AGENT,
     )
-    attrs[TRACELOOP_WORKFLOW_NAME] = name
+    attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] = name
     attrs[RESPAN_METADATA_AGENT_NAME] = name
     if span_data.tools:
         attrs[RESPAN_SPAN_TOOLS] = _safe_json(span_data.tools)
@@ -181,29 +171,29 @@ def emit_response(item: SpanImpl, span_data: ResponseSpanData) -> None:
         entity_path="response",
         log_type=LOG_TYPE_RESPONSE,
     )
-    attrs[LLM_REQUEST_TYPE] = LLM_REQUEST_TYPE_CHAT
-    attrs[GEN_AI_SYSTEM] = "openai"
+    attrs[SpanAttributes.LLM_REQUEST_TYPE] = LLMRequestTypeValues.CHAT.value
+    attrs[SpanAttributes.LLM_SYSTEM] = "openai"
 
     # Input
     input_msgs = _format_input_messages(span_data.input)
     if input_msgs:
-        attrs[TRACELOOP_ENTITY_INPUT] = _safe_json(input_msgs)
+        attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = _safe_json(input_msgs)
 
     # Response data
     resp = span_data.response
     if resp:
         model = getattr(resp, "model", None) or ""
         if model:
-            attrs[GEN_AI_REQUEST_MODEL] = model
+            attrs[SpanAttributes.LLM_REQUEST_MODEL] = model
 
         if hasattr(resp, "output") and resp.output:
             output = _format_output(resp.output)
-            attrs[TRACELOOP_ENTITY_OUTPUT] = _safe_json(output)
+            attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _safe_json(output)
 
         usage = getattr(resp, "usage", None)
         if usage:
-            attrs[GEN_AI_USAGE_PROMPT_TOKENS] = getattr(usage, "input_tokens", 0) or 0
-            attrs[GEN_AI_USAGE_COMPLETION_TOKENS] = getattr(usage, "output_tokens", 0) or 0
+            attrs[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] = getattr(usage, "input_tokens", 0) or 0
+            attrs[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] = getattr(usage, "output_tokens", 0) or 0
 
     span = build_readable_span(
         name="openai.chat",
@@ -233,12 +223,12 @@ def emit_function(item: SpanImpl, span_data: FunctionSpanData) -> None:
     input_str = serialize_value(span_data.input) or ""
     if not isinstance(input_str, str):
         input_str = json.dumps(input_str, default=str)
-    attrs[TRACELOOP_ENTITY_INPUT] = _safe_json([{"role": "tool", "content": input_str}])
+    attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = _safe_json([{"role": "tool", "content": input_str}])
 
     output_str = serialize_value(span_data.output) or ""
     if not isinstance(output_str, str):
         output_str = json.dumps(output_str, default=str)
-    attrs[TRACELOOP_ENTITY_OUTPUT] = _safe_json({"role": "tool", "content": output_str})
+    attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _safe_json({"role": "tool", "content": output_str})
 
     span = build_readable_span(
         name=f"{name}.tool",
@@ -263,22 +253,22 @@ def emit_generation(item: SpanImpl, span_data: GenerationSpanData) -> None:
         entity_path="generation",
         log_type=LOG_TYPE_GENERATION,
     )
-    attrs[LLM_REQUEST_TYPE] = LLM_REQUEST_TYPE_CHAT
+    attrs[SpanAttributes.LLM_REQUEST_TYPE] = LLMRequestTypeValues.CHAT.value
 
     if span_data.model:
-        attrs[GEN_AI_REQUEST_MODEL] = span_data.model
+        attrs[SpanAttributes.LLM_REQUEST_MODEL] = span_data.model
 
     input_msgs = _format_input_messages(span_data.input)
     if input_msgs:
-        attrs[TRACELOOP_ENTITY_INPUT] = _safe_json(input_msgs)
+        attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = _safe_json(input_msgs)
 
     output = _format_output(span_data.output)
-    attrs[TRACELOOP_ENTITY_OUTPUT] = _safe_json(output)
+    attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _safe_json(output)
 
     if span_data.usage:
         u = span_data.usage
-        attrs[GEN_AI_USAGE_PROMPT_TOKENS] = u.get("prompt_tokens") or u.get("input_tokens") or 0
-        attrs[GEN_AI_USAGE_COMPLETION_TOKENS] = u.get("completion_tokens") or u.get("output_tokens") or 0
+        attrs[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] = u.get("prompt_tokens") or u.get("input_tokens") or 0
+        attrs[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] = u.get("completion_tokens") or u.get("output_tokens") or 0
 
     span = build_readable_span(
         name="openai.chat",
@@ -305,8 +295,8 @@ def emit_handoff(item: SpanImpl, span_data: HandoffSpanData) -> None:
         entity_path="handoff",
         log_type=LOG_TYPE_HANDOFF,
     )
-    attrs[TRACELOOP_ENTITY_INPUT] = _safe_json(from_agent)
-    attrs[TRACELOOP_ENTITY_OUTPUT] = _safe_json(to_agent)
+    attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = _safe_json(from_agent)
+    attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _safe_json(to_agent)
     attrs[RESPAN_METADATA_FROM_AGENT] = from_agent
     attrs[RESPAN_METADATA_TO_AGENT] = to_agent
 
@@ -364,15 +354,15 @@ def emit_custom(item: SpanImpl, span_data: CustomSpanData) -> None:
     data = span_data.data or {}
     for k, v in data.items():
         if k in ("model",):
-            attrs[GEN_AI_REQUEST_MODEL] = v
+            attrs[SpanAttributes.LLM_REQUEST_MODEL] = v
         elif k == "prompt_tokens":
-            attrs[GEN_AI_USAGE_PROMPT_TOKENS] = v
+            attrs[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] = v
         elif k == "completion_tokens":
-            attrs[GEN_AI_USAGE_COMPLETION_TOKENS] = v
+            attrs[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] = v
         elif k == "input":
-            attrs[TRACELOOP_ENTITY_INPUT] = _safe_json(v)
+            attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = _safe_json(v)
         elif k == "output":
-            attrs[TRACELOOP_ENTITY_OUTPUT] = _safe_json(v)
+            attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _safe_json(v)
         else:
             attrs[f"respan.metadata.{k}"] = str(v)
 
