@@ -33,14 +33,14 @@ class Respan:
 
     When ``instrumentations`` are provided, OTEL auto-instrumentation is
     disabled by default to avoid duplicate spans (plugins capture LLM calls
-    themselves).  Override with ``auto_instrument=True`` if you need both.
+    themselves).  Override with ``is_auto_instrument=True`` if you need both.
 
     Args:
         api_key: Respan API key. Falls back to ``RESPAN_API_KEY`` env var.
         base_url: Respan API base URL. Falls back to ``RESPAN_BASE_URL`` env var.
         app_name: Application name for telemetry identification.
         instrumentations: List of instrumentor instances to activate.
-        auto_instrument: Auto-instrument LLM SDKs (OpenAI, Anthropic, etc.)
+        is_auto_instrument: Auto-instrument LLM SDKs (OpenAI, Anthropic, etc.)
             via OTEL.  Defaults to ``True`` when no plugins are provided,
             ``False`` when plugins are provided (to avoid duplicate spans).
         customer_identifier: Default customer/user identifier for all spans.
@@ -66,7 +66,7 @@ class Respan:
         base_url: Optional[str] = None,
         app_name: str = "respan",
         instrumentations: Optional[Sequence[object]] = None,
-        auto_instrument: Optional[bool] = None,
+        is_auto_instrument: Optional[bool] = None,
         customer_identifier: Optional[str] = None,
         thread_identifier: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
@@ -89,19 +89,19 @@ class Respan:
         if environment:
             default_attributes["environment"] = environment
 
-        # Explicit plugin pattern: auto_instrument defaults to False.
+        # Explicit plugin pattern: is_auto_instrument defaults to False.
         # Users must pass instrumentations=[...] for SDK-specific tracing.
-        # Set auto_instrument=True to enable respan-tracing's built-in
+        # Set is_auto_instrument=True to enable respan-tracing's built-in
         # auto-instrumentation (OpenAI, Anthropic, etc.) alongside plugins.
-        if auto_instrument is None:
-            auto_instrument = False
+        if is_auto_instrument is None:
+            is_auto_instrument = False
 
         # 1. OTEL TracerProvider + optional auto-instrumentation
         self.telemetry = RespanTelemetry(
             app_name=app_name,
             api_key=api_key,
             base_url=base_url,
-            auto_instrument=auto_instrument,
+            is_auto_instrument=is_auto_instrument,
             **telemetry_kwargs,
         )
 
