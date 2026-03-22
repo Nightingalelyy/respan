@@ -58,4 +58,4 @@ After running the script, traces appear on your [Respan dashboard](https://platf
 
 ## Further Reading
 
-See the [examples/openai-agents-sdk/](../../examples/openai-agents-sdk/) directory for runnable examples including tool use, handoffs, multi-agent workflows, guardrails, and streaming.
+See the [examples/openai-agents-sdk/](https://github.com/RespanAI/respan/tree/main/examples/openai-agents-sdk) directory for runnable examples including tool use, handoffs, multi-agent workflows, guardrails, and streaming.

@@ -4,29 +4,7 @@ import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-
-def _serialize(obj: Any) -> Any:
-    """Recursively convert *obj* to plain JSON-serializable Python types."""
-    if obj is None:
-        return None
-    if isinstance(obj, (str, int, float, bool)):
-        return obj
-    if isinstance(obj, dict):
-        return {k: _serialize(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_serialize(item) for item in obj]
-    if hasattr(obj, "model_dump"):
-        try:
-            return obj.model_dump(mode="json")
-        except Exception:
-            return {
-                k: _serialize(v)
-                for k, v in vars(obj).items()
-                if not k.startswith("_")
-            }
-    if hasattr(obj, "isoformat"):
-        return obj.isoformat()
-    return str(obj)
+from respan_sdk.utils.serialization import serialize_value
 
 
 def _responses_api_item_to_message(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -80,7 +58,7 @@ def _responses_api_item_to_message(item: Dict[str, Any]) -> Optional[Dict[str, A
 
 def _format_input_messages(raw_input: Any) -> List[Dict[str, Any]]:
     """Wrap raw input into proper ``[{"role": ..., "content": ...}]`` format."""
-    serialized = _serialize(raw_input)
+    serialized = serialize_value(raw_input)
     if serialized is None:
         return []
     if isinstance(serialized, list):
@@ -112,7 +90,7 @@ def _format_input_messages(raw_input: Any) -> List[Dict[str, Any]]:
 
 def _format_output(resp_output: Any) -> Dict[str, Any]:
     """Extract a clean ``{"role": "assistant", "content": ...}`` from Response output."""
-    serialized = _serialize(resp_output)
+    serialized = serialize_value(resp_output)
     if not serialized:
         return {"role": "assistant", "content": "", "_is_placeholder": True}
 

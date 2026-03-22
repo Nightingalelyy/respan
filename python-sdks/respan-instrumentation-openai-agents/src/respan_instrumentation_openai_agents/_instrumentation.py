@@ -7,7 +7,7 @@ from agents.tracing.processor_interface import TracingProcessor
 from agents.tracing.spans import Span
 from agents.tracing.traces import Trace
 
-from ._otel_emitter import emit_sdk_item
+from respan_instrumentation_openai_agents._otel_emitter import emit_sdk_item
 
 logger = logging.getLogger(__name__)
 
