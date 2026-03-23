@@ -41,6 +41,17 @@ export class Respan {
   constructor(options: RespanOptions = {}) {
     this._pendingInstrumentations = options.instrumentations ?? [];
 
+    // When instrumentations are provided, disable auto-discovery by default
+    // to avoid duplicate spans (plugins handle tracing themselves).
+    // Matches Python: is_auto_instrument defaults to False when plugins given.
+    const hasPlugins = this._pendingInstrumentations.length > 0;
+    const disabledInstrumentations = options.disabledInstrumentations ??
+      (hasPlugins
+        ? ["openAI", "anthropic", "azureOpenAI", "cohere", "bedrock",
+           "googleVertexAI", "googleAIPlatform", "pinecone", "together",
+           "langChain", "llamaIndex", "chromaDB", "qdrant"] as any
+        : undefined);
+
     // Create RespanTelemetry (the OTEL engine)
     this.telemetry = new RespanTelemetry({
       apiKey: options.apiKey,
@@ -48,7 +59,7 @@ export class Respan {
       appName: options.appName,
       traceContent: options.traceContent,
       logLevel: options.logLevel,
-      disabledInstrumentations: options.disabledInstrumentations as any,
+      disabledInstrumentations,
       silenceInitializationMessage: options.silenceInitializationMessage,
     });
   }
