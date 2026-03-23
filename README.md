@@ -40,111 +40,165 @@ Respan's library for sending telemetries of LLM applications in [OpenLLMetry](ht
 
 ## Quickstart
 
-### 1️⃣ Get an API key
+### 1. Get an API key
 Go to Respan platform and [get your API key](https://platform.respan.ai/platform/api/api-keys).
 
-### 2️⃣ Download package
+### 2. Install
 
 #### Python
 
 ```bash
-pip install respan-tracing
+pip install respan respan-tracing respan-instrumentation-openai
 ```
 
 #### TypeScript/JavaScript
 
 ```bash
-npm install @respan/tracing
+npm install @respan/respan @respan/tracing @respan/instrumentation-openai openai @traceloop/instrumentation-openai
 ```
 
+### 3. Trace your LLM calls
 
-### 3️⃣ Initialize Respan tracing processor
 #### Python
 ```python
 import os
-from respan_tracing.main import RespanTelemetry
+from openai import OpenAI
+from respan import Respan
+from respan_instrumentation_openai import OpenAIInstrumentor
 
-os.environ["RESPAN_BASE_URL"] = "https://api.respan.ai/api" # This is also the default value if not explicitly set
-os.environ["RESPAN_API_KEY"] = "YOUR_RESPAN_API_KEY"
-k_tl = RespanTelemetry()
+respan = Respan(instrumentations=[OpenAIInstrumentor()])
+
+client = OpenAI(
+    api_key=os.getenv("RESPAN_API_KEY"),
+    base_url=os.getenv("RESPAN_BASE_URL", "https://api.respan.ai/api"),
+)
+
+response = client.chat.completions.create(
+    model="gpt-4.1-nano",
+    messages=[{"role": "user", "content": "Say hello in three languages."}],
+)
+print(response.choices[0].message.content)
+respan.flush()
 ```
 
-#### Typescript/JavaScript
-```TypeScript
-import { RespanTelemetry } from '@respan/tracing';
+#### TypeScript/JavaScript
+```typescript
+import OpenAI from "openai";
+import { Respan } from "@respan/respan";
+import { OpenAIInstrumentor } from "@respan/instrumentation-openai";
 
-// Initialize clients
-// Make sure to set these environment variables or pass them directly
-const respan = new RespanTelemetry({
-    apiKey: process.env.RESPAN_API_KEY || "",
-    baseUrl: process.env.RESPAN_BASE_URL || "",
-    appName: 'test-app',
-    disableBatch: true  // For testing, disable batching
+const respan = new Respan({
+  apiKey: process.env.RESPAN_API_KEY,
+  baseURL: process.env.RESPAN_BASE_URL,
+  instrumentations: [new OpenAIInstrumentor()],
 });
+await respan.initialize();
+
+const client = new OpenAI({
+  apiKey: process.env.RESPAN_API_KEY,
+  baseURL: process.env.RESPAN_BASE_URL,
+});
+
+const response = await client.chat.completions.create({
+  model: "gpt-4.1-nano",
+  messages: [{ role: "user", content: "Say hello in three languages." }],
+});
+console.log(response.choices[0].message.content);
+await respan.flush();
 ```
 
-### 4️⃣ Trace agent workflows and tasks
+### 4. Structure traces with workflows and tasks
 
 #### Python
-You can now trace your LLM applications using the decorators.
-> A workflow is the whole process of an AI agent run, and a workflow may contains several tasks also could say tools/LLM calls.
->
-> In the example, below, this means there's an Agent run named `my_workflow` and it contains 1 task `my_task` in this agent.
 ```python
-from respan_tracing.decorators import workflow, task
+from respan import Respan, workflow, task
+from respan_instrumentation_openai import OpenAIInstrumentor
 
-@workflow(name="my_workflow")
-def my_workflow():
-    @task(name="my_task")
-    def my_task():
-        pass
-    my_task()
+respan = Respan(instrumentations=[OpenAIInstrumentor()])
+
+@task(name="generate_outline")
+def generate_outline(topic: str) -> str:
+    response = client.chat.completions.create(
+        model="gpt-4.1-nano",
+        messages=[{"role": "user", "content": topic}],
+    )
+    return response.choices[0].message.content
+
+@workflow(name="content_pipeline")
+def run(topic: str):
+    outline = generate_outline(topic)
+    return outline
+
+run("Benefits of open-source software")
+respan.flush()
 ```
 
-
-#### Typescript/JavaScript
-You can now trace your LLM applications by wrapping the wrappers around your functions (`respan.withTask` in the below example)
-
-> A workflow is the whole process of an AI agent run, and a workflow may contains several tasks also could say tools/LLM calls.
->
-> In the example, below, this means there's an Agent run named `pirate_joke_workflow` and it contains 1 task `joke_creation` in this agent.
-```TypeScript
-async function createJoke() {
-    return await respan.withTask(
-        { name: 'joke_creation' },
-        async () => {
-            const completion = await openai.chat.completions.create({
-                messages: [{ role: 'user', content: 'Tell me a joke about TypeScript' }],
-                model: 'gpt-3.5-turbo',
-                temperature: 0.7
-            });
-            return completion.choices[0].message.content;
-        }
-    );
+#### TypeScript/JavaScript
+```typescript
+async function generateOutline(topic: string) {
+  return respan.withTask({ name: "generate_outline" }, async () => {
+    const response = await client.chat.completions.create({
+      model: "gpt-4.1-nano",
+      messages: [{ role: "user", content: topic }],
+    });
+    return response.choices[0].message.content;
+  });
 }
 
-async function jokeWorkflow() {
-    return await respan.withWorkflow(
-        { name: 'pirate_joke_workflow' },
-        async () => {
-            const joke = await createJoke();
-            return joke;
-        }
-    );
+async function run(topic: string) {
+  return respan.withWorkflow({ name: "content_pipeline" }, async () => {
+    return generateOutline(topic);
+  });
 }
+
+await run("Benefits of open-source software");
+await respan.flush();
 ```
 
-### 5️⃣ See traces in [Respan](https://www.respan.ai)
+### 5. Attach customer info with `propagateAttributes`
+
+#### Python
+```python
+from respan import propagate_attributes
+
+with propagate_attributes(customer_identifier="user_123", thread_identifier="conv_001"):
+    response = client.chat.completions.create(...)
+```
+
+#### TypeScript/JavaScript
+```typescript
+await respan.propagateAttributes(
+  { customer_identifier: "user_123", thread_identifier: "conv_001" },
+  async () => {
+    const response = await client.chat.completions.create(...);
+  }
+);
+```
+
+### 6. See traces in [Respan](https://www.respan.ai)
 <div align="center">
 <img src="https://respan-static.s3.us-east-1.amazonaws.com/github/traces-output.png" width="800"> </img>
 </div>
 
-## ⭐️ Star us 🙏
-Please star us if you found this is helpful!
+## Supported Integrations
 
+The plugin system supports 50+ tools via OTEL instrumentation wrappers:
 
-------------------
-For a **comprehensive example**, see the [trace example run](https://github.com/respan-ai/respan_sdks/blob/main/python-sdks/respan-tracing/tests/tracing_tests/basic_workflow_test.py).
-**Step by step guide** can be below:  
-- [Python](https://github.com/respan-ai/respan_sdks/blob/main/python-sdks/respan-tracing/README.md).
-- [TypeScript](https://github.com/respan-ai/respan/blob/main/javascript-sdks/respan-js/README.md).
+| Package | Python | TypeScript |
+|---------|--------|------------|
+| OpenAI SDK | `respan-instrumentation-openai` | `@respan/instrumentation-openai` |
+| OpenAI Agents SDK | `respan-instrumentation-openai-agents` | `@respan/instrumentation-openai-agents` |
+| Anthropic SDK | `respan-instrumentation-anthropic` | `@respan/instrumentation-anthropic` |
+| OpenInference (Arize) | `respan-instrumentation-openinference` | `@respan/instrumentation-openinference` |
+| Any OTEL instrumentor | `OTELInstrumentor(cls)` | `new OTELInstrumentor(cls)` |
+
+Auto-discovery also supports: Azure OpenAI, Cohere, Bedrock, Vertex AI, LangChain, LlamaIndex, Pinecone, ChromaDB, Qdrant, Together AI, and more.
+
+## Star us
+Please star us if you found this helpful!
+
+## Examples
+
+- [Python OpenAI SDK examples](python-sdks/examples/openai-sdk/)
+- [Python OpenAI Agents SDK examples](python-sdks/examples/openai-agents-sdk/)
+- [TypeScript OpenAI SDK examples](javascript-sdks/examples/openai-sdk/)
