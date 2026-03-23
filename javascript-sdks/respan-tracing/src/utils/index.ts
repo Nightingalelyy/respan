@@ -1,5 +1,6 @@
 export * from "./context.js";
 export * from "./span.js";
+export * from "./spanFactory.js";
 
 // Export tracing utils but avoid naming conflicts
 export { startTracing, forceFlush, _resolveBaseURL } from "./tracing.js";

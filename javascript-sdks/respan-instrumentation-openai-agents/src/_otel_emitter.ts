@@ -10,6 +10,7 @@ import { trace, SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import { ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import { hrTime, hrTimeDuration } from "@opentelemetry/core";
 import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
+import { RespanSpanAttributes, RespanLogType } from "@respan/respan-sdk";
 import type { Trace, Span } from "@openai/agents";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -77,7 +78,7 @@ function baseAttrs(
     [SpanAttributes.TRACELOOP_SPAN_KIND]: spanKind,
     [SpanAttributes.TRACELOOP_ENTITY_NAME]: entityName,
     [SpanAttributes.TRACELOOP_ENTITY_PATH]: entityPath,
-    "respan.entity.log_type": logType,
+    [RespanSpanAttributes.RESPAN_LOG_TYPE]: logType,
   };
 }
 
@@ -209,10 +210,10 @@ function isSpan(item: any): item is Span<any> {
 
 function emitTrace(traceObj: Trace): void {
   const attrs = baseAttrs(
-    "workflow",
+    RespanLogType.WORKFLOW,
     traceObj.name || "trace",
-    "", // root — no parent path
-    "workflow",
+    "",
+    RespanLogType.WORKFLOW,
   );
   attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] = traceObj.name || "trace";
 
@@ -232,7 +233,7 @@ function emitAgent(item: Span<any>): void {
   const startHr = parseISOToHrTime(json.started_at);
   const endHr = parseISOToHrTime(json.ended_at);
 
-  const attrs = baseAttrs("agent", name, name, "agent");
+  const attrs = baseAttrs(RespanLogType.AGENT, name, name, RespanLogType.AGENT);
   attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] = name;
   attrs["respan.metadata.agent_name"] = name;
   if (data.tools) attrs["respan.span.tools"] = safeJson(data.tools);
@@ -258,9 +259,9 @@ function emitResponse(item: Span<any>): void {
   const startHr = parseISOToHrTime(json.started_at);
   const endHr = parseISOToHrTime(json.ended_at);
 
-  const attrs = baseAttrs("task", "response", "response", "response");
-  attrs["llm.request.type"] = "chat";
-  attrs["llm.system"] = "openai";
+  const attrs = baseAttrs(RespanLogType.TASK, "response", "response", RespanLogType.RESPONSE);
+  attrs[RespanSpanAttributes.LLM_REQUEST_TYPE] = RespanLogType.CHAT;
+  attrs[RespanSpanAttributes.LLM_SYSTEM] = "openai";
 
   // Input
   const inputMsgs = formatInputMessages(data._input);
@@ -271,7 +272,7 @@ function emitResponse(item: Span<any>): void {
   // Response data
   const resp = data._response;
   if (resp) {
-    if (resp.model) attrs["gen_ai.request.model"] = resp.model;
+    if (resp.model) attrs[RespanSpanAttributes.GEN_AI_REQUEST_MODEL] = resp.model;
 
     if (resp.output) {
       const output = formatOutput(resp.output);
@@ -279,8 +280,8 @@ function emitResponse(item: Span<any>): void {
     }
 
     if (resp.usage) {
-      attrs["gen_ai.usage.prompt_tokens"] = resp.usage.input_tokens ?? 0;
-      attrs["gen_ai.usage.completion_tokens"] = resp.usage.output_tokens ?? 0;
+      attrs[RespanSpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS] = resp.usage.input_tokens ?? 0;
+      attrs[RespanSpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS] = resp.usage.output_tokens ?? 0;
     }
   }
 
@@ -305,7 +306,7 @@ function emitFunction(item: Span<any>): void {
   const startHr = parseISOToHrTime(json.started_at);
   const endHr = parseISOToHrTime(json.ended_at);
 
-  const attrs = baseAttrs("tool", name, name, "tool");
+  const attrs = baseAttrs(RespanLogType.TOOL, name, name, RespanLogType.TOOL);
   attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson([
     { role: "tool", content: String(data.input ?? "") },
   ]);
@@ -334,10 +335,10 @@ function emitGeneration(item: Span<any>): void {
   const startHr = parseISOToHrTime(json.started_at);
   const endHr = parseISOToHrTime(json.ended_at);
 
-  const attrs = baseAttrs("task", "generation", "generation", "generation");
-  attrs["llm.request.type"] = "chat";
+  const attrs = baseAttrs(RespanLogType.TASK, "generation", "generation", RespanLogType.GENERATION);
+  attrs[RespanSpanAttributes.LLM_REQUEST_TYPE] = RespanLogType.CHAT;
 
-  if (data.model) attrs["gen_ai.request.model"] = data.model;
+  if (data.model) attrs[RespanSpanAttributes.GEN_AI_REQUEST_MODEL] = data.model;
 
   const inputMsgs = formatInputMessages(data.input);
   if (inputMsgs) {
@@ -350,9 +351,9 @@ function emitGeneration(item: Span<any>): void {
   }
 
   if (data.usage) {
-    attrs["gen_ai.usage.prompt_tokens"] =
+    attrs[RespanSpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS] =
       data.usage.prompt_tokens ?? data.usage.input_tokens ?? 0;
-    attrs["gen_ai.usage.completion_tokens"] =
+    attrs[RespanSpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS] =
       data.usage.completion_tokens ?? data.usage.output_tokens ?? 0;
   }
 
@@ -379,7 +380,7 @@ function emitHandoff(item: Span<any>): void {
   const fromAgent = data.from_agent || "";
   const toAgent = data.to_agent || "";
 
-  const attrs = baseAttrs("task", "handoff", "handoff", "handoff");
+  const attrs = baseAttrs(RespanLogType.TASK, "handoff", "handoff", RespanLogType.HANDOFF);
   attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson(fromAgent);
   attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson(toAgent);
   attrs["respan.metadata.from_agent"] = fromAgent;
@@ -406,7 +407,7 @@ function emitGuardrail(item: Span<any>): void {
   const startHr = parseISOToHrTime(json.started_at);
   const endHr = parseISOToHrTime(json.ended_at);
 
-  const attrs = baseAttrs("task", name, name, "guardrail");
+  const attrs = baseAttrs(RespanLogType.TASK, name, name, RespanLogType.GUARDRAIL);
   attrs["respan.metadata.guardrail_name"] = data.name;
   attrs["respan.metadata.triggered"] = String(data.triggered);
 
@@ -431,13 +432,13 @@ function emitCustom(item: Span<any>): void {
   const startHr = parseISOToHrTime(json.started_at);
   const endHr = parseISOToHrTime(json.ended_at);
 
-  const attrs = baseAttrs("task", name, name, "custom");
+  const attrs = baseAttrs(RespanLogType.TASK, name, name, RespanLogType.CUSTOM);
   const customData = data.data || {};
   for (const [k, v] of Object.entries(customData)) {
-    if (k === "model") attrs["gen_ai.request.model"] = v;
-    else if (k === "prompt_tokens") attrs["gen_ai.usage.prompt_tokens"] = v;
+    if (k === "model") attrs[RespanSpanAttributes.GEN_AI_REQUEST_MODEL] = v;
+    else if (k === "prompt_tokens") attrs[RespanSpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS] = v;
     else if (k === "completion_tokens")
-      attrs["gen_ai.usage.completion_tokens"] = v;
+      attrs[RespanSpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS] = v;
     else if (k === "input")
       attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson(v);
     else if (k === "output")

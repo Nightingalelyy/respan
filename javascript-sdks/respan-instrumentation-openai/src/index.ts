@@ -1,5 +1,3 @@
-import { trace } from "@opentelemetry/api";
-
 /**
  * Respan instrumentation plugin for the OpenAI SDK.
  *
@@ -21,19 +19,25 @@ export class OpenAIInstrumentor {
   private _isInstrumented = false;
 
   async activate(): Promise<void> {
+    const { trace } = await import("@opentelemetry/api");
     const { OpenAIInstrumentation } = await import(
       "@traceloop/instrumentation-openai"
     );
     this._instrumentor = new OpenAIInstrumentation();
-    const tp = trace.getTracerProvider();
-    this._instrumentor.instrument({ tracerProvider: tp });
+
+    // Point the instrumentor at the global TracerProvider (set by RespanTelemetry)
+    this._instrumentor.setTracerProvider(trace.getTracerProvider());
+
+    // manuallyInstrument patches the OpenAI module's prototypes directly
+    const OpenAI = (await import("openai")).default;
+    this._instrumentor.manuallyInstrument(OpenAI);
     this._isInstrumented = true;
   }
 
   deactivate(): void {
     if (this._isInstrumented && this._instrumentor) {
       try {
-        this._instrumentor.uninstrument();
+        this._instrumentor.unpatch();
       } catch {
         /* ignore */
       }

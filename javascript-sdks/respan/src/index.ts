@@ -15,6 +15,7 @@ export {
   withTask,
   withAgent,
   withTool,
+  propagateAttributes,
 } from "@respan/tracing";
 export { getClient, getSpanBufferManager } from "@respan/tracing";
 export type { ProcessorConfig } from "@respan/tracing";

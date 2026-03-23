@@ -1,5 +1,6 @@
 import { context, Context, createContextKey } from "@opentelemetry/api";
 import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
+import { RespanParams } from "@respan/respan-sdk";
 
 /**
  * Context Keys: Type-safe identifiers for storing values in OpenTelemetry context
@@ -43,6 +44,23 @@ export const getEntityPath = (ctx = context.active()): string | undefined => {
   // Fall back to workflow name (set by WORKFLOW/AGENT spans)
   const workflowName = ctx.getValue(WORKFLOW_NAME_KEY) as string | undefined;
   return workflowName;
+};
+
+// Stores propagated Respan attributes (customer_identifier, thread_identifier, etc.)
+// These are merged onto every span created within the context scope.
+export const PROPAGATED_ATTRIBUTES_KEY = createContextKey(
+  "respan.propagated_attributes"
+);
+
+/**
+ * Get propagated attributes from the given context.
+ */
+export const getPropagatedAttributes = (
+  ctx: Context = context.active()
+): Partial<RespanParams> | undefined => {
+  return ctx.getValue(PROPAGATED_ATTRIBUTES_KEY) as
+    | Partial<RespanParams>
+    | undefined;
 };
 
 /**

@@ -1,4 +1,7 @@
-import { RespanTelemetry } from "@respan/tracing";
+import { RespanTelemetry, propagateAttributes, buildReadableSpan, injectSpan, ensureSpanId } from "@respan/tracing";
+import { RespanSpanAttributes, RespanLogType } from "@respan/respan-sdk";
+import type { RespanParams } from "@respan/respan-sdk";
+import type { ProcessorConfig } from "@respan/tracing";
 import type { RespanInstrumentation } from "./_types.js";
 
 export interface RespanOptions {
@@ -39,6 +42,17 @@ export class Respan {
   constructor(options: RespanOptions = {}) {
     this._pendingInstrumentations = options.instrumentations ?? [];
 
+    // When instrumentations are provided, disable auto-discovery by default
+    // to avoid duplicate spans (plugins handle tracing themselves).
+    // Matches Python: is_auto_instrument defaults to False when plugins given.
+    const hasPlugins = this._pendingInstrumentations.length > 0;
+    const disabledInstrumentations = options.disabledInstrumentations ??
+      (hasPlugins
+        ? ["openAI", "anthropic", "azureOpenAI", "cohere", "bedrock",
+           "googleVertexAI", "googleAIPlatform", "pinecone", "together",
+           "langChain", "llamaIndex", "chromaDB", "qdrant"] as any
+        : undefined);
+
     // Create RespanTelemetry (the OTEL engine)
     this.telemetry = new RespanTelemetry({
       apiKey: options.apiKey,
@@ -46,7 +60,7 @@ export class Respan {
       appName: options.appName,
       traceContent: options.traceContent,
       logLevel: options.logLevel,
-      disabledInstrumentations: options.disabledInstrumentations as any,
+      disabledInstrumentations,
       silenceInitializationMessage: options.silenceInitializationMessage,
     });
   }
@@ -98,14 +112,178 @@ export class Respan {
     return this.telemetry.getSpanBufferManager();
   }
 
-  public addProcessor(config: any): void {
+  public addProcessor(config: ProcessorConfig): void {
     this.telemetry.addProcessor(config);
+  }
+
+  // ── Context propagation ──────────────────────────────────────────────
+
+  /**
+   * Run a function within a context that attaches Respan attributes to all
+   * spans created within its scope.
+   *
+   * Attributes are propagated via OpenTelemetry context — safe for concurrent
+   * async tasks. Nested calls merge attributes (inner wins). Metadata dicts
+   * are merged, not replaced.
+   *
+   * @param attrs - Attributes to propagate: customer_identifier, customer_email,
+   *   customer_name, thread_identifier, custom_identifier, group_identifier,
+   *   environment, metadata (dict), prompt (dict with prompt_id + variables).
+   * @param fn - The function to execute within the propagation scope.
+   * @returns The result of `fn`.
+   *
+   * @example
+   * ```typescript
+   * await respan.propagateAttributes(
+   *   { customer_identifier: "user_123", thread_identifier: "conv_abc" },
+   *   async () => {
+   *     const result = await Runner.run(agent, "Hello");
+   *     return result;
+   *   }
+   * );
+   *
+   * await respan.propagateAttributes(
+   *   { prompt: { prompt_id: "abc123", variables: { x: "y" } } },
+   *   async () => {
+   *     const result = await Runner.run(agent, "Hello");
+   *     return result;
+   *   }
+   * );
+   * ```
+   */
+  propagateAttributes<T>(attrs: Partial<RespanParams>, fn: () => T): T {
+    return propagateAttributes(attrs, fn);
+  }
+
+  // ── Batch API logging ──────────────────────────────────────────────────
+
+  /**
+   * Log OpenAI Batch API results as individual chat completion spans.
+   *
+   * Trace linking (in priority order):
+   * 1. **OTEL context** — when called inside a `withTask` / `withWorkflow`,
+   *    auto-links to the active trace and nests completions under the current span.
+   * 2. **Explicit `traceId`** — for async batches where results arrive in a
+   *    separate process (e.g. 24 hours later).
+   * 3. **Auto-generated** — creates a new standalone trace.
+   *
+   * @param requests - Original batch request dicts (from the input JSONL).
+   *   Each must have `custom_id` and `body.messages`.
+   * @param results - Batch result dicts (from the output JSONL).
+   *   Each must have `custom_id` and `response.body`.
+   * @param traceId - Optional explicit trace ID to link results to.
+   */
+  logBatchResults(
+    requests: Array<Record<string, any>>,
+    results: Array<Record<string, any>>,
+    traceId?: string
+  ): void {
+    const client = this.getClient();
+
+    // Resolve trace context: OTEL > explicit > auto-generated.
+    // OTEL returns all-zero IDs when no active span — treat as absent.
+    let otelTraceId = client.getCurrentTraceId();
+    let otelSpanId = client.getCurrentSpanId();
+    if (otelTraceId && /^0+$/.test(otelTraceId)) otelTraceId = undefined;
+    if (otelSpanId && /^0+$/.test(otelSpanId)) otelSpanId = undefined;
+    const resolvedTraceId = otelTraceId ?? traceId ?? undefined;
+
+    // Determine the parent for completion spans.
+    // With OTEL context: nest under the active span directly.
+    // Without: create a synthetic "batch_results" task span.
+    const parentSpanId = otelSpanId ?? ensureSpanId();
+
+    // Index original requests by custom_id
+    const requestsById = new Map<string, Record<string, any>>();
+    for (const r of requests) {
+      requestsById.set(r.custom_id, r.body ?? {});
+    }
+
+    const completionTimestamps: Date[] = [];
+
+    for (const result of results) {
+      const customId = result.custom_id ?? "";
+      const response = result.response ?? {};
+      const body = response.body ?? {};
+      const statusCode = response.status_code ?? 200;
+
+      const original = requestsById.get(customId) ?? {};
+      const messages = original.messages ?? [];
+
+      const choices = body.choices ?? [{}];
+      const output = choices[0]?.message ?? {};
+      const usage = body.usage ?? {};
+
+      // Extract timestamp from OpenAI response (unix epoch -> ISO 8601)
+      const created: number | undefined = body.created;
+      let endTimeIso: string | undefined;
+      if (created) {
+        const ts = new Date(created * 1000);
+        endTimeIso = ts.toISOString();
+        completionTimestamps.push(ts);
+      }
+
+      const model = body.model ?? original.model ?? "";
+
+      const span = buildReadableSpan({
+        name: `batch:${customId}`,
+        traceId: resolvedTraceId,
+        parentId: parentSpanId,
+        endTimeIso,
+        attributes: {
+          [RespanSpanAttributes.LLM_REQUEST_TYPE]: RespanLogType.CHAT,
+          [RespanSpanAttributes.GEN_AI_REQUEST_MODEL]: model,
+          [RespanSpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS]: usage.prompt_tokens ?? 0,
+          [RespanSpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS]: usage.completion_tokens ?? 0,
+          "traceloop.entity.input": JSON.stringify(messages),
+          "traceloop.entity.output": JSON.stringify(output),
+          "traceloop.entity.path": "batch_results",
+          "traceloop.span.kind": RespanLogType.TASK,
+          [RespanSpanAttributes.RESPAN_LOG_TYPE]: RespanLogType.CHAT,
+        },
+        statusCode,
+      });
+      injectSpan(span);
+    }
+
+    // Create the grouping "batch_results" task span (when no OTEL context)
+    if (!otelSpanId) {
+      let earliestIso: string | undefined;
+      let latestIso: string | undefined;
+      if (completionTimestamps.length > 0) {
+        completionTimestamps.sort((a, b) => a.getTime() - b.getTime());
+        earliestIso = completionTimestamps[0].toISOString();
+        latestIso = completionTimestamps[completionTimestamps.length - 1].toISOString();
+      }
+
+      const parentSpan = buildReadableSpan({
+        name: "batch_results.task",
+        traceId: resolvedTraceId,
+        spanId: parentSpanId,
+        startTimeIso: earliestIso,
+        endTimeIso: latestIso,
+        attributes: {
+          "traceloop.span.kind": RespanLogType.TASK,
+          "traceloop.entity.name": "batch_results",
+          "traceloop.entity.path": "",
+          [RespanSpanAttributes.RESPAN_LOG_TYPE]: RespanLogType.TASK,
+        },
+      });
+      injectSpan(parentSpan);
+    }
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────
 
   /**
-   * Deactivate all plugins and flush telemetry.
+   * Flush the OTEL pipeline.
+   */
+  async flush(): Promise<void> {
+    await this.telemetry.shutdown();
+  }
+
+  /**
+   * Deactivate plugins and shut down the OTEL pipeline.
    */
   async shutdown(): Promise<void> {
     // Deactivate plugins first

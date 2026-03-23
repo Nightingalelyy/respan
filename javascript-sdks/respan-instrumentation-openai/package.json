@@ -21,20 +21,24 @@
     "release": "yarn build && yarn version patch && yarn publish"
   },
   "packageManager": "yarn@4.6.0",
-  "dependencies": {
-    "@opentelemetry/api": "^1.9.0"
-  },
+  "dependencies": {},
   "peerDependencies": {
-    "@traceloop/instrumentation-openai": ">=0.14.0"
+    "@opentelemetry/api": "^1.9.0",
+    "@traceloop/instrumentation-openai": ">=0.14.0",
+    "openai": ">=4.0.0"
   },
   "peerDependenciesMeta": {
     "@traceloop/instrumentation-openai": {
+      "optional": false
+    },
+    "openai": {
       "optional": false
     }
   },
   "devDependencies": {
     "@traceloop/instrumentation-openai": "^0.14.4",
     "@types/node": "^22.15.29",
+    "openai": "^4.0.0",
     "typescript": "^5.7.3"
   }
 }

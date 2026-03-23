@@ -35,7 +35,15 @@ export enum RespanSpanAttributes {
     RESPAN_LOG_SOURCE = "respan.entity.log_source",
 
     // OpenInference
-    OPENINFERENCE_SPAN_KIND = "openinference.span.kind"
+    OPENINFERENCE_SPAN_KIND = "openinference.span.kind",
+
+    // GenAI / LLM semantic conventions (for packages that don't depend on @traceloop/ai-semantic-conventions)
+    GEN_AI_SYSTEM = "gen_ai.system",
+    GEN_AI_REQUEST_MODEL = "gen_ai.request.model",
+    GEN_AI_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens",
+    GEN_AI_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens",
+    LLM_REQUEST_TYPE = "llm.request.type",
+    LLM_SYSTEM = "llm.system",
 }
 
 export const RESPAN_SPAN_ATTRIBUTES_MAP: { [key: string]: string } = {
