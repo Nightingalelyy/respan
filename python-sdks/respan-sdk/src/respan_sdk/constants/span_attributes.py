@@ -134,3 +134,8 @@ GEN_AI_TOOL_CALL_RESULT = "gen_ai.tool.call.result"
 PYDANTIC_AI_AGENT_NAME = "agent_name"
 PYDANTIC_AI_TOOL_ARGUMENTS = "tool_arguments"
 PYDANTIC_AI_TOOL_RESPONSE = "tool_response"
+
+# ---------------------------------------------------------------------------
+# OpenInference vendor attributes
+# ---------------------------------------------------------------------------
+OPENINFERENCE_SPAN_KIND = "openinference.span.kind"
