@@ -46,7 +46,10 @@ export const RESPAN_SPAN_ATTRIBUTES_MAP: { [key: string]: string } = {
     thread_identifier: RespanSpanAttributes.RESPAN_THREADS_ID,
     custom_identifier: RespanSpanAttributes.RESPAN_SPAN_CUSTOM_ID,
     trace_group_identifier: RespanSpanAttributes.RESPAN_TRACE_GROUP_ID,
-    metadata: RespanSpanAttributes.RESPAN_METADATA
+    group_identifier: RespanSpanAttributes.RESPAN_TRACE_GROUP_ID,
+    metadata: RespanSpanAttributes.RESPAN_METADATA,
+    prompt: RespanSpanAttributes.RESPAN_PROMPT,
+    environment: RespanSpanAttributes.RESPAN_ENVIRONMENT,
 };
 
 // Type for valid span attribute values

@@ -6,7 +6,10 @@ export type RespanParams = {
     evaluation_identifier?: string | number;
     thread_identifier?: string | number;
     trace_group_identifier?: string | number;
+    group_identifier?: string | number;
     metadata?: Record<string, any>;
+    prompt?: Record<string, any> | string;
+    environment?: string;
 }
 
 
