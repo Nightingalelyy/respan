@@ -38,12 +38,9 @@ Respan's library for sending telemetries of LLM applications in [OpenLLMetry](ht
 </div>
 
 
-## Quickstart
+## Configuration
 
-### 1. Get an API key
-Go to Respan platform and [get your API key](https://platform.respan.ai/platform/api/api-keys).
-
-### 2. Install
+### 1. Install
 
 #### Python
 
@@ -57,7 +54,18 @@ pip install respan respan-tracing respan-instrumentation-openai
 npm install @respan/respan @respan/tracing @respan/instrumentation-openai openai @traceloop/instrumentation-openai
 ```
 
-### 3. Trace your LLM calls
+### 2. Set Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `RESPAN_API_KEY` | Yes | Your Respan API key. Authenticates both proxy and tracing. Get it from the [platform](https://platform.respan.ai/platform/api/api-keys). |
+| `RESPAN_BASE_URL` | No | Defaults to `https://api.respan.ai/api`. |
+
+The Respan API key is used for both LLM inference (proxy) and telemetry export (tracing). Vendor-specific keys (OPENAI_API_KEY, etc.) are derived from the Respan key in code.
+
+## Quickstart
+
+### 3. Run Script
 
 #### Python
 ```python
@@ -68,10 +76,11 @@ from respan_instrumentation_openai import OpenAIInstrumentor
 
 respan = Respan(instrumentations=[OpenAIInstrumentor()])
 
-client = OpenAI(
-    api_key=os.getenv("RESPAN_API_KEY"),
-    base_url=os.getenv("RESPAN_BASE_URL", "https://api.respan.ai/api"),
-)
+# Respan API key authenticates both proxy and tracing
+respan_api_key = os.environ["RESPAN_API_KEY"]
+respan_base_url = os.getenv("RESPAN_BASE_URL", "https://api.respan.ai/api")
+
+client = OpenAI(api_key=respan_api_key, base_url=respan_base_url)
 
 response = client.chat.completions.create(
     model="gpt-4.1-nano",
@@ -87,6 +96,7 @@ import OpenAI from "openai";
 import { Respan } from "@respan/respan";
 import { OpenAIInstrumentor } from "@respan/instrumentation-openai";
 
+// Respan API key authenticates both proxy and tracing
 const respan = new Respan({
   apiKey: process.env.RESPAN_API_KEY,
   baseURL: process.env.RESPAN_BASE_URL,
@@ -107,80 +117,23 @@ console.log(response.choices[0].message.content);
 await respan.flush();
 ```
 
-### 4. Structure traces with workflows and tasks
+### 4. View Dashboard
 
-#### Python
-```python
-from respan import Respan, workflow, task
-from respan_instrumentation_openai import OpenAIInstrumentor
+See your traces in the [Respan platform](https://platform.respan.ai).
 
-respan = Respan(instrumentations=[OpenAIInstrumentor()])
-
-@task(name="generate_outline")
-def generate_outline(topic: str) -> str:
-    response = client.chat.completions.create(
-        model="gpt-4.1-nano",
-        messages=[{"role": "user", "content": topic}],
-    )
-    return response.choices[0].message.content
-
-@workflow(name="content_pipeline")
-def run(topic: str):
-    outline = generate_outline(topic)
-    return outline
-
-run("Benefits of open-source software")
-respan.flush()
-```
-
-#### TypeScript/JavaScript
-```typescript
-async function generateOutline(topic: string) {
-  return respan.withTask({ name: "generate_outline" }, async () => {
-    const response = await client.chat.completions.create({
-      model: "gpt-4.1-nano",
-      messages: [{ role: "user", content: topic }],
-    });
-    return response.choices[0].message.content;
-  });
-}
-
-async function run(topic: string) {
-  return respan.withWorkflow({ name: "content_pipeline" }, async () => {
-    return generateOutline(topic);
-  });
-}
-
-await run("Benefits of open-source software");
-await respan.flush();
-```
-
-### 5. Attach customer info with `propagateAttributes`
-
-#### Python
-```python
-from respan import propagate_attributes
-
-with propagate_attributes(customer_identifier="user_123", thread_identifier="conv_001"):
-    response = client.chat.completions.create(...)
-```
-
-#### TypeScript/JavaScript
-```typescript
-await respan.propagateAttributes(
-  { customer_identifier: "user_123", thread_identifier: "conv_001" },
-  async () => {
-    const response = await client.chat.completions.create(...);
-  }
-);
-```
-
-### 6. See traces in [Respan](https://www.respan.ai)
 <div align="center">
 <img src="https://respan-static.s3.us-east-1.amazonaws.com/github/traces-output.png" width="800"> </img>
 </div>
 
-## Supported Integrations
+## Further Reading
+
+### Examples
+
+- [Python OpenAI SDK examples](python-sdks/examples/openai-sdk/) — hello world, decorators, attributes, batch, streaming, tool calls
+- [Python OpenAI Agents SDK examples](python-sdks/examples/openai-agents-sdk/) — hello world, handoffs, routing, guardrails
+- [TypeScript OpenAI SDK examples](javascript-sdks/examples/openai-sdk/) — hello world, decorators, attributes
+
+### Supported Integrations
 
 The plugin system supports 50+ tools via OTEL instrumentation wrappers:
 
@@ -194,11 +147,13 @@ The plugin system supports 50+ tools via OTEL instrumentation wrappers:
 
 Auto-discovery also supports: Azure OpenAI, Cohere, Bedrock, Vertex AI, LangChain, LlamaIndex, Pinecone, ChromaDB, Qdrant, Together AI, and more.
 
+### Workflow and Task Decorators
+
+Structure traces with `@workflow` / `@task` (Python) or `withWorkflow` / `withTask` (TypeScript). See the [decorators example](python-sdks/examples/openai-sdk/decorators.py) for details.
+
+### Propagate Attributes
+
+Attach `customer_identifier`, `thread_identifier`, and `metadata` to all spans in scope. See the [attributes example](python-sdks/examples/openai-sdk/attributes.py).
+
 ## Star us
 Please star us if you found this helpful!
-
-## Examples
-
-- [Python OpenAI SDK examples](python-sdks/examples/openai-sdk/)
-- [Python OpenAI Agents SDK examples](python-sdks/examples/openai-agents-sdk/)
-- [TypeScript OpenAI SDK examples](javascript-sdks/examples/openai-sdk/)
