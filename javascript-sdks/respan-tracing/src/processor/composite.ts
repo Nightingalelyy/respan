@@ -4,8 +4,12 @@ import {
   ReadableSpan,
 } from "@opentelemetry/sdk-trace-base";
 import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
+import {
+  RESPAN_SPAN_ATTRIBUTES_MAP,
+  RespanSpanAttributes,
+} from "@respan/respan-sdk";
 import { MultiProcessorManager } from "./manager.js";
-import { getEntityPath } from "../utils/context.js";
+import { getEntityPath, getPropagatedAttributes } from "../utils/context.js";
 
 // ── OpenInference span enrichment ──────────────────────────────────────────
 
@@ -118,6 +122,29 @@ export class RespanCompositeProcessor implements SpanProcessor {
 
       // We need to cast to any to set attributes during onStart
       (span as any).setAttribute(SpanAttributes.TRACELOOP_ENTITY_PATH, entityPath);
+    }
+
+    // Apply propagated attributes (customer_identifier, thread_identifier, etc.)
+    const propagated = getPropagatedAttributes(parentContext);
+    if (propagated) {
+      for (const [key, value] of Object.entries(propagated)) {
+        if (value === undefined || value === null) continue;
+        const attrKey = RESPAN_SPAN_ATTRIBUTES_MAP[key];
+        if (!attrKey) continue;
+
+        if (key === "metadata" && typeof value === "object") {
+          for (const [mk, mv] of Object.entries(value as Record<string, any>)) {
+            (span as any).setAttribute(
+              `${RespanSpanAttributes.RESPAN_METADATA}.${mk}`,
+              typeof mv === "string" ? mv : JSON.stringify(mv)
+            );
+          }
+        } else if (key === "prompt" && typeof value === "object") {
+          (span as any).setAttribute(attrKey, JSON.stringify(value));
+        } else {
+          (span as any).setAttribute(attrKey, value as any);
+        }
+      }
     }
 
     // Forward to processor manager
