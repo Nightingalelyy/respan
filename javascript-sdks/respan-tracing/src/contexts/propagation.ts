@@ -1,4 +1,5 @@
 import { context } from "@opentelemetry/api";
+import { RESPAN_SPAN_ATTRIBUTES_MAP } from "@respan/respan-sdk";
 import type { RespanParams } from "@respan/respan-sdk";
 import {
   PROPAGATED_ATTRIBUTES_KEY,
@@ -37,6 +38,10 @@ export function propagateAttributes<T>(
   const merged: Partial<RespanParams> = { ...parent };
 
   for (const [key, value] of Object.entries(attrs)) {
+    if (!(key in RESPAN_SPAN_ATTRIBUTES_MAP)) {
+      console.warn(`[Respan] Ignoring unsupported attribute: ${key}`);
+      continue;
+    }
     if (key === "metadata" && typeof value === "object" && value !== null) {
       // Merge metadata dicts instead of replacing
       merged.metadata = { ...(merged.metadata ?? {}), ...value };

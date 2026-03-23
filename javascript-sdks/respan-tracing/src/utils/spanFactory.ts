@@ -9,7 +9,9 @@
 import { trace, SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import { hrTime, hrTimeDuration } from "@opentelemetry/core";
+import { RESPAN_SPAN_ATTRIBUTES_MAP, RespanSpanAttributes } from "@respan/respan-sdk";
 import { RESPAN_PACKAGE_NAME } from "../constants/index.js";
+import { getPropagatedAttributes } from "./context.js";
 
 // ── ID helpers ──────────────────────────────────────────────────────────────
 
@@ -70,6 +72,8 @@ export interface BuildSpanOptions {
   attributes: Record<string, any>;
   statusCode?: number;
   errorMessage?: string;
+  /** Merge propagated attributes from context. Default: true (matches Python). */
+  mergePropagated?: boolean;
 }
 
 /**
@@ -90,6 +94,35 @@ export function buildReadableSpan(opts: BuildSpanOptions): ReadableSpan {
   const parentSpanId = opts.parentId
     ? ensureSpanId(opts.parentId)
     : undefined;
+
+  // Merge propagated attributes (customer_identifier, thread_id, etc.)
+  // Matches Python's merge_propagated=True default in build_readable_span()
+  const attrs: Record<string, any> = { ...opts.attributes };
+  if (opts.mergePropagated !== false) {
+    const propagated = getPropagatedAttributes();
+    if (propagated) {
+      for (const [key, value] of Object.entries(propagated)) {
+        if (value === undefined || value === null) continue;
+        const attrKey = RESPAN_SPAN_ATTRIBUTES_MAP[key];
+        if (!attrKey) continue;
+        // Only set if not already present (caller attrs take precedence)
+        if (attrs[attrKey] !== undefined) continue;
+
+        if (key === "metadata" && typeof value === "object") {
+          for (const [mk, mv] of Object.entries(value as Record<string, any>)) {
+            const fullKey = `${RespanSpanAttributes.RESPAN_METADATA}.${mk}`;
+            if (attrs[fullKey] === undefined) {
+              attrs[fullKey] = typeof mv === "string" ? mv : JSON.stringify(mv);
+            }
+          }
+        } else if (key === "prompt" && typeof value === "object") {
+          attrs[attrKey] = JSON.stringify(value);
+        } else {
+          attrs[attrKey] = value;
+        }
+      }
+    }
+  }
 
   const status =
     opts.errorMessage
@@ -112,7 +145,7 @@ export function buildReadableSpan(opts: BuildSpanOptions): ReadableSpan {
     endTime,
     duration: hrTimeDuration(startTime, endTime),
     status,
-    attributes: opts.attributes,
+    attributes: attrs,
     links: [],
     events: [],
     resource: { attributes: {} } as any,

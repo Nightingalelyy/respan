@@ -1,5 +1,6 @@
-import { RespanTelemetry, propagateAttributes, buildReadableSpan, injectSpan } from "@respan/tracing";
+import { RespanTelemetry, propagateAttributes, buildReadableSpan, injectSpan, ensureSpanId } from "@respan/tracing";
 import type { RespanParams } from "@respan/respan-sdk";
+import type { ProcessorConfig } from "@respan/tracing";
 import type { RespanInstrumentation } from "./_types.js";
 
 export interface RespanOptions {
@@ -99,7 +100,7 @@ export class Respan {
     return this.telemetry.getSpanBufferManager();
   }
 
-  public addProcessor(config: any): void {
+  public addProcessor(config: ProcessorConfig): void {
     this.telemetry.addProcessor(config);
   }
 
@@ -178,7 +179,7 @@ export class Respan {
     // Determine the parent for completion spans.
     // With OTEL context: nest under the active span directly.
     // Without: create a synthetic "batch_results" task span.
-    const parentSpanId = otelSpanId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+    const parentSpanId = otelSpanId ?? ensureSpanId();
 
     // Index original requests by custom_id
     const requestsById = new Map<string, Record<string, any>>();
@@ -263,7 +264,14 @@ export class Respan {
   // ── Lifecycle ─────────────────────────────────────────────────────────
 
   /**
-   * Deactivate all plugins and flush telemetry.
+   * Flush the OTEL pipeline.
+   */
+  async flush(): Promise<void> {
+    await this.telemetry.shutdown();
+  }
+
+  /**
+   * Deactivate plugins and shut down the OTEL pipeline.
    */
   async shutdown(): Promise<void> {
     // Deactivate plugins first
