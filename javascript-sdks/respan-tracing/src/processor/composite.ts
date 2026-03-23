@@ -7,14 +7,74 @@ import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
 import { MultiProcessorManager } from "./manager.js";
 import { getEntityPath } from "../utils/context.js";
 
+// ── OpenInference span enrichment ──────────────────────────────────────────
+
+/** Map OI span kinds → Traceloop span kinds */
+const OI_KIND_TO_TRACELOOP: Record<string, string> = {
+  LLM: "task",
+  CHAIN: "workflow",
+  TOOL: "tool",
+  AGENT: "agent",
+  EMBEDDING: "task",
+  RETRIEVER: "task",
+  RERANKER: "task",
+  GUARDRAIL: "task",
+  EVALUATOR: "task",
+};
+
+/** OI span kinds that imply an LLM request type */
+const OI_LLM_REQUEST_KINDS: Record<string, string> = {
+  LLM: "chat",
+  EMBEDDING: "embedding",
+};
+
+/**
+ * Build Traceloop/GenAI enrichment attributes for an OpenInference span.
+ * Returns only the attributes that need to be *added*; callers merge them
+ * on top of the original span attributes.
+ */
+function getOIEnrichmentAttrs(span: ReadableSpan): Record<string, any> {
+  const attrs: Record<string, any> = {};
+  const oiKind = String(span.attributes["openinference.span.kind"] ?? "");
+
+  if (OI_KIND_TO_TRACELOOP[oiKind]) {
+    attrs[SpanAttributes.TRACELOOP_SPAN_KIND] = OI_KIND_TO_TRACELOOP[oiKind];
+  }
+  if (OI_LLM_REQUEST_KINDS[oiKind]) {
+    attrs["llm.request.type"] = OI_LLM_REQUEST_KINDS[oiKind];
+  }
+
+  // Bridge OI semantic attrs → Traceloop/GenAI equivalents
+  if (span.attributes["input.value"] !== undefined)
+    attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = span.attributes["input.value"];
+  if (span.attributes["output.value"] !== undefined)
+    attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = span.attributes["output.value"];
+  if (span.attributes["llm.model_name"] !== undefined)
+    attrs["gen_ai.request.model"] = span.attributes["llm.model_name"];
+  if (span.attributes["llm.token_count.prompt"] !== undefined)
+    attrs["gen_ai.usage.prompt_tokens"] = span.attributes["llm.token_count.prompt"];
+  if (span.attributes["llm.token_count.completion"] !== undefined)
+    attrs["gen_ai.usage.completion_tokens"] = span.attributes["llm.token_count.completion"];
+
+  // Entity name / path
+  attrs[SpanAttributes.TRACELOOP_ENTITY_NAME] = span.name;
+  if (OI_KIND_TO_TRACELOOP[oiKind] !== "workflow") {
+    attrs[SpanAttributes.TRACELOOP_ENTITY_PATH] = span.name;
+  }
+
+  return attrs;
+}
+
+// ── Composite processor ────────────────────────────────────────────────────
+
 /**
  * Composite processor that combines filtering with multi-processor routing.
- * 
+ *
  * Flow:
  * 1. Filter spans (keep only user-decorated spans and their children)
  * 2. Apply postprocess callback if configured
  * 3. Route filtered spans to appropriate processors
- * 
+ *
  * This ensures only meaningful spans are routed to processors.
  */
 export class RespanCompositeProcessor implements SpanProcessor {
@@ -106,9 +166,26 @@ export class RespanCompositeProcessor implements SpanProcessor {
       console.debug(
         `[Respan Debug] Processing LLM instrumentation span: ${span.name}`
       );
-      
+
       // Route to processors
       this._processorManager.onEnd(span);
+    } else if (span.attributes["openinference.span.kind"] !== undefined) {
+      // OpenInference span — enrich with Traceloop/GenAI attrs, then route
+      console.debug(
+        `[Respan Debug] Processing OpenInference span: ${span.name} (kind: ${span.attributes["openinference.span.kind"]})`
+      );
+
+      const enrichmentAttrs = getOIEnrichmentAttrs(span);
+      const enrichedSpan = Object.create(Object.getPrototypeOf(span));
+      Object.assign(enrichedSpan, span);
+      Object.defineProperty(enrichedSpan, "attributes", {
+        value: { ...span.attributes, ...enrichmentAttrs },
+        writable: false,
+        configurable: true,
+        enumerable: true,
+      });
+
+      this._processorManager.onEnd(enrichedSpan);
     } else {
       // This span has none of the above - it's pure auto-instrumentation noise (HTTP calls, etc.)
       console.debug(

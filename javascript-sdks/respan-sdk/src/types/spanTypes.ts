@@ -17,7 +17,10 @@ export enum RespanSpanAttributes {
     RESPAN_TRACE_GROUP_ID = "respan.trace.trace_group_identifier",
 
     // Metadata
-    RESPAN_METADATA = "respan.metadata"
+    RESPAN_METADATA = "respan.metadata",
+
+    // OpenInference
+    OPENINFERENCE_SPAN_KIND = "openinference.span.kind"
 }
 
 export const RESPAN_SPAN_ATTRIBUTES_MAP: { [key: string]: string } = {
