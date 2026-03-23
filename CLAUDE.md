@@ -13,8 +13,9 @@ respan/
 ├── python-sdks/           # Python packages (Poetry)
 │   ├── respan-sdk/            # Core types, preprocessing, API payload helpers
 │   ├── respan-tracing/        # Main tracing library with OpenTelemetry
-│   ├── respan-exporter-*/     # Integration exporters (litellm, agno, haystack, openai-agents, langfuse)
-│   └── respan/                # Standalone package
+│   ├── respan/                # Standalone package
+│   ├── instrumentations/      # OTEL-based instrumentation plugins (openai, anthropic-agents, openai-agents, langfuse)
+│   └── respan-exporter-*/     # Integration exporters (litellm, agno, haystack, openai-agents, pydantic-ai)
 ├── javascript-sdks/       # JavaScript/TypeScript packages (Yarn)
 │   ├── respan-sdk/            # Core types and SDK (@respan/respan-sdk)
 │   ├── respan-tracing/        # Main tracing library (@respan/tracing)
