@@ -7,6 +7,7 @@ import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
 import {
   RESPAN_SPAN_ATTRIBUTES_MAP,
   RespanSpanAttributes,
+  RespanLogType,
 } from "@respan/respan-sdk";
 import { MultiProcessorManager } from "./manager.js";
 import { getEntityPath, getPropagatedAttributes } from "../utils/context.js";
@@ -15,34 +16,34 @@ import { getEntityPath, getPropagatedAttributes } from "../utils/context.js";
 
 /** Map OI span kinds → Traceloop span kinds */
 const OI_KIND_TO_TRACELOOP: Record<string, string> = {
-  LLM: "task",
-  CHAIN: "workflow",
-  TOOL: "tool",
-  AGENT: "agent",
-  EMBEDDING: "task",
-  RETRIEVER: "task",
-  RERANKER: "task",
-  GUARDRAIL: "task",
-  EVALUATOR: "task",
+  LLM: RespanLogType.TASK,
+  CHAIN: RespanLogType.WORKFLOW,
+  TOOL: RespanLogType.TOOL,
+  AGENT: RespanLogType.AGENT,
+  EMBEDDING: RespanLogType.TASK,
+  RETRIEVER: RespanLogType.TASK,
+  RERANKER: RespanLogType.TASK,
+  GUARDRAIL: RespanLogType.TASK,
+  EVALUATOR: RespanLogType.TASK,
 };
 
 /** OI span kinds that imply an LLM request type */
 const OI_LLM_REQUEST_KINDS: Record<string, string> = {
-  LLM: "chat",
-  EMBEDDING: "embedding",
+  LLM: RespanLogType.CHAT,
+  EMBEDDING: RespanLogType.EMBEDDING,
 };
 
 /** Map OI span kinds → respan.entity.log_type values */
 const OI_LOG_TYPE: Record<string, string> = {
-  LLM: "chat",
-  CHAIN: "workflow",
-  TOOL: "tool",
-  AGENT: "agent",
-  EMBEDDING: "embedding",
-  RETRIEVER: "task",
-  RERANKER: "task",
-  GUARDRAIL: "guardrail",
-  EVALUATOR: "task",
+  LLM: RespanLogType.CHAT,
+  CHAIN: RespanLogType.WORKFLOW,
+  TOOL: RespanLogType.TOOL,
+  AGENT: RespanLogType.AGENT,
+  EMBEDDING: RespanLogType.EMBEDDING,
+  RETRIEVER: RespanLogType.TASK,
+  RERANKER: RespanLogType.TASK,
+  GUARDRAIL: RespanLogType.GUARDRAIL,
+  EVALUATOR: RespanLogType.TASK,
 };
 
 /**
@@ -52,16 +53,16 @@ const OI_LOG_TYPE: Record<string, string> = {
  */
 function getOIEnrichmentAttrs(span: ReadableSpan): Record<string, any> {
   const attrs: Record<string, any> = {};
-  const oiKind = String(span.attributes["openinference.span.kind"] ?? "");
+  const oiKind = String(span.attributes[RespanSpanAttributes.OPENINFERENCE_SPAN_KIND] ?? "");
 
   if (OI_KIND_TO_TRACELOOP[oiKind]) {
     attrs[SpanAttributes.TRACELOOP_SPAN_KIND] = OI_KIND_TO_TRACELOOP[oiKind];
   }
   if (OI_LLM_REQUEST_KINDS[oiKind]) {
-    attrs["llm.request.type"] = OI_LLM_REQUEST_KINDS[oiKind];
+    attrs[RespanSpanAttributes.LLM_REQUEST_TYPE] = OI_LLM_REQUEST_KINDS[oiKind];
   }
   if (OI_LOG_TYPE[oiKind]) {
-    attrs["respan.entity.log_type"] = OI_LOG_TYPE[oiKind];
+    attrs[RespanSpanAttributes.RESPAN_LOG_TYPE] = OI_LOG_TYPE[oiKind];
   }
 
   // Bridge OI semantic attrs → Traceloop/GenAI equivalents
@@ -70,11 +71,11 @@ function getOIEnrichmentAttrs(span: ReadableSpan): Record<string, any> {
   if (span.attributes["output.value"] !== undefined)
     attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = span.attributes["output.value"];
   if (span.attributes["llm.model_name"] !== undefined)
-    attrs["gen_ai.request.model"] = span.attributes["llm.model_name"];
+    attrs[RespanSpanAttributes.GEN_AI_REQUEST_MODEL] = span.attributes["llm.model_name"];
   if (span.attributes["llm.token_count.prompt"] !== undefined)
-    attrs["gen_ai.usage.prompt_tokens"] = span.attributes["llm.token_count.prompt"];
+    attrs[RespanSpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS] = span.attributes["llm.token_count.prompt"];
   if (span.attributes["llm.token_count.completion"] !== undefined)
-    attrs["gen_ai.usage.completion_tokens"] = span.attributes["llm.token_count.completion"];
+    attrs[RespanSpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS] = span.attributes["llm.token_count.completion"];
 
   // Entity name / path
   attrs[SpanAttributes.TRACELOOP_ENTITY_NAME] = span.name;
@@ -167,8 +168,8 @@ export class RespanCompositeProcessor implements SpanProcessor {
     // Check if this is an LLM instrumentation span (OpenAI, Anthropic, etc.)
     // These have gen_ai.* or llm.* attributes
     const isLLMSpan =
-      span.attributes['gen_ai.system'] !== undefined ||
-      span.attributes['llm.system'] !== undefined ||
+      span.attributes[RespanSpanAttributes.GEN_AI_SYSTEM] !== undefined ||
+      span.attributes[RespanSpanAttributes.LLM_SYSTEM] !== undefined ||
       span.attributes['gen_ai.request.model'] !== undefined ||
       span.name.includes('anthropic.messages') ||
       span.name.includes('openai.chat') ||
@@ -212,10 +213,10 @@ export class RespanCompositeProcessor implements SpanProcessor {
 
       // Route to processors
       this._processorManager.onEnd(span);
-    } else if (span.attributes["openinference.span.kind"] !== undefined) {
+    } else if (span.attributes[RespanSpanAttributes.OPENINFERENCE_SPAN_KIND] !== undefined) {
       // OpenInference span — enrich with Traceloop/GenAI attrs, then route
       console.debug(
-        `[Respan Debug] Processing OpenInference span: ${span.name} (kind: ${span.attributes["openinference.span.kind"]})`
+        `[Respan Debug] Processing OpenInference span: ${span.name} (kind: ${span.attributes[RespanSpanAttributes.OPENINFERENCE_SPAN_KIND]})`
       );
 
       const enrichmentAttrs = getOIEnrichmentAttrs(span);
@@ -229,7 +230,7 @@ export class RespanCompositeProcessor implements SpanProcessor {
       });
 
       this._processorManager.onEnd(enrichedSpan);
-    } else if (span.attributes["respan.entity.log_type"] !== undefined) {
+    } else if (span.attributes[RespanSpanAttributes.RESPAN_LOG_TYPE] !== undefined) {
       // Enriched Respan span (from an instrumentation plugin)
       console.debug(
         `[Respan Debug] Processing enriched Respan span: ${span.name}`

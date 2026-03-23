@@ -1,4 +1,5 @@
 import { RespanTelemetry, propagateAttributes, buildReadableSpan, injectSpan, ensureSpanId } from "@respan/tracing";
+import { RespanSpanAttributes, RespanLogType } from "@respan/respan-sdk";
 import type { RespanParams } from "@respan/respan-sdk";
 import type { ProcessorConfig } from "@respan/tracing";
 import type { RespanInstrumentation } from "./_types.js";
@@ -230,15 +231,15 @@ export class Respan {
         parentId: parentSpanId,
         endTimeIso,
         attributes: {
-          "llm.request.type": "chat",
-          "gen_ai.request.model": model,
-          "gen_ai.usage.prompt_tokens": usage.prompt_tokens ?? 0,
-          "gen_ai.usage.completion_tokens": usage.completion_tokens ?? 0,
+          [RespanSpanAttributes.LLM_REQUEST_TYPE]: RespanLogType.CHAT,
+          [RespanSpanAttributes.GEN_AI_REQUEST_MODEL]: model,
+          [RespanSpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS]: usage.prompt_tokens ?? 0,
+          [RespanSpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS]: usage.completion_tokens ?? 0,
           "traceloop.entity.input": JSON.stringify(messages),
           "traceloop.entity.output": JSON.stringify(output),
           "traceloop.entity.path": "batch_results",
-          "traceloop.span.kind": "task",
-          "respan.entity.log_type": "chat",
+          "traceloop.span.kind": RespanLogType.TASK,
+          [RespanSpanAttributes.RESPAN_LOG_TYPE]: RespanLogType.CHAT,
         },
         statusCode,
       });
@@ -262,10 +263,10 @@ export class Respan {
         startTimeIso: earliestIso,
         endTimeIso: latestIso,
         attributes: {
-          "traceloop.span.kind": "task",
+          "traceloop.span.kind": RespanLogType.TASK,
           "traceloop.entity.name": "batch_results",
           "traceloop.entity.path": "",
-          "respan.entity.log_type": "task",
+          [RespanSpanAttributes.RESPAN_LOG_TYPE]: RespanLogType.TASK,
         },
       });
       injectSpan(parentSpan);
