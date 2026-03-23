@@ -1,0 +1,25 @@
+[tool.poetry]
+name = "respan-instrumentation-openinference"
+version = "1.0.0"
+description = "Respan instrumentation wrapper for OpenInference"
+authors = ["Respan <team@respan.ai>"]
+license = "Apache 2.0"
+readme = "README.md"
+packages = [
+    { include = "respan_instrumentation_openinference", from = "./src" },
+]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.14"
+respan-tracing = "^2.3.0"
+# Users install individual OpenInference packages as needed, e.g.:
+#   pip install openinference-instrumentation-google-adk
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: live network tests (requires API keys)",
+]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

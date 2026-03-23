@@ -1,6 +1,7 @@
 """Respan — unified entry point for tracing and instrumentation plugins."""
 
 from ._core import Respan
+from ._otel_instrumentor import OTELInstrumentor
 from ._types import Instrumentation
 
 # Re-export decorators and client from respan-tracing
@@ -10,6 +11,7 @@ from respan_tracing.exporters import propagate_attributes
 
 __all__ = [
     "Respan",
+    "OTELInstrumentor",
     "Instrumentation",
     "workflow",
     "task",
