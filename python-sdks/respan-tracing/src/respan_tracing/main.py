@@ -3,10 +3,10 @@ import logging
 from typing import Optional, Set, Dict, Callable, Literal, Union
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter
-from .decorators import workflow, task, agent, tool
-from .core import RespanTracer, RespanClient
-from .instruments import Instruments
-from .utils.logging import get_main_logger
+from respan_tracing.decorators import workflow, task, agent, tool
+from respan_tracing.core import RespanTracer, RespanClient
+from respan_tracing.instruments import Instruments
+from respan_tracing.utils.logging import get_main_logger
 
 class RespanTelemetry:
     """
@@ -87,6 +87,7 @@ class RespanTelemetry:
         resource_attributes: Optional[Dict[str, str]] = None,
         span_postprocess_callback: Optional[Callable[[ReadableSpan], None]] = None,
         is_enabled: bool = True,
+        is_auto_instrument: bool = True,
     ):
         # Get configuration from environment variables
         api_key = api_key or os.getenv("RESPAN_API_KEY")
@@ -121,6 +122,7 @@ class RespanTelemetry:
             resource_attributes=resource_attributes,
             span_postprocess_callback=span_postprocess_callback,
             is_enabled=is_enabled,
+            is_auto_instrument=is_auto_instrument,
         )
         
         if is_enabled:

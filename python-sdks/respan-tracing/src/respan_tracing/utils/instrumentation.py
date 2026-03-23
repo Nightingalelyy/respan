@@ -5,7 +5,7 @@ import logging
 import traceback
 from typing import Optional, Set, Callable
 
-from ..instruments import Instruments
+from respan_tracing.instruments import Instruments
 
 
 logger = logging.getLogger(__name__)
@@ -142,9 +142,11 @@ def init_instrumentations(
     return True
 
 
+
 # ---------------------------------------------------------------------------
 # Post-init hooks — special-case patches that run after instrument()
 # ---------------------------------------------------------------------------
+
 
 @_register_hook("openai")
 def _patch_chat_prompt_capture():

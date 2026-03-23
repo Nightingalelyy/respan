@@ -2,24 +2,39 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.semconv_ai import SpanAttributes
 import logging
 
+from respan_sdk.constants.span_attributes import (
+    GEN_AI_OPERATION_NAME,
+    GEN_AI_AGENT_NAME,
+    GEN_AI_TOOL_NAME,
+    GEN_AI_TOOL_CALL_ARGUMENTS,
+    GEN_AI_TOOL_CALL_RESULT,
+    PYDANTIC_AI_AGENT_NAME,
+    PYDANTIC_AI_TOOL_ARGUMENTS,
+    PYDANTIC_AI_TOOL_RESPONSE,
+    RESPAN_LOG_TYPE,
+)
+
 logger = logging.getLogger(__name__)
 
+# Attribute names that indicate a GenAI span (OTEL incubating + Pydantic AI vendor attrs)
+_GENAI_INDICATOR_ATTRS = (
+    GEN_AI_OPERATION_NAME,
+    SpanAttributes.LLM_SYSTEM,
+    GEN_AI_AGENT_NAME,
+    PYDANTIC_AI_AGENT_NAME,
+    GEN_AI_TOOL_NAME,
+    GEN_AI_TOOL_CALL_ARGUMENTS,
+    GEN_AI_TOOL_CALL_RESULT,
+    PYDANTIC_AI_TOOL_ARGUMENTS,
+    PYDANTIC_AI_TOOL_RESPONSE,
+)
 
-def _is_pydantic_ai_span(span: ReadableSpan) -> bool:
+
+def _is_genai_span(span: ReadableSpan) -> bool:
     attributes = span.attributes or {}
     return any(
         attributes.get(attr_name) is not None
-        for attr_name in (
-            "gen_ai.operation.name",
-            "gen_ai.system",
-            "gen_ai.agent.name",
-            "agent_name",
-            "gen_ai.tool.name",
-            "gen_ai.tool.call.arguments",
-            "gen_ai.tool.call.result",
-            "tool_arguments",
-            "tool_response",
-        )
+        for attr_name in _GENAI_INDICATOR_ATTRS
     )
 
 
@@ -72,19 +87,29 @@ def is_processable_span(span: ReadableSpan) -> bool:
         )
         return True
 
-    # Pydantic AI native spans can be model, agent, or tool spans.
-    if _is_pydantic_ai_span(span):
+    # Standalone GenAI span (has gen_ai.system, e.g. "openai")
+    # This covers spans from OTEL instrumentors that don't set llm.request.type,
+    # such as the OpenAI Responses API instrumentor.
+    if span.attributes.get(SpanAttributes.LLM_SYSTEM):
         logger.debug(
-            f"[Respan Debug] Processing Pydantic AI native span: {span.name} "
-            f"(gen_ai.operation.name: {span.attributes.get('gen_ai.operation.name')})"
+            f"[Respan Debug] Processing standalone GenAI span: {span.name} "
+            f"(gen_ai.system: {span.attributes.get(SpanAttributes.LLM_SYSTEM)})"
+        )
+        return True
+
+    # GenAI native spans can be model, agent, or tool spans.
+    if _is_genai_span(span):
+        logger.debug(
+            f"[Respan Debug] Processing GenAI native span: {span.name} "
+            f"(gen_ai.operation.name: {span.attributes.get(GEN_AI_OPERATION_NAME)})"
         )
         return True
 
     # Enriched Respan span (has respan.entity.log_type set by an exporter plugin).
-    if span.attributes.get("respan.entity.log_type"):
+    if span.attributes.get(RESPAN_LOG_TYPE):
         logger.debug(
             f"[Respan Debug] Processing enriched Respan span: {span.name} "
-            f"(log_type: {span.attributes.get('respan.entity.log_type')})"
+            f"(log_type: {span.attributes.get(RESPAN_LOG_TYPE)})"
         )
         return True
 
@@ -125,14 +150,20 @@ def is_root_span_candidate(span: ReadableSpan) -> bool:
         logger.debug(f"[Respan Debug] Span is root candidate (standalone LLM): {span.name}")
         return True
 
-    # Pydantic AI native span without entity path should become root
-    pydantic_ai = _is_pydantic_ai_span(span)
-    if pydantic_ai and span_kind is None and has_no_entity_path:
-        logger.debug(f"[Respan Debug] Span is root candidate (Pydantic AI native): {span.name}")
+    # Standalone GenAI span (gen_ai.system) without entity path should become root
+    gen_ai_system = span.attributes.get(SpanAttributes.LLM_SYSTEM)
+    if gen_ai_system and span_kind is None and not llm_request_type and has_no_entity_path:
+        logger.debug(f"[Respan Debug] Span is root candidate (standalone GenAI): {span.name}")
+        return True
+
+    # GenAI native span without entity path should become root
+    is_genai = _is_genai_span(span)
+    if is_genai and span_kind is None and has_no_entity_path:
+        logger.debug(f"[Respan Debug] Span is root candidate (GenAI native): {span.name}")
         return True
 
     # Enriched Respan span without entity path should become root
-    if span.attributes.get("respan.entity.log_type") and span_kind is None and has_no_entity_path:
+    if span.attributes.get(RESPAN_LOG_TYPE) and span_kind is None and has_no_entity_path:
         logger.debug(f"[Respan Debug] Span is root candidate (enriched Respan): {span.name}")
         return True
 

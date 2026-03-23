@@ -11,7 +11,8 @@ from opentelemetry.context import Context
 from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
 from opentelemetry.semconv_ai import SpanAttributes
 
-from respan_sdk.respan_types.span_types import RespanSpanAttributes, SpanLink
+from respan_sdk.constants.span_attributes import RESPAN_TRACE_GROUP_ID
+from respan_sdk.respan_types.span_types import SpanLink
 from respan_sdk.utils.data_processing.id_processing import format_span_id
 from respan_tracing.contexts.span import span_link_to_otel
 from respan_tracing.constants.generic_constants import SDK_PREFIX
@@ -23,6 +24,7 @@ from respan_tracing.constants.context_constants import (
 from respan_tracing.filters import evaluate_export_filter
 from respan_tracing.utils.preprocessing.span_processing import is_processable_span
 from respan_tracing.utils.context import get_entity_path
+from respan_tracing.utils.span_factory import read_propagated_attributes
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +75,7 @@ class RespanSpanProcessor:
         trace_group_id = context_api.get_value(TRACE_GROUP_ID_KEY)
         if trace_group_id:
             span.set_attribute(
-                RespanSpanAttributes.RESPAN_TRACE_GROUP_ID.value, trace_group_id
+                RESPAN_TRACE_GROUP_ID, trace_group_id
             )
 
         # Inherit processors from parent span when child doesn't have its own.
@@ -94,6 +96,18 @@ class RespanSpanProcessor:
         if respan_params and isinstance(respan_params, dict):
             for key, value in respan_params.items():
                 span.set_attribute(f"{SDK_PREFIX}.{key}", value)
+
+        # Bridge propagated attributes (customer_identifier, thread_id, etc.)
+        # from the _PROPAGATED_ATTRIBUTES ContextVar onto auto-instrumented spans.
+        # This ensures spans created by OTEL auto-instrumentors (OpenAI, Anthropic, etc.)
+        # carry the same user-context attributes as plugin-injected spans.
+        try:
+            propagated = read_propagated_attributes()
+            for attr_key, attr_val in propagated.items():
+                if not span.attributes.get(attr_key):
+                    span.set_attribute(attr_key, attr_val)
+        except Exception:
+            logger.debug("Failed to bridge propagated attributes", exc_info=True)
 
         # Call original processor's on_start
         self.processor.on_start(span, parent_context)

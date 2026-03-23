@@ -5,12 +5,12 @@ from typing import Any, Dict, List, Optional, Union
 from opentelemetry import trace, context as context_api
 from opentelemetry.trace.span import Span
 from pydantic import ValidationError
-from respan_sdk.respan_types.span_types import (
+from respan_sdk.constants.span_attributes import (
+    RESPAN_LINK_TIMESTAMP,
+    RESPAN_METADATA,
     RESPAN_SPAN_ATTRIBUTES_MAP,
-    RespanSpanAttributes,
-    SpanLink,
 )
-LINK_TIMESTAMP_ATTR = RespanSpanAttributes.LINK_TIMESTAMP.value
+from respan_sdk.respan_types.span_types import SpanLink
 from respan_sdk.respan_types.param_types import RespanParams
 from respan_sdk.utils.data_processing.id_processing import (
     SPAN_ID_HEX_LENGTH,
@@ -22,8 +22,8 @@ from respan_sdk.utils.data_processing.id_processing import (
 from respan_tracing.utils.logging import get_respan_logger
 
 
-from ..constants.generic_constants import LOGGER_NAME_SPAN
-from ..constants.context_constants import PENDING_SPAN_LINKS_KEY
+from respan_tracing.constants.generic_constants import LOGGER_NAME_SPAN
+from respan_tracing.constants.context_constants import PENDING_SPAN_LINKS_KEY
 
 __all__ = ["SpanLink", "span_link_to_otel", "span_to_link", "respan_span_attributes", "attach_span_links"]
 
@@ -48,7 +48,7 @@ def span_link_to_otel(link: SpanLink) -> trace.Link:
     # Merge timestamp into attributes if provided (enables efficient CH lookups)
     attrs = dict(link.attributes)
     if link.timestamp:
-        attrs[LINK_TIMESTAMP_ATTR] = link.timestamp
+        attrs[RESPAN_LINK_TIMESTAMP] = link.timestamp
     return trace.Link(context=span_context, attributes=attrs)
 
 
@@ -168,17 +168,18 @@ def respan_span_attributes(respan_params: Union[Dict[str, Any], RespanParams]):
         )
         
         for key, value in validated_params.model_dump(mode="json").items():
-            if key in RESPAN_SPAN_ATTRIBUTES_MAP and key != "metadata":
+            attr_key = RESPAN_SPAN_ATTRIBUTES_MAP.get(key)
+            if attr_key and attr_key != RESPAN_METADATA:
                 try:
-                    current_span.set_attribute(RESPAN_SPAN_ATTRIBUTES_MAP[key], value)
+                    current_span.set_attribute(attr_key, value)
                 except (ValueError, TypeError) as e:
                     logger.warning(
-                        f"Failed to set span attribute {RESPAN_SPAN_ATTRIBUTES_MAP[key]}={value}: {str(e)}"
+                        f"Failed to set span attribute {attr_key}={value}: {str(e)}"
                     )
-            # Treat metadata as a special case
-            if key == "metadata":
+            # Treat metadata as a special case — expand to per-key attributes
+            if attr_key == RESPAN_METADATA:
                 for metadata_key, metadata_value in value.items():
-                    current_span.set_attribute(f"{RespanSpanAttributes.RESPAN_METADATA.value}.{metadata_key}", metadata_value)
+                    current_span.set_attribute(f"{RESPAN_METADATA}.{metadata_key}", metadata_value)
         yield
     except ValidationError as e:
         logger.warning(f"Failed to validate params: {str(e.errors(include_url=False))}")

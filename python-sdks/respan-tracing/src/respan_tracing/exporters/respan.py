@@ -49,14 +49,18 @@ from respan_sdk.constants.otlp_constants import (
     OTEL_STATUS_CODE_ERROR,
     OTEL_STATUS_CODE_KEY,
     OTEL_STATUS_MESSAGE_KEY,
+    OTEL_SPAN_PARENT_FIELD,
+    OTEL_SPAN_PARENT_PRIVATE_FIELD,
+    OTEL_SPAN_ATTRIBUTES_FIELD,
 )
 
-from ..utils.logging import get_respan_logger, build_spans_export_preview
-from ..utils.preprocessing.span_processing import is_root_span_candidate
-from ..constants.generic_constants import LOGGER_NAME_EXPORTER
+from opentelemetry.semconv_ai import SpanAttributes, LLMRequestTypeValues
+
+from respan_tracing.utils.logging import get_respan_logger, build_spans_export_preview
+from respan_tracing.utils.preprocessing.span_processing import is_root_span_candidate
+from respan_tracing.constants.generic_constants import LOGGER_NAME_EXPORTER
 
 logger = get_respan_logger(LOGGER_NAME_EXPORTER)
-
 
 class ModifiedSpan:
     """A proxy wrapper that forwards the original span with optional overrides."""
@@ -80,16 +84,23 @@ def _prepare_spans_for_export(spans: Sequence[ReadableSpan]) -> List[ReadableSpa
     prepared_spans: List[ReadableSpan] = []
 
     for span in spans:
+        overrides: Dict[str, Any] = {}
+
         if is_root_span_candidate(span):
             logger.debug("Making span a root span: %s", span.name)
+            overrides[OTEL_SPAN_PARENT_FIELD] = None
+            overrides[OTEL_SPAN_PARENT_PRIVATE_FIELD] = None
+
+        extra_attrs = _get_enrichment_attrs(span)
+        if extra_attrs:
+            logger.debug("Enriching span with %s: %s", list(extra_attrs), span.name)
+            merged_attrs = dict(span.attributes or {})
+            merged_attrs.update(extra_attrs)
+            overrides[OTEL_SPAN_ATTRIBUTES_FIELD] = merged_attrs
+
+        if overrides:
             prepared_spans.append(
-                ModifiedSpan(
-                    original_span=span,
-                    overrides={
-                        "parent": None,
-                        "_parent": None,
-                    },
-                )
+                ModifiedSpan(original_span=span, overrides=overrides)
             )
         else:
             prepared_spans.append(span)
@@ -165,7 +176,7 @@ def _span_to_otlp_json(span: ReadableSpan) -> Dict[str, Any]:
 
     # Parent span ID
     parent_span_id = ""
-    parent = getattr(span, "parent", None)
+    parent = getattr(span, OTEL_SPAN_PARENT_FIELD, None)
     if parent is not None:
         parent_sid = getattr(parent, "span_id", None)
         if parent_sid:
@@ -322,6 +333,23 @@ def _build_otlp_payload(spans: Sequence[ReadableSpan]) -> Dict[str, Any]:
         resource_spans.append(rs_entry)
 
     return {OTLP_RESOURCE_SPANS_KEY: resource_spans}
+
+
+def _get_enrichment_attrs(span: ReadableSpan) -> Dict[str, Any]:
+    """Return extra attributes to inject into a span before export.
+
+    Currently handles one case: GenAI spans (e.g. ``openai.response``) that
+    carry ``gen_ai.system`` but lack ``llm.request.type``.  The Respan backend
+    uses ``llm.request.type`` to trigger prompt/completion/model/token parsing,
+    so we inject ``"chat"`` to ensure the backend processes these spans.
+    """
+    attrs = span.attributes or {}
+    extra: Dict[str, Any] = {}
+
+    if attrs.get(SpanAttributes.LLM_SYSTEM) and not attrs.get(SpanAttributes.LLM_REQUEST_TYPE):
+        extra[SpanAttributes.LLM_REQUEST_TYPE] = LLMRequestTypeValues.CHAT.value
+
+    return extra
 
 
 class RespanSpanExporter:

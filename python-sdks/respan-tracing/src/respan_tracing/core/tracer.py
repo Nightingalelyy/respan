@@ -14,15 +14,15 @@ from opentelemetry.sdk.trace.export import (
 from opentelemetry.propagate import set_global_textmap
 from opentelemetry.propagators.textmap import TextMapPropagator
 
-from ..processors import RespanSpanProcessor, BufferingSpanProcessor, FilteringSpanProcessor
-from ..exporters import RespanSpanExporter
-from ..instruments import Instruments
-from ..utils.notebook import is_notebook
-from ..utils.instrumentation import init_instrumentations
-from ..utils.imports import import_from_string
-from ..utils.logging import get_respan_logger
-from ..constants.tracing import TRACER_NAME, PROCESSORS_ATTR
-from ..constants.generic_constants import LOGGER_NAME_TRACER
+from respan_tracing.processors import RespanSpanProcessor, BufferingSpanProcessor, FilteringSpanProcessor
+from respan_tracing.exporters import RespanSpanExporter
+from respan_tracing.instruments import Instruments
+from respan_tracing.utils.notebook import is_notebook
+from respan_tracing.utils.instrumentation import init_instrumentations
+from respan_tracing.utils.imports import import_from_string
+from respan_tracing.utils.logging import get_respan_logger
+from respan_tracing.constants.tracing import TRACER_NAME, PROCESSORS_ATTR
+from respan_tracing.constants.generic_constants import LOGGER_NAME_TRACER
 
 # Use Respan logger for all logging in this module
 logger = get_respan_logger(LOGGER_NAME_TRACER)
@@ -57,11 +57,12 @@ class RespanTracer:
         propagator: Optional[TextMapPropagator] = None,
         span_postprocess_callback: Optional[Callable[[ReadableSpan], None]] = None,
         is_enabled: bool = True,
+        is_auto_instrument: bool = True,
     ):
         # Prevent re-initialization
         if hasattr(self, '_initialized'):
             return
-            
+
         self._initialized = True
         self.is_enabled = is_enabled
         self.api_endpoint = api_endpoint
@@ -69,19 +70,20 @@ class RespanTracer:
         self.headers = headers or {}
         self.is_batching_enabled = is_batching_enabled
         self.span_postprocess_callback = span_postprocess_callback
-        
+
         if not is_enabled:
             logger.info("Respan tracing is disabled")
             return
-            
+
         # Setup resource attributes
         resource_attributes = resource_attributes or {}
         resource_attributes[SERVICE_NAME] = app_name
-        
+
         # Initialize OpenTelemetry components
         self._setup_tracer_provider(resource_attributes)
         self._setup_propagation(propagator)
-        self._setup_instrumentations(instruments, block_instruments)
+        if is_auto_instrument:
+            self._setup_instrumentations(instruments, block_instruments)
         
         # Add default Respan processor for backward compatibility
         # Only if api_key is provided (user wants to send to Respan)
