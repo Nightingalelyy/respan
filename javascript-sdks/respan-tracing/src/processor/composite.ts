@@ -7,14 +7,9 @@ import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
 import { MultiProcessorManager } from "./manager.js";
 import { getEntityPath } from "../utils/context.js";
 
-// ---------------------------------------------------------------------------
-// OpenInference span enrichment
-// ---------------------------------------------------------------------------
+// ── OpenInference span enrichment ──────────────────────────────────────────
 
-/**
- * Map OpenInference span kinds to Traceloop span kinds.
- * The backend recognizes traceloop.span.kind but NOT openinference.span.kind.
- */
+/** Map OI span kinds → Traceloop span kinds */
 const OI_KIND_TO_TRACELOOP: Record<string, string> = {
   LLM: "task",
   CHAIN: "workflow",
@@ -27,18 +22,13 @@ const OI_KIND_TO_TRACELOOP: Record<string, string> = {
   EVALUATOR: "task",
 };
 
-/**
- * Map OpenInference span kinds to llm.request.type values.
- * Only LLM and EMBEDDING kinds produce LLM request types.
- */
+/** OI span kinds that imply an LLM request type */
 const OI_LLM_REQUEST_KINDS: Record<string, string> = {
   LLM: "chat",
   EMBEDDING: "embedding",
 };
 
-/**
- * Map OpenInference span kinds to respan.entity.log_type values.
- */
+/** Map OI span kinds → respan.entity.log_type values */
 const OI_LOG_TYPE: Record<string, string> = {
   LLM: "chat",
   CHAIN: "workflow",
@@ -51,6 +41,11 @@ const OI_LOG_TYPE: Record<string, string> = {
   EVALUATOR: "task",
 };
 
+/**
+ * Build Traceloop/GenAI enrichment attributes for an OpenInference span.
+ * Returns only the attributes that need to be *added*; callers merge them
+ * on top of the original span attributes.
+ */
 function getOIEnrichmentAttrs(span: ReadableSpan): Record<string, any> {
   const attrs: Record<string, any> = {};
   const oiKind = String(span.attributes["openinference.span.kind"] ?? "");
@@ -65,13 +60,11 @@ function getOIEnrichmentAttrs(span: ReadableSpan): Record<string, any> {
     attrs["respan.entity.log_type"] = OI_LOG_TYPE[oiKind];
   }
 
-  // Bridge OI input/output to Traceloop entity input/output
+  // Bridge OI semantic attrs → Traceloop/GenAI equivalents
   if (span.attributes["input.value"] !== undefined)
     attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = span.attributes["input.value"];
   if (span.attributes["output.value"] !== undefined)
     attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = span.attributes["output.value"];
-
-  // Bridge OI model/token attrs to GenAI convention
   if (span.attributes["llm.model_name"] !== undefined)
     attrs["gen_ai.request.model"] = span.attributes["llm.model_name"];
   if (span.attributes["llm.token_count.prompt"] !== undefined)
@@ -79,6 +72,7 @@ function getOIEnrichmentAttrs(span: ReadableSpan): Record<string, any> {
   if (span.attributes["llm.token_count.completion"] !== undefined)
     attrs["gen_ai.usage.completion_tokens"] = span.attributes["llm.token_count.completion"];
 
+  // Entity name / path
   attrs[SpanAttributes.TRACELOOP_ENTITY_NAME] = span.name;
   if (OI_KIND_TO_TRACELOOP[oiKind] !== "workflow") {
     attrs[SpanAttributes.TRACELOOP_ENTITY_PATH] = span.name;
@@ -87,14 +81,16 @@ function getOIEnrichmentAttrs(span: ReadableSpan): Record<string, any> {
   return attrs;
 }
 
+// ── Composite processor ────────────────────────────────────────────────────
+
 /**
  * Composite processor that combines filtering with multi-processor routing.
- * 
+ *
  * Flow:
  * 1. Filter spans (keep only user-decorated spans and their children)
  * 2. Apply postprocess callback if configured
  * 3. Route filtered spans to appropriate processors
- * 
+ *
  * This ensures only meaningful spans are routed to processors.
  */
 export class RespanCompositeProcessor implements SpanProcessor {
@@ -119,11 +115,11 @@ export class RespanCompositeProcessor implements SpanProcessor {
       console.debug(
         `[Respan Debug] Adding entityPath to auto-instrumentation span: ${span.name} (entityPath: ${entityPath})`
       );
-      
+
       // We need to cast to any to set attributes during onStart
       (span as any).setAttribute(SpanAttributes.TRACELOOP_ENTITY_PATH, entityPath);
     }
-    
+
     // Forward to processor manager
     this._processorManager.onStart(span, parentContext);
   }
@@ -131,7 +127,7 @@ export class RespanCompositeProcessor implements SpanProcessor {
   onEnd(span: ReadableSpan): void {
     const spanKind = span.attributes[SpanAttributes.TRACELOOP_SPAN_KIND];
     const entityPath = span.attributes[SpanAttributes.TRACELOOP_ENTITY_PATH];
-    
+
     // Apply postprocess callback if provided
     if (this._postprocessCallback) {
       try {
@@ -140,17 +136,17 @@ export class RespanCompositeProcessor implements SpanProcessor {
         console.error("[Respan] Error in span postprocess callback:", error);
       }
     }
-    
+
     // Check if this is an LLM instrumentation span (OpenAI, Anthropic, etc.)
     // These have gen_ai.* or llm.* attributes
-    const isLLMSpan = 
+    const isLLMSpan =
       span.attributes['gen_ai.system'] !== undefined ||
       span.attributes['llm.system'] !== undefined ||
       span.attributes['gen_ai.request.model'] !== undefined ||
       span.name.includes('anthropic.messages') ||
       span.name.includes('openai.chat') ||
       span.name.includes('chat.completions');
-    
+
     // Filter: only process spans that are user-decorated, within entity context, or LLM calls
     if (spanKind) {
       // This is a user-decorated span (withWorkflow, withTask, etc.) - make it a root span
@@ -161,7 +157,7 @@ export class RespanCompositeProcessor implements SpanProcessor {
       // Create a wrapper that makes the span appear as a root span
       const rootSpan = Object.create(Object.getPrototypeOf(span));
       Object.assign(rootSpan, span);
-      
+
       // Override the parentSpanId to make it a root span
       Object.defineProperty(rootSpan, 'parentSpanId', {
         value: undefined,
@@ -178,7 +174,7 @@ export class RespanCompositeProcessor implements SpanProcessor {
       console.debug(
         `[Respan Debug] Processing child span within entity context: ${span.name} (entityPath: ${entityPath})`
       );
-      
+
       // Route to processors
       this._processorManager.onEnd(span);
     } else if (isLLMSpan) {
@@ -190,7 +186,7 @@ export class RespanCompositeProcessor implements SpanProcessor {
       // Route to processors
       this._processorManager.onEnd(span);
     } else if (span.attributes["openinference.span.kind"] !== undefined) {
-      // OpenInference span — enrich with Traceloop/GenAI attrs the backend expects
+      // OpenInference span — enrich with Traceloop/GenAI attrs, then route
       console.debug(
         `[Respan Debug] Processing OpenInference span: ${span.name} (kind: ${span.attributes["openinference.span.kind"]})`
       );
@@ -204,6 +200,7 @@ export class RespanCompositeProcessor implements SpanProcessor {
         configurable: true,
         enumerable: true,
       });
+
       this._processorManager.onEnd(enrichedSpan);
     } else if (span.attributes["respan.entity.log_type"] !== undefined) {
       // Enriched Respan span (from an instrumentation plugin)

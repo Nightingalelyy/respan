@@ -55,7 +55,9 @@ from respan_sdk.constants.otlp_constants import (
 )
 
 from opentelemetry.semconv_ai import SpanAttributes, LLMRequestTypeValues
+from openinference.semconv.trace import SpanAttributes as OpenInferenceSpanAttributes
 
+from respan_sdk.constants.span_attributes import OPENINFERENCE_SPAN_KIND
 from respan_tracing.utils.logging import get_respan_logger, build_spans_export_preview
 from respan_tracing.utils.preprocessing.span_processing import is_root_span_candidate
 from respan_tracing.constants.generic_constants import LOGGER_NAME_EXPORTER
@@ -335,19 +337,89 @@ def _build_otlp_payload(spans: Sequence[ReadableSpan]) -> Dict[str, Any]:
     return {OTLP_RESOURCE_SPANS_KEY: resource_spans}
 
 
+# ---------------------------------------------------------------------------
+# OpenInference → Traceloop/GenAI attribute mapping
+# ---------------------------------------------------------------------------
+_OI_KIND_TO_TRACELOOP_KIND = {
+    "LLM": "task",
+    "CHAIN": "workflow",
+    "TOOL": "tool",
+    "AGENT": "agent",
+    "EMBEDDING": "task",
+    "RETRIEVER": "task",
+    "RERANKER": "task",
+    "GUARDRAIL": "task",
+    "EVALUATOR": "task",
+}
+
+_OI_LLM_REQUEST_TYPE_KINDS = {
+    "LLM": LLMRequestTypeValues.CHAT.value,
+    "EMBEDDING": LLMRequestTypeValues.EMBEDDING.value,
+}
+
+
 def _get_enrichment_attrs(span: ReadableSpan) -> Dict[str, Any]:
     """Return extra attributes to inject into a span before export.
 
-    Currently handles one case: GenAI spans (e.g. ``openai.response``) that
-    carry ``gen_ai.system`` but lack ``llm.request.type``.  The Respan backend
-    uses ``llm.request.type`` to trigger prompt/completion/model/token parsing,
-    so we inject ``"chat"`` to ensure the backend processes these spans.
+    Handles two cases:
+
+    1. **GenAI spans** (e.g. ``openai.response``) that carry ``gen_ai.system``
+       but lack ``llm.request.type``.  The Respan backend uses
+       ``llm.request.type`` to trigger prompt/completion/model/token parsing,
+       so we inject ``"chat"`` to ensure the backend processes these spans.
+
+    2. **OpenInference spans** — OI instrumentors use their own attribute
+       namespace (``openinference.span.kind``, ``input.value``, ``llm.model_name``,
+       etc.).  We map these to the Traceloop/GenAI equivalents the backend expects.
     """
     attrs = span.attributes or {}
     extra: Dict[str, Any] = {}
 
+    # Case 1: GenAI spans missing llm.request.type
     if attrs.get(SpanAttributes.LLM_SYSTEM) and not attrs.get(SpanAttributes.LLM_REQUEST_TYPE):
         extra[SpanAttributes.LLM_REQUEST_TYPE] = LLMRequestTypeValues.CHAT.value
+
+    # Case 2: OpenInference spans
+    oi_kind = attrs.get(OPENINFERENCE_SPAN_KIND)
+    if oi_kind:
+        # Map OI kind → traceloop.span.kind
+        traceloop_kind = _OI_KIND_TO_TRACELOOP_KIND.get(oi_kind, "task")
+        if not attrs.get(SpanAttributes.TRACELOOP_SPAN_KIND):
+            extra[SpanAttributes.TRACELOOP_SPAN_KIND] = traceloop_kind
+
+        # Inject llm.request.type for LLM/EMBEDDING kinds
+        llm_req_type = _OI_LLM_REQUEST_TYPE_KINDS.get(oi_kind)
+        if llm_req_type and not attrs.get(SpanAttributes.LLM_REQUEST_TYPE):
+            extra[SpanAttributes.LLM_REQUEST_TYPE] = llm_req_type
+
+        # Map input.value → traceloop.entity.input
+        input_val = attrs.get(OpenInferenceSpanAttributes.INPUT_VALUE)
+        if input_val and not attrs.get(SpanAttributes.TRACELOOP_ENTITY_INPUT):
+            extra[SpanAttributes.TRACELOOP_ENTITY_INPUT] = input_val
+
+        # Map output.value → traceloop.entity.output
+        output_val = attrs.get(OpenInferenceSpanAttributes.OUTPUT_VALUE)
+        if output_val and not attrs.get(SpanAttributes.TRACELOOP_ENTITY_OUTPUT):
+            extra[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = output_val
+
+        # Map llm.model_name → gen_ai.request.model
+        model_name = attrs.get(OpenInferenceSpanAttributes.LLM_MODEL_NAME)
+        if model_name and not attrs.get(SpanAttributes.LLM_REQUEST_MODEL):
+            extra[SpanAttributes.LLM_REQUEST_MODEL] = model_name
+
+        # Map llm.token_count.prompt → gen_ai.usage.prompt_tokens
+        prompt_tokens = attrs.get(OpenInferenceSpanAttributes.LLM_TOKEN_COUNT_PROMPT)
+        if prompt_tokens is not None and not attrs.get(SpanAttributes.LLM_USAGE_PROMPT_TOKENS):
+            extra[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] = prompt_tokens
+
+        # Map llm.token_count.completion → gen_ai.usage.completion_tokens
+        completion_tokens = attrs.get(OpenInferenceSpanAttributes.LLM_TOKEN_COUNT_COMPLETION)
+        if completion_tokens is not None and not attrs.get(SpanAttributes.LLM_USAGE_COMPLETION_TOKENS):
+            extra[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] = completion_tokens
+
+        # Map span name → traceloop.entity.name
+        if span.name and not attrs.get(SpanAttributes.TRACELOOP_ENTITY_NAME):
+            extra[SpanAttributes.TRACELOOP_ENTITY_NAME] = span.name
 
     return extra
 
