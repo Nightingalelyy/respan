@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "respan-instrumentation-openinference"
 version = "1.0.0"
-description = "Respan instrumentation plugins backed by OpenInference"
+description = "Respan instrumentation wrapper for OpenInference"
 authors = ["Respan <team@respan.ai>"]
 license = "Apache 2.0"
 readme = "README.md"
@@ -14,36 +14,6 @@ python = ">=3.11,<3.14"
 respan-tracing = "^2.3.0"
 # Users install individual OpenInference packages as needed, e.g.:
 #   pip install openinference-instrumentation-google-adk
-
-[tool.poetry.plugins."respan.instrumentations"]
-agentspec = "respan_instrumentation_openinference:AgentSpecInstrumentor"
-agno = "respan_instrumentation_openinference:AgnoInstrumentor"
-anthropic = "respan_instrumentation_openinference:AnthropicInstrumentor"
-autogen-agentchat = "respan_instrumentation_openinference:AutogenAgentChatInstrumentor"
-beeai = "respan_instrumentation_openinference:BeeAIInstrumentor"
-bedrock = "respan_instrumentation_openinference:BedrockInstrumentor"
-claude-agent-sdk = "respan_instrumentation_openinference:ClaudeAgentSDKInstrumentor"
-crewai = "respan_instrumentation_openinference:CrewAIInstrumentor"
-dspy = "respan_instrumentation_openinference:DSPyInstrumentor"
-google-adk = "respan_instrumentation_openinference:GoogleADKInstrumentor"
-google-genai = "respan_instrumentation_openinference:GoogleGenAIInstrumentor"
-groq = "respan_instrumentation_openinference:GroqInstrumentor"
-guardrails = "respan_instrumentation_openinference:GuardrailsInstrumentor"
-haystack = "respan_instrumentation_openinference:HaystackInstrumentor"
-instructor = "respan_instrumentation_openinference:InstructorInstrumentor"
-langchain = "respan_instrumentation_openinference:LangChainInstrumentor"
-litellm = "respan_instrumentation_openinference:LiteLLMInstrumentor"
-llama-index = "respan_instrumentation_openinference:LlamaIndexInstrumentor"
-mcp = "respan_instrumentation_openinference:MCPInstrumentor"
-mistralai = "respan_instrumentation_openinference:MistralAIInstrumentor"
-openai-oi = "respan_instrumentation_openinference:OpenAIInstrumentor"
-openai-agents-oi = "respan_instrumentation_openinference:OpenAIAgentsInstrumentor"
-pipecat = "respan_instrumentation_openinference:PipecatInstrumentor"
-portkey = "respan_instrumentation_openinference:PortkeyInstrumentor"
-pydantic-ai = "respan_instrumentation_openinference:PydanticAIInstrumentor"
-smolagents = "respan_instrumentation_openinference:SmolagentsInstrumentor"
-strands-agents = "respan_instrumentation_openinference:StrandsAgentsInstrumentor"
-vertexai = "respan_instrumentation_openinference:VertexAIInstrumentor"
 
 [tool.pytest.ini_options]
 markers = [
