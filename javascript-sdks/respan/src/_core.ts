@@ -1,6 +1,5 @@
-import { RespanTelemetry, propagateAttributes, logBatchResults as _logBatchResults } from "@respan/tracing";
+import { RespanTelemetry, propagateAttributes, buildReadableSpan, injectSpan } from "@respan/tracing";
 import type { RespanParams } from "@respan/respan-sdk";
-import type { BatchRequest, BatchResult } from "@respan/tracing";
 import type { RespanInstrumentation } from "./_types.js";
 
 export interface RespanOptions {
@@ -155,18 +154,110 @@ export class Respan {
    *    separate process (e.g. 24 hours later).
    * 3. **Auto-generated** — creates a new standalone trace.
    *
-   * @param requests - Original batch request objects (from the input JSONL).
+   * @param requests - Original batch request dicts (from the input JSONL).
    *   Each must have `custom_id` and `body.messages`.
-   * @param results - Batch result objects (from the output JSONL).
+   * @param results - Batch result dicts (from the output JSONL).
    *   Each must have `custom_id` and `response.body`.
    * @param traceId - Optional explicit trace ID to link results to.
    */
   logBatchResults(
-    requests: BatchRequest[],
-    results: BatchResult[],
+    requests: Array<Record<string, any>>,
+    results: Array<Record<string, any>>,
     traceId?: string
   ): void {
-    _logBatchResults(requests, results, traceId);
+    const client = this.getClient();
+
+    // Resolve trace context: OTEL > explicit > auto-generated.
+    // OTEL returns all-zero IDs when no active span — treat as absent.
+    let otelTraceId = client.getCurrentTraceId();
+    let otelSpanId = client.getCurrentSpanId();
+    if (otelTraceId && /^0+$/.test(otelTraceId)) otelTraceId = undefined;
+    if (otelSpanId && /^0+$/.test(otelSpanId)) otelSpanId = undefined;
+    const resolvedTraceId = otelTraceId ?? traceId ?? undefined;
+
+    // Determine the parent for completion spans.
+    // With OTEL context: nest under the active span directly.
+    // Without: create a synthetic "batch_results" task span.
+    const parentSpanId = otelSpanId ?? crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+
+    // Index original requests by custom_id
+    const requestsById = new Map<string, Record<string, any>>();
+    for (const r of requests) {
+      requestsById.set(r.custom_id, r.body ?? {});
+    }
+
+    const completionTimestamps: Date[] = [];
+
+    for (const result of results) {
+      const customId = result.custom_id ?? "";
+      const response = result.response ?? {};
+      const body = response.body ?? {};
+      const statusCode = response.status_code ?? 200;
+
+      const original = requestsById.get(customId) ?? {};
+      const messages = original.messages ?? [];
+
+      const choices = body.choices ?? [{}];
+      const output = choices[0]?.message ?? {};
+      const usage = body.usage ?? {};
+
+      // Extract timestamp from OpenAI response (unix epoch -> ISO 8601)
+      const created: number | undefined = body.created;
+      let endTimeIso: string | undefined;
+      if (created) {
+        const ts = new Date(created * 1000);
+        endTimeIso = ts.toISOString();
+        completionTimestamps.push(ts);
+      }
+
+      const model = body.model ?? original.model ?? "";
+
+      const span = buildReadableSpan({
+        name: `batch:${customId}`,
+        traceId: resolvedTraceId,
+        parentId: parentSpanId,
+        endTimeIso,
+        attributes: {
+          "llm.request.type": "chat",
+          "gen_ai.request.model": model,
+          "gen_ai.usage.prompt_tokens": usage.prompt_tokens ?? 0,
+          "gen_ai.usage.completion_tokens": usage.completion_tokens ?? 0,
+          "traceloop.entity.input": JSON.stringify(messages),
+          "traceloop.entity.output": JSON.stringify(output),
+          "traceloop.entity.path": "batch_results",
+          "traceloop.span.kind": "task",
+          "respan.entity.log_type": "chat",
+        },
+        statusCode,
+      });
+      injectSpan(span);
+    }
+
+    // Create the grouping "batch_results" task span (when no OTEL context)
+    if (!otelSpanId) {
+      let earliestIso: string | undefined;
+      let latestIso: string | undefined;
+      if (completionTimestamps.length > 0) {
+        completionTimestamps.sort((a, b) => a.getTime() - b.getTime());
+        earliestIso = completionTimestamps[0].toISOString();
+        latestIso = completionTimestamps[completionTimestamps.length - 1].toISOString();
+      }
+
+      const parentSpan = buildReadableSpan({
+        name: "batch_results.task",
+        traceId: resolvedTraceId,
+        spanId: parentSpanId,
+        startTimeIso: earliestIso,
+        endTimeIso: latestIso,
+        attributes: {
+          "traceloop.span.kind": "task",
+          "traceloop.entity.name": "batch_results",
+          "traceloop.entity.path": "",
+          "respan.entity.log_type": "task",
+        },
+      });
+      injectSpan(parentSpan);
+    }
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────
