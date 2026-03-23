@@ -16,8 +16,8 @@ export {
   withAgent,
   withTool,
   propagateAttributes,
-  buildReadableSpan,
-  injectSpan,
+  logBatchResults,
 } from "@respan/tracing";
+export type { BatchRequest, BatchResult } from "@respan/tracing";
 export { getClient, getSpanBufferManager } from "@respan/tracing";
 export type { ProcessorConfig } from "@respan/tracing";

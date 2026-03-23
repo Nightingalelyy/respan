@@ -9,6 +9,7 @@
 import { trace, SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import { hrTime, hrTimeDuration } from "@opentelemetry/core";
+import { RESPAN_PACKAGE_NAME } from "../constants/index.js";
 
 // ── ID helpers ──────────────────────────────────────────────────────────────
 
@@ -116,7 +117,7 @@ export function buildReadableSpan(opts: BuildSpanOptions): ReadableSpan {
     events: [],
     resource: { attributes: {} } as any,
     instrumentationLibrary: {
-      name: "@respan/tracing",
+      name: RESPAN_PACKAGE_NAME,
       version: "1.0.0",
     },
     ended: true,
