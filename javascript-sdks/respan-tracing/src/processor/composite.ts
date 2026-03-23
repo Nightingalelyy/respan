@@ -7,6 +7,86 @@ import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
 import { MultiProcessorManager } from "./manager.js";
 import { getEntityPath } from "../utils/context.js";
 
+// ---------------------------------------------------------------------------
+// OpenInference span enrichment
+// ---------------------------------------------------------------------------
+
+/**
+ * Map OpenInference span kinds to Traceloop span kinds.
+ * The backend recognizes traceloop.span.kind but NOT openinference.span.kind.
+ */
+const OI_KIND_TO_TRACELOOP: Record<string, string> = {
+  LLM: "task",
+  CHAIN: "workflow",
+  TOOL: "tool",
+  AGENT: "agent",
+  EMBEDDING: "task",
+  RETRIEVER: "task",
+  RERANKER: "task",
+  GUARDRAIL: "task",
+  EVALUATOR: "task",
+};
+
+/**
+ * Map OpenInference span kinds to llm.request.type values.
+ * Only LLM and EMBEDDING kinds produce LLM request types.
+ */
+const OI_LLM_REQUEST_KINDS: Record<string, string> = {
+  LLM: "chat",
+  EMBEDDING: "embedding",
+};
+
+/**
+ * Map OpenInference span kinds to respan.entity.log_type values.
+ */
+const OI_LOG_TYPE: Record<string, string> = {
+  LLM: "chat",
+  CHAIN: "workflow",
+  TOOL: "tool",
+  AGENT: "agent",
+  EMBEDDING: "embedding",
+  RETRIEVER: "task",
+  RERANKER: "task",
+  GUARDRAIL: "guardrail",
+  EVALUATOR: "task",
+};
+
+function getOIEnrichmentAttrs(span: ReadableSpan): Record<string, any> {
+  const attrs: Record<string, any> = {};
+  const oiKind = String(span.attributes["openinference.span.kind"] ?? "");
+
+  if (OI_KIND_TO_TRACELOOP[oiKind]) {
+    attrs[SpanAttributes.TRACELOOP_SPAN_KIND] = OI_KIND_TO_TRACELOOP[oiKind];
+  }
+  if (OI_LLM_REQUEST_KINDS[oiKind]) {
+    attrs["llm.request.type"] = OI_LLM_REQUEST_KINDS[oiKind];
+  }
+  if (OI_LOG_TYPE[oiKind]) {
+    attrs["respan.entity.log_type"] = OI_LOG_TYPE[oiKind];
+  }
+
+  // Bridge OI input/output to Traceloop entity input/output
+  if (span.attributes["input.value"] !== undefined)
+    attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = span.attributes["input.value"];
+  if (span.attributes["output.value"] !== undefined)
+    attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = span.attributes["output.value"];
+
+  // Bridge OI model/token attrs to GenAI convention
+  if (span.attributes["llm.model_name"] !== undefined)
+    attrs["gen_ai.request.model"] = span.attributes["llm.model_name"];
+  if (span.attributes["llm.token_count.prompt"] !== undefined)
+    attrs["gen_ai.usage.prompt_tokens"] = span.attributes["llm.token_count.prompt"];
+  if (span.attributes["llm.token_count.completion"] !== undefined)
+    attrs["gen_ai.usage.completion_tokens"] = span.attributes["llm.token_count.completion"];
+
+  attrs[SpanAttributes.TRACELOOP_ENTITY_NAME] = span.name;
+  if (OI_KIND_TO_TRACELOOP[oiKind] !== "workflow") {
+    attrs[SpanAttributes.TRACELOOP_ENTITY_PATH] = span.name;
+  }
+
+  return attrs;
+}
+
 /**
  * Composite processor that combines filtering with multi-processor routing.
  * 
@@ -106,8 +186,30 @@ export class RespanCompositeProcessor implements SpanProcessor {
       console.debug(
         `[Respan Debug] Processing LLM instrumentation span: ${span.name}`
       );
-      
+
       // Route to processors
+      this._processorManager.onEnd(span);
+    } else if (span.attributes["openinference.span.kind"] !== undefined) {
+      // OpenInference span — enrich with Traceloop/GenAI attrs the backend expects
+      console.debug(
+        `[Respan Debug] Processing OpenInference span: ${span.name} (kind: ${span.attributes["openinference.span.kind"]})`
+      );
+
+      const enrichmentAttrs = getOIEnrichmentAttrs(span);
+      const enrichedSpan = Object.create(Object.getPrototypeOf(span));
+      Object.assign(enrichedSpan, span);
+      Object.defineProperty(enrichedSpan, "attributes", {
+        value: { ...span.attributes, ...enrichmentAttrs },
+        writable: false,
+        configurable: true,
+        enumerable: true,
+      });
+      this._processorManager.onEnd(enrichedSpan);
+    } else if (span.attributes["respan.entity.log_type"] !== undefined) {
+      // Enriched Respan span (from an instrumentation plugin)
+      console.debug(
+        `[Respan Debug] Processing enriched Respan span: ${span.name}`
+      );
       this._processorManager.onEnd(span);
     } else {
       // This span has none of the above - it's pure auto-instrumentation noise (HTTP calls, etc.)

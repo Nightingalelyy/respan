@@ -77,7 +77,7 @@ function baseAttrs(
     [SpanAttributes.TRACELOOP_SPAN_KIND]: spanKind,
     [SpanAttributes.TRACELOOP_ENTITY_NAME]: entityName,
     [SpanAttributes.TRACELOOP_ENTITY_PATH]: entityPath,
-    "respan.log_type": logType,
+    "respan.entity.log_type": logType,
   };
 }
 
