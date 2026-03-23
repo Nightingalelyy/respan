@@ -1,0 +1,40 @@
+{
+  "name": "@respan/instrumentation-openai",
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Respan instrumentation plugin for OpenAI SDK",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "author": "Respan <team@respan.ai>",
+  "license": "Apache-2.0",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "publish": "yarn npm publish",
+    "release": "yarn build && yarn version patch && yarn publish"
+  },
+  "packageManager": "yarn@4.6.0",
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0"
+  },
+  "peerDependencies": {
+    "@traceloop/instrumentation-openai": ">=0.14.0"
+  },
+  "peerDependenciesMeta": {
+    "@traceloop/instrumentation-openai": {
+      "optional": false
+    }
+  },
+  "devDependencies": {
+    "@traceloop/instrumentation-openai": "^0.14.4",
+    "@types/node": "^22.15.29",
+    "typescript": "^5.7.3"
+  }
+}

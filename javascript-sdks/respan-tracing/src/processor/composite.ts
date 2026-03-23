@@ -28,6 +28,19 @@ const OI_LLM_REQUEST_KINDS: Record<string, string> = {
   EMBEDDING: "embedding",
 };
 
+/** Map OI span kinds → respan.entity.log_type values */
+const OI_LOG_TYPE: Record<string, string> = {
+  LLM: "chat",
+  CHAIN: "workflow",
+  TOOL: "tool",
+  AGENT: "agent",
+  EMBEDDING: "embedding",
+  RETRIEVER: "task",
+  RERANKER: "task",
+  GUARDRAIL: "guardrail",
+  EVALUATOR: "task",
+};
+
 /**
  * Build Traceloop/GenAI enrichment attributes for an OpenInference span.
  * Returns only the attributes that need to be *added*; callers merge them
@@ -42,6 +55,9 @@ function getOIEnrichmentAttrs(span: ReadableSpan): Record<string, any> {
   }
   if (OI_LLM_REQUEST_KINDS[oiKind]) {
     attrs["llm.request.type"] = OI_LLM_REQUEST_KINDS[oiKind];
+  }
+  if (OI_LOG_TYPE[oiKind]) {
+    attrs["respan.entity.log_type"] = OI_LOG_TYPE[oiKind];
   }
 
   // Bridge OI semantic attrs → Traceloop/GenAI equivalents
@@ -99,11 +115,11 @@ export class RespanCompositeProcessor implements SpanProcessor {
       console.debug(
         `[Respan Debug] Adding entityPath to auto-instrumentation span: ${span.name} (entityPath: ${entityPath})`
       );
-      
+
       // We need to cast to any to set attributes during onStart
       (span as any).setAttribute(SpanAttributes.TRACELOOP_ENTITY_PATH, entityPath);
     }
-    
+
     // Forward to processor manager
     this._processorManager.onStart(span, parentContext);
   }
@@ -111,7 +127,7 @@ export class RespanCompositeProcessor implements SpanProcessor {
   onEnd(span: ReadableSpan): void {
     const spanKind = span.attributes[SpanAttributes.TRACELOOP_SPAN_KIND];
     const entityPath = span.attributes[SpanAttributes.TRACELOOP_ENTITY_PATH];
-    
+
     // Apply postprocess callback if provided
     if (this._postprocessCallback) {
       try {
@@ -120,17 +136,17 @@ export class RespanCompositeProcessor implements SpanProcessor {
         console.error("[Respan] Error in span postprocess callback:", error);
       }
     }
-    
+
     // Check if this is an LLM instrumentation span (OpenAI, Anthropic, etc.)
     // These have gen_ai.* or llm.* attributes
-    const isLLMSpan = 
+    const isLLMSpan =
       span.attributes['gen_ai.system'] !== undefined ||
       span.attributes['llm.system'] !== undefined ||
       span.attributes['gen_ai.request.model'] !== undefined ||
       span.name.includes('anthropic.messages') ||
       span.name.includes('openai.chat') ||
       span.name.includes('chat.completions');
-    
+
     // Filter: only process spans that are user-decorated, within entity context, or LLM calls
     if (spanKind) {
       // This is a user-decorated span (withWorkflow, withTask, etc.) - make it a root span
@@ -141,7 +157,7 @@ export class RespanCompositeProcessor implements SpanProcessor {
       // Create a wrapper that makes the span appear as a root span
       const rootSpan = Object.create(Object.getPrototypeOf(span));
       Object.assign(rootSpan, span);
-      
+
       // Override the parentSpanId to make it a root span
       Object.defineProperty(rootSpan, 'parentSpanId', {
         value: undefined,
@@ -158,7 +174,7 @@ export class RespanCompositeProcessor implements SpanProcessor {
       console.debug(
         `[Respan Debug] Processing child span within entity context: ${span.name} (entityPath: ${entityPath})`
       );
-      
+
       // Route to processors
       this._processorManager.onEnd(span);
     } else if (isLLMSpan) {
@@ -186,6 +202,12 @@ export class RespanCompositeProcessor implements SpanProcessor {
       });
 
       this._processorManager.onEnd(enrichedSpan);
+    } else if (span.attributes["respan.entity.log_type"] !== undefined) {
+      // Enriched Respan span (from an instrumentation plugin)
+      console.debug(
+        `[Respan Debug] Processing enriched Respan span: ${span.name}`
+      );
+      this._processorManager.onEnd(span);
     } else {
       // This span has none of the above - it's pure auto-instrumentation noise (HTTP calls, etc.)
       console.debug(
