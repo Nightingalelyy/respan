@@ -1,0 +1,28 @@
+[tool.poetry]
+name = "respan-instrumentation-openai"
+version = "1.0.0"
+description = "Respan instrumentation plugin for direct OpenAI SDK usage"
+authors = ["Respan <team@respan.ai>"]
+license = "Apache 2.0"
+readme = "README.md"
+packages = [
+    { include = "respan_instrumentation_openai", from = "./src" },
+]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.14"
+respan-tracing = "^2.3.0"
+openai = ">=1.0.0"
+opentelemetry-instrumentation-openai = ">=0.48.0"
+
+[tool.poetry.plugins."respan.instrumentations"]
+openai = "respan_instrumentation_openai:OpenAIInstrumentor"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: live network tests (requires API keys)",
+]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

@@ -10,7 +10,9 @@ Import directly from submodules:
 """
 
 from respan_tracing.exporters.respan import RespanSpanExporter
+from respan_tracing.utils.span_factory import propagate_attributes
 
 __all__ = [
     "RespanSpanExporter",
+    "propagate_attributes",
 ]
