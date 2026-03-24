@@ -1,5 +1,7 @@
 import { trace, context, SpanStatusCode, Tracer } from "@opentelemetry/api";
 import { ReadableSpan } from "@opentelemetry/sdk-trace-base";
+import { RespanSpanAttributes } from "@respan/respan-sdk";
+import { metadataAttributeKey, LOG_PREFIX, LOG_PREFIX_WARN } from "../constants/index.js";
 
 /**
  * Options for updating a span
@@ -186,17 +188,17 @@ class RespanClientImpl implements RespanClient {
       const { customerIdentifier, traceGroupIdentifier, metadata } = options.respanParams;
 
       if (customerIdentifier) {
-        currentSpan.setAttribute("respan.customer_identifier", customerIdentifier);
+        currentSpan.setAttribute(RespanSpanAttributes.RESPAN_CUSTOMER_PARAMS_ID, customerIdentifier);
       }
 
       if (traceGroupIdentifier) {
-        currentSpan.setAttribute("respan.trace_group_identifier", traceGroupIdentifier);
+        currentSpan.setAttribute(RespanSpanAttributes.RESPAN_TRACE_GROUP_ID, traceGroupIdentifier);
       }
 
       if (metadata) {
         // Flatten metadata into attributes with respan.metadata prefix
         for (const [key, value] of Object.entries(metadata)) {
-          currentSpan.setAttribute(`respan.metadata.${key}`, value);
+          currentSpan.setAttribute(metadataAttributeKey(key), value);
         }
       }
     }

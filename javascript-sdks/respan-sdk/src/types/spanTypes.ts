@@ -26,6 +26,9 @@ export enum RespanSpanAttributes {
     // Span links
     RESPAN_LINK_TIMESTAMP = "respan.link.timestamp",
 
+    // Processor routing (used by decorators to target specific processors)
+    RESPAN_PROCESSORS = "respan.processors",
+
     // Logging
     RESPAN_LOG_METHOD = "respan.entity.log_method",
     RESPAN_LOG_TYPE = "respan.entity.log_type",
@@ -34,8 +37,11 @@ export enum RespanSpanAttributes {
     RESPAN_LOG_ROOT_ID = "respan.entity.log_root_id",
     RESPAN_LOG_SOURCE = "respan.entity.log_source",
 
-    // OpenInference
+    // OpenInference attributes (used for OI → Traceloop/GenAI enrichment)
     OPENINFERENCE_SPAN_KIND = "openinference.span.kind",
+    OPENINFERENCE_LLM_MODEL_NAME = "llm.model_name",
+    OPENINFERENCE_LLM_TOKEN_COUNT_PROMPT = "llm.token_count.prompt",
+    OPENINFERENCE_LLM_TOKEN_COUNT_COMPLETION = "llm.token_count.completion",
 
     // GenAI / LLM semantic conventions (for packages that don't depend on @traceloop/ai-semantic-conventions)
     GEN_AI_SYSTEM = "gen_ai.system",

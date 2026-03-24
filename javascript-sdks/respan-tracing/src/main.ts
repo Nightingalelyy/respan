@@ -77,7 +77,7 @@ export class RespanTelemetry {
         this.options = {
             appName: options.appName || process.env.RESPAN_APP_NAME || "default",
             disableBatch: options.disableBatch || false,
-            baseURL: options.baseURL || process.env.RESPAN_BASE_URL || "https://api.respan.co",
+            baseURL: options.baseURL || process.env.RESPAN_BASE_URL || "https://api.respan.ai",
             apiKey: options.apiKey || process.env.RESPAN_API_KEY || "",
             instrumentModules: options.instrumentModules || {},
             disabledInstrumentations: options.disabledInstrumentations || [],

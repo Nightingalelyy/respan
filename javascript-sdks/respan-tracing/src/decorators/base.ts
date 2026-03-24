@@ -1,5 +1,6 @@
 import { Span, context, SpanStatusCode } from "@opentelemetry/api";
 import { suppressTracing } from "@opentelemetry/core";
+import { RespanSpanAttributes } from "@respan/respan-sdk";
 import {
   ASSOCIATION_PROPERTIES_KEY,
   ENTITY_NAME_KEY,
@@ -152,7 +153,7 @@ function withEntity<
 
         // Set processor routing if specified
         if (processors) {
-          span.setAttribute("respan.processors", processors);
+          span.setAttribute(RespanSpanAttributes.RESPAN_PROCESSORS, processors);
         }
 
         // STEP 10: Capture input parameters if tracing is enabled
