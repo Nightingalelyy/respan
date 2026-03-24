@@ -9,7 +9,7 @@
     "respan": "./bin/run.js"
   },
   "scripts": {
-    "build": "tsc && rm -rf dist/assets && cp -r src/assets dist/assets && npm run build:hooks",
+    "build": "tsc && npm run build:hooks",
     "build:hooks": "node -e \"const{build}=require('esbuild');const hooks=['claude-code','codex-cli','gemini-cli'];Promise.all(hooks.map(h=>build({entryPoints:['src/hooks/'+h+'.ts'],bundle:true,platform:'node',target:'node18',format:'cjs',outfile:'dist/hooks/'+h+'.cjs',external:[]}))).then(()=>console.log('Hooks bundled.'))\"",
     "clean": "rm -rf dist",
     "dev": "node --loader ts-node/esm bin/dev.js",

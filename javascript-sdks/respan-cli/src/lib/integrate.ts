@@ -95,33 +95,6 @@ export function findProjectRoot(): string {
  * version — upgrading the CLI and re-running integrate updates the hook.
  */
 /**
- * @deprecated Use getJsHookScript('claude-code') instead.
- */
-export function getHookScript(): string {
-  const dir = path.dirname(fileURLToPath(import.meta.url));
-  const hookPath = path.join(dir, '..', 'assets', 'hook.py');
-  return fs.readFileSync(hookPath, 'utf-8');
-}
-
-/**
- * @deprecated Use getJsHookScript('gemini-cli') instead.
- */
-export function getGeminiHookScript(): string {
-  const dir = path.dirname(fileURLToPath(import.meta.url));
-  const hookPath = path.join(dir, '..', 'assets', 'gemini_hook.py');
-  return fs.readFileSync(hookPath, 'utf-8');
-}
-
-/**
- * @deprecated Use getJsHookScript('codex-cli') instead.
- */
-export function getCodexHookScript(): string {
-  const dir = path.dirname(fileURLToPath(import.meta.url));
-  const hookPath = path.join(dir, '..', 'assets', 'codex_hook.py');
-  return fs.readFileSync(hookPath, 'utf-8');
-}
-
-/**
  * Return the bundled JS hook script contents for the given CLI tool.
  * These are standalone Node.js scripts bundled with esbuild.
  */
