@@ -82,8 +82,11 @@ class RespanSpanProcessor:
         # This enables a parent @workflow(processors="dogfood,production") to
         # automatically route all child @task spans to the same processors,
         # without each child needing to repeat the processors param.
-        # Uses parent_context (not ambient context) for correctness in async
-        # and explicit-context scenarios.
+        #
+        # IMPORTANT: Only inherit when child has NO processors set. If the
+        # child explicitly sets processors (e.g., @workflow(processors="dogfood")),
+        # respect that — merging would cause recursion when the production
+        # processor's exporter creates spans with @workflow(processors="dogfood").
         if not span.attributes.get(PROCESSORS_ATTR):
             parent_span = trace.get_current_span(parent_context)
             if parent_span and hasattr(parent_span, "attributes"):
@@ -399,20 +402,32 @@ class SpanBuffer:
         pipeline so they reach the OTLP exporter. This does NOT clear the
         local queue — ``get_all_spans()`` still works after exit for read-only
         use cases (e.g., converting spans to unified logs).
+
+        CRITICAL: Flush BEFORE resetting the context variable. If we reset
+        first, the ContextVar restores the parent buffer. Then process_spans
+        replays spans through BufferingSpanProcessor which sees the parent
+        buffer (still _is_buffering=True) and re-buffers them there instead
+        of forwarding to the real processor chain.
         """
         logger.debug(f"[SpanBuffer] Exiting buffering context for trace {self.trace_id}")
 
-        # Mark as not buffering FIRST so replayed spans don't re-enter the buffer
+        # Mark as not buffering FIRST so replayed spans don't re-enter
+        # THIS buffer via BufferingSpanProcessor.on_end
         self._is_buffering = False
 
-        # Reset the context variable
+        # Auto-flush BEFORE resetting the context variable. While this
+        # buffer is still the active one in the ContextVar,
+        # BufferingSpanProcessor.on_end sees _is_buffering=False and
+        # falls through to the real processor (FilteringSpanProcessor →
+        # exporter). If we reset first, the parent buffer would catch
+        # the replayed spans instead.
+        if self._tracer_provider is not None and self._local_queue:
+            self.process_spans(self._tracer_provider)
+
+        # NOW safe to reset — flush is done, no more spans to replay
         if self._context_token is not None:
             _active_span_buffer.reset(self._context_token)
             self._context_token = None
-
-        # Auto-flush: replay buffered spans through the processor pipeline
-        if self._tracer_provider is not None and self._local_queue:
-            self.process_spans(self._tracer_provider)
 
         # Detach parent context (must happen after flush so spans keep the parent)
         if self._parent_context_token is not None:
