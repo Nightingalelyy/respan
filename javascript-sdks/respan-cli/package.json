@@ -1,0 +1,57 @@
+{
+  "name": "@respan/cli",
+  "version": "0.5.3",
+  "description": "Respan CLI - manage your LLM observability from the command line",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "respan": "./bin/run.js"
+  },
+  "scripts": {
+    "build": "tsc && rm -rf dist/assets && cp -r src/assets dist/assets && npm run build:hooks",
+    "build:hooks": "node -e \"const{build}=require('esbuild');const hooks=['claude-code','codex-cli','gemini-cli'];Promise.all(hooks.map(h=>build({entryPoints:['src/hooks/'+h+'.ts'],bundle:true,platform:'node',target:'node18',format:'cjs',outfile:'dist/hooks/'+h+'.cjs',external:[]}))).then(()=>console.log('Hooks bundled.'))\"",
+    "clean": "rm -rf dist",
+    "dev": "node --loader ts-node/esm bin/dev.js",
+    "postpack": "rm -f oclif.manifest.json",
+    "prepack": "npm run build && oclif manifest"
+  },
+  "oclif": {
+    "bin": "respan",
+    "dirname": "respan",
+    "commands": {
+      "strategy": "pattern",
+      "target": "./dist/commands"
+    },
+    "plugins": [
+      "@oclif/plugin-help",
+      "@oclif/plugin-not-found",
+      "@oclif/plugin-autocomplete"
+    ],
+    "topicSeparator": " "
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^7",
+    "@oclif/core": "^4",
+    "@oclif/plugin-autocomplete": "^3",
+    "@oclif/plugin-help": "^6",
+    "@oclif/plugin-not-found": "^3",
+    "@respan/cli": "^0.5.2",
+    "@respan/respan-api": "^0.0.3",
+    "@respan/respan-sdk": "^1.1.4"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25",
+    "oclif": "^4",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "oclif.manifest.json"
+  ]
+}
