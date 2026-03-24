@@ -62,7 +62,7 @@ export const startTracing = async (options: RespanOptions) => {
   const {
     appName = "respan-app",
     apiKey = process.env.RESPAN_API_KEY || "",
-    baseURL = process.env.RESPAN_BASE_URL || "https://api.respan.co",
+    baseURL = process.env.RESPAN_BASE_URL || "https://api.respan.ai",
     logLevel = "error",
     exporter,
     headers = {},

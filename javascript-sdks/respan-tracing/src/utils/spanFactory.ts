@@ -10,7 +10,7 @@ import { trace, SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import { hrTime, hrTimeDuration } from "@opentelemetry/core";
 import { RESPAN_SPAN_ATTRIBUTES_MAP, RespanSpanAttributes } from "@respan/respan-sdk";
-import { RESPAN_PACKAGE_NAME } from "../constants/index.js";
+import { RESPAN_PACKAGE_NAME, metadataAttributeKey } from "../constants/index.js";
 import { getPropagatedAttributes } from "./context.js";
 
 // ── ID helpers ──────────────────────────────────────────────────────────────
@@ -110,7 +110,7 @@ export function buildReadableSpan(opts: BuildSpanOptions): ReadableSpan {
 
         if (key === "metadata" && typeof value === "object") {
           for (const [mk, mv] of Object.entries(value as Record<string, any>)) {
-            const fullKey = `${RespanSpanAttributes.RESPAN_METADATA}.${mk}`;
+            const fullKey = metadataAttributeKey(mk);
             if (attrs[fullKey] === undefined) {
               attrs[fullKey] = typeof mv === "string" ? mv : JSON.stringify(mv);
             }

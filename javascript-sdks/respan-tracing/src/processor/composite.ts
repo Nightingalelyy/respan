@@ -11,6 +11,16 @@ import {
 } from "@respan/respan-sdk";
 import { MultiProcessorManager } from "./manager.js";
 import { getEntityPath, getPropagatedAttributes } from "../utils/context.js";
+import { metadataAttributeKey, LOG_PREFIX, LOG_PREFIX_DEBUG, LOG_PREFIX_ERROR } from "../constants/index.js";
+
+// ── LLM span name patterns ────────────────────────────────────────────────
+// Recognized span name substrings from auto-instrumentation libraries.
+// Used to identify LLM calls for processing vs. filtering.
+const LLM_SPAN_NAME_PATTERNS = [
+  "anthropic.messages",
+  "openai.chat",
+  "chat.completions",
+] as const;
 
 // ── OpenInference span enrichment ──────────────────────────────────────────
 
@@ -70,12 +80,12 @@ function getOIEnrichmentAttrs(span: ReadableSpan): Record<string, any> {
     attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = span.attributes["input.value"];
   if (span.attributes["output.value"] !== undefined)
     attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = span.attributes["output.value"];
-  if (span.attributes["llm.model_name"] !== undefined)
-    attrs[RespanSpanAttributes.GEN_AI_REQUEST_MODEL] = span.attributes["llm.model_name"];
-  if (span.attributes["llm.token_count.prompt"] !== undefined)
-    attrs[RespanSpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS] = span.attributes["llm.token_count.prompt"];
-  if (span.attributes["llm.token_count.completion"] !== undefined)
-    attrs[RespanSpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS] = span.attributes["llm.token_count.completion"];
+  if (span.attributes[RespanSpanAttributes.OPENINFERENCE_LLM_MODEL_NAME] !== undefined)
+    attrs[RespanSpanAttributes.GEN_AI_REQUEST_MODEL] = span.attributes[RespanSpanAttributes.OPENINFERENCE_LLM_MODEL_NAME];
+  if (span.attributes[RespanSpanAttributes.OPENINFERENCE_LLM_TOKEN_COUNT_PROMPT] !== undefined)
+    attrs[RespanSpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS] = span.attributes[RespanSpanAttributes.OPENINFERENCE_LLM_TOKEN_COUNT_PROMPT];
+  if (span.attributes[RespanSpanAttributes.OPENINFERENCE_LLM_TOKEN_COUNT_COMPLETION] !== undefined)
+    attrs[RespanSpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS] = span.attributes[RespanSpanAttributes.OPENINFERENCE_LLM_TOKEN_COUNT_COMPLETION];
 
   // Entity name / path
   attrs[SpanAttributes.TRACELOOP_ENTITY_NAME] = span.name;
@@ -136,7 +146,7 @@ export class RespanCompositeProcessor implements SpanProcessor {
         if (key === "metadata" && typeof value === "object") {
           for (const [mk, mv] of Object.entries(value as Record<string, any>)) {
             (span as any).setAttribute(
-              `${RespanSpanAttributes.RESPAN_METADATA}.${mk}`,
+              metadataAttributeKey(mk),
               typeof mv === "string" ? mv : JSON.stringify(mv)
             );
           }
@@ -166,14 +176,12 @@ export class RespanCompositeProcessor implements SpanProcessor {
     }
 
     // Check if this is an LLM instrumentation span (OpenAI, Anthropic, etc.)
-    // These have gen_ai.* or llm.* attributes
+    // These have gen_ai.* or llm.* attributes, or recognized span name patterns
     const isLLMSpan =
       span.attributes[RespanSpanAttributes.GEN_AI_SYSTEM] !== undefined ||
       span.attributes[RespanSpanAttributes.LLM_SYSTEM] !== undefined ||
-      span.attributes['gen_ai.request.model'] !== undefined ||
-      span.name.includes('anthropic.messages') ||
-      span.name.includes('openai.chat') ||
-      span.name.includes('chat.completions');
+      span.attributes[RespanSpanAttributes.GEN_AI_REQUEST_MODEL] !== undefined ||
+      LLM_SPAN_NAME_PATTERNS.some((pattern) => span.name.includes(pattern));
 
     // Filter: only process spans that are user-decorated, within entity context, or LLM calls
     if (spanKind) {

@@ -5,6 +5,7 @@ import {
   SpanExporter,
   BatchSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
+import { RespanSpanAttributes } from "@respan/respan-sdk";
 
 /**
  * Configuration for a processor
@@ -88,7 +89,7 @@ export class MultiProcessorManager implements SpanProcessor {
    */
   private shouldSendToProcessor(span: ReadableSpan, config: ProcessorConfig): boolean {
     // Check if span has processors attribute
-    const spanProcessors = span.attributes["respan.processors"];
+    const spanProcessors = span.attributes[RespanSpanAttributes.RESPAN_PROCESSORS];
     
     if (spanProcessors) {
       // Parse processors attribute (could be string or array)

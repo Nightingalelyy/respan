@@ -5,6 +5,7 @@ import {
   RespanSpanAttributes,
   RESPAN_SPAN_ATTRIBUTES_MAP,
 } from "@respan/respan-sdk";
+import { metadataAttributeKey, LOG_PREFIX_DEBUG, LOG_PREFIX_WARN } from "../constants/index.js";
 
 // Global tracer instance (singleton)
 let _tracer: Tracer;
@@ -175,10 +176,10 @@ const setRespanAttributes = (
         Object.entries(value as Record<string, any>).forEach(
           ([metadataKey, metadataValue]) => {
             try {
-              const fullKey = `${RespanSpanAttributes.RESPAN_METADATA}.${metadataKey}`;
+              const fullKey = metadataAttributeKey(metadataKey);
               span.setAttribute(fullKey, metadataValue);
               console.debug(
-                `[Respan Debug] Set metadata attribute: ${fullKey}=${metadataValue}`
+                `${LOG_PREFIX_DEBUG} Set metadata attribute: ${fullKey}=${metadataValue}`
               );
             } catch (error) {
               console.warn(
