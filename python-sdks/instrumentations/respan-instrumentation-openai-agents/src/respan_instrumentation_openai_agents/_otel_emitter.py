@@ -42,11 +42,6 @@ from respan_sdk.constants.llm_logging import (
     LOG_TYPE_WORKFLOW,
 )
 from respan_sdk.constants.span_attributes import (
-    GEN_AI_SYSTEM,
-    LLM_REQUEST_MODEL,
-    LLM_REQUEST_TYPE,
-    LLM_USAGE_COMPLETION_TOKENS,
-    LLM_USAGE_PROMPT_TOKENS,
     RESPAN_LOG_TYPE,
     RESPAN_METADATA_AGENT_NAME,
     RESPAN_METADATA_FROM_AGENT,
@@ -110,6 +105,47 @@ def _safe_json(obj: Any) -> str:
         return json.dumps(obj, default=str)
     except Exception:
         return str(obj)
+
+
+def _extract_tools(tools: list) -> list:
+    """Convert Response API tool definitions to Chat Completions format."""
+    result = []
+    for tool in tools:
+        tool_dict = serialize_value(tool)
+        if not isinstance(tool_dict, dict):
+            continue
+        tool_type = tool_dict.get("type", "")
+        if tool_type == "function":
+            func = {
+                "name": tool_dict.get("name", ""),
+            }
+            desc = tool_dict.get("description")
+            if desc:
+                func["description"] = desc
+            params = tool_dict.get("parameters")
+            if params:
+                func["parameters"] = params
+            result.append({"type": "function", "function": func})
+        else:
+            result.append(tool_dict)
+    return result
+
+
+def _extract_tool_calls(output: list) -> list:
+    """Extract function tool calls from Response API output items."""
+    result = []
+    for item in output:
+        item_dict = serialize_value(item)
+        if isinstance(item_dict, dict) and item_dict.get("type") == "function_call":
+            result.append({
+                "id": item_dict.get("call_id", ""),
+                "type": "function",
+                "function": {
+                    "name": item_dict.get("name", ""),
+                    "arguments": item_dict.get("arguments", ""),
+                },
+            })
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -176,8 +212,8 @@ def emit_response(item: SpanImpl, span_data: ResponseSpanData) -> None:
         entity_path="response",
         log_type=LOG_TYPE_RESPONSE,
     )
-    attrs[LLM_REQUEST_TYPE] = LLMRequestTypeValues.CHAT.value
-    attrs[GEN_AI_SYSTEM] = "openai"
+    attrs[SpanAttributes.LLM_REQUEST_TYPE] = LLMRequestTypeValues.CHAT.value
+    attrs[SpanAttributes.LLM_SYSTEM] = "openai"
 
     # Input
     input_msgs = _format_input_messages(span_data.input)
@@ -189,16 +225,25 @@ def emit_response(item: SpanImpl, span_data: ResponseSpanData) -> None:
     if resp:
         model = getattr(resp, "model", None) or ""
         if model:
-            attrs[LLM_REQUEST_MODEL] = model
+            attrs[SpanAttributes.LLM_REQUEST_MODEL] = model
 
         if hasattr(resp, "output") and resp.output:
             output = _format_output(resp.output)
-            attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _safe_json(output)
+            attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = output
+
+            tool_calls = _extract_tool_calls(resp.output)
+            if tool_calls:
+                attrs["tool_calls"] = tool_calls
+
+        if hasattr(resp, "tools") and resp.tools:
+            tools_list = _extract_tools(resp.tools)
+            if tools_list:
+                attrs["tools"] = tools_list
 
         usage = getattr(resp, "usage", None)
         if usage:
-            attrs[LLM_USAGE_PROMPT_TOKENS] = getattr(usage, "input_tokens", 0) or 0
-            attrs[LLM_USAGE_COMPLETION_TOKENS] = getattr(usage, "output_tokens", 0) or 0
+            attrs[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] = getattr(usage, "input_tokens", 0) or 0
+            attrs[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] = getattr(usage, "output_tokens", 0) or 0
 
     span = build_readable_span(
         name="openai.chat",
@@ -258,22 +303,22 @@ def emit_generation(item: SpanImpl, span_data: GenerationSpanData) -> None:
         entity_path="generation",
         log_type=LOG_TYPE_GENERATION,
     )
-    attrs[LLM_REQUEST_TYPE] = LLMRequestTypeValues.CHAT.value
+    attrs[SpanAttributes.LLM_REQUEST_TYPE] = LLMRequestTypeValues.CHAT.value
 
     if span_data.model:
-        attrs[LLM_REQUEST_MODEL] = span_data.model
+        attrs[SpanAttributes.LLM_REQUEST_MODEL] = span_data.model
 
     input_msgs = _format_input_messages(span_data.input)
     if input_msgs:
         attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = _safe_json(input_msgs)
 
     output = _format_output(span_data.output)
-    attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _safe_json(output)
+    attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = output
 
     if span_data.usage:
         u = span_data.usage
-        attrs[LLM_USAGE_PROMPT_TOKENS] = u.get("prompt_tokens") or u.get("input_tokens") or 0
-        attrs[LLM_USAGE_COMPLETION_TOKENS] = u.get("completion_tokens") or u.get("output_tokens") or 0
+        attrs[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] = u.get("prompt_tokens") or u.get("input_tokens") or 0
+        attrs[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] = u.get("completion_tokens") or u.get("output_tokens") or 0
 
     span = build_readable_span(
         name="openai.chat",
@@ -359,11 +404,11 @@ def emit_custom(item: SpanImpl, span_data: CustomSpanData) -> None:
     data = span_data.data or {}
     for k, v in data.items():
         if k in ("model",):
-            attrs[LLM_REQUEST_MODEL] = v
+            attrs[SpanAttributes.LLM_REQUEST_MODEL] = v
         elif k == "prompt_tokens":
-            attrs[LLM_USAGE_PROMPT_TOKENS] = v
+            attrs[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] = v
         elif k == "completion_tokens":
-            attrs[LLM_USAGE_COMPLETION_TOKENS] = v
+            attrs[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] = v
         elif k == "input":
             attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = _safe_json(v)
         elif k == "output":
