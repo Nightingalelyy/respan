@@ -131,6 +131,7 @@ def _format_output(resp_output: Any) -> str:
             if item.get("content"):
                 text_parts.append(str(item["content"]))
                 continue
+            text_parts.append(str(item))
         return "\n".join(text_parts) if text_parts else ""
 
     return str(serialized)

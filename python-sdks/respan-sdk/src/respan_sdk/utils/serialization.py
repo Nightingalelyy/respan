@@ -33,17 +33,7 @@ def serialize_value(value: Any) -> Any:
             result.append(serialize_value(value=nested_value))
         return result
 
-    if hasattr(value, "model_dump"):
-        try:
-            return value.model_dump(mode="json")
-        except Exception:
-            pass
-
     if hasattr(value, "__dict__"):
-        return {
-            k: serialize_value(value=v)
-            for k, v in vars(value).items()
-            if not k.startswith("_")
-        }
+        return serialize_value(value=value.__dict__)
 
     return str(value)
