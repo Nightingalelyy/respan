@@ -104,7 +104,12 @@ def _format_output(resp_output: Any) -> str:
         return serialized
 
     if isinstance(serialized, dict):
-        return serialized.get("content", json.dumps(serialized, default=str))
+        content = serialized.get("content")
+        if content is None:
+            return json.dumps(serialized, default=str)
+        if isinstance(content, str):
+            return content
+        return json.dumps(content, default=str)
 
     if isinstance(serialized, list):
         text_parts: List[str] = []
@@ -114,6 +119,9 @@ def _format_output(resp_output: Any) -> str:
                 continue
             item_type = item.get("type", "")
             if item_type in ("function_call", "function_call_output"):
+                continue
+            if item_type in ("output_text", "text", "input_text"):
+                text_parts.append(item.get("text", ""))
                 continue
             if item_type == "message":
                 content_blocks = item.get("content", [])
