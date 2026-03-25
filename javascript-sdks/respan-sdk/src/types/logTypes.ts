@@ -535,8 +535,7 @@ const RespanParamsSchema = z.object({
   //#endregion technical integrations
 
   //#region custom properties
-  metadata: z.record(z.string(), z.any()).optional(), // Map(String, String) — values coerced to strings
-  properties: z.record(z.string(), z.any()).optional(), // Native JSON — preserves types (numbers, booleans, nested)
+  metadata: z.record(z.string(), z.any()).optional(),
   //#endregion custom properties
 
   //#region prompt

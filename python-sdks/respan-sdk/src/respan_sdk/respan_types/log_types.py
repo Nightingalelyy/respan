@@ -163,8 +163,7 @@ class RespanLogParams(PreprocessLogDataMixin, RespanBaseModel):
     # endregion: evaluation
 
     # region: custom properties
-    metadata: Optional[dict] = None  # Map(String, String) — all values coerced to strings
-    properties: Optional[dict] = None  # Native JSON — preserves types (numbers, booleans, nested objects)
+    metadata: Optional[dict] = None
     # endregion: custom properties
 
     # region: prompt
