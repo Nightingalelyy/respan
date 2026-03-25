@@ -136,8 +136,10 @@ def _format_output(resp_output: Any) -> str:
                         elif isinstance(block, str):
                             text_parts.append(block)
                 continue
-            if item.get("content"):
-                text_parts.append(str(item["content"]))
+            if "content" in item:
+                content = item["content"]
+                if content is not None:
+                    text_parts.append(str(content))
                 continue
             text_parts.append(str(item))
         return "\n".join(text_parts) if text_parts else ""
