@@ -2,7 +2,7 @@ import { withTask, withWorkflow, withAgent, withTool } from "./decorators/index.
 import { WithFunctionType } from "./types/decoratorTypes.js";
 import { RespanOptions, ProcessorConfig } from "./types/clientTypes.js";
 import { withRespanSpanAttributes } from "./contexts/span.js";
-import { startTracing, forceFlush, addProcessorToSDK } from "./utils/tracing.js";
+import { startTracing, forceFlush, addProcessorToSDK, injectSpan } from "./utils/tracing.js";
 import { enableInstrumentation } from "./instrumentation/index.js";
 import { getClient as getClientAPI } from "./utils/client.js";
 import { getSpanBufferManager } from "./utils/spanBuffer.js";

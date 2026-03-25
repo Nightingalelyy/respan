@@ -189,7 +189,7 @@ def _patch_chat_prompt_capture():
         from opentelemetry.semconv._incubating.attributes import (
             gen_ai_attributes as GenAIAttributes,
         )
-        from opentelemetry.semconv_ai import SpanAttributes
+        from respan_sdk.constants.span_attributes import LLM_REQUEST_REASONING_EFFORT
 
         def _set_prompts_sync(span, messages):
             if not span.is_recording() or messages is None:
@@ -281,7 +281,7 @@ def _patch_chat_prompt_capture():
                 reasoning_effort = kwargs.get("reasoning_effort")
                 _set_span_attribute(
                     span,
-                    SpanAttributes.LLM_REQUEST_REASONING_EFFORT,
+                    LLM_REQUEST_REASONING_EFFORT,
                     reasoning_effort or (),
                 )
             except Exception:

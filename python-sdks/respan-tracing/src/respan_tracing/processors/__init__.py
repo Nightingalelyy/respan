@@ -9,7 +9,7 @@ from respan_tracing.processors.base import RespanSpanProcessor, BufferingSpanPro
 
 __all__ = [
     "RespanSpanProcessor",
-    "BufferingSpanProcessor", 
+    "BufferingSpanProcessor",
     "SpanBuffer",
     "FilteringSpanProcessor",
 ]
