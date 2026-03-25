@@ -1,7 +1,7 @@
 {
   "name": "@respan/instrumentation-openai-agents",
   "type": "module",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Respan instrumentation plugin for OpenAI Agents SDK (OTEL pipeline)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -29,7 +29,7 @@
     "@traceloop/ai-semantic-conventions": "^0.13.0"
   },
   "peerDependencies": {
-    "@openai/agents": ">=0.0.8"
+    "@openai/agents": ">=0.8.0"
   },
   "peerDependenciesMeta": {
     "@openai/agents": {
@@ -37,7 +37,7 @@
     }
   },
   "devDependencies": {
-    "@openai/agents": "^0.0.8",
+    "@openai/agents": "^0.8.1",
     "@types/node": "^22.15.29",
     "typescript": "^5.7.3"
   }

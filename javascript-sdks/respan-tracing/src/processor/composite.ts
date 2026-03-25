@@ -7,7 +7,6 @@ import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
 import {
   RESPAN_SPAN_ATTRIBUTES_MAP,
   RespanSpanAttributes,
-  RespanLogType,
 } from "@respan/respan-sdk";
 import { MultiProcessorManager } from "./manager.js";
 import { getEntityPath, getPropagatedAttributes } from "../utils/context.js";
@@ -21,80 +20,6 @@ const LLM_SPAN_NAME_PATTERNS = [
   "openai.chat",
   "chat.completions",
 ] as const;
-
-// ── OpenInference span enrichment ──────────────────────────────────────────
-
-/** Map OI span kinds → Traceloop span kinds */
-const OI_KIND_TO_TRACELOOP: Record<string, string> = {
-  LLM: RespanLogType.TASK,
-  CHAIN: RespanLogType.WORKFLOW,
-  TOOL: RespanLogType.TOOL,
-  AGENT: RespanLogType.AGENT,
-  EMBEDDING: RespanLogType.TASK,
-  RETRIEVER: RespanLogType.TASK,
-  RERANKER: RespanLogType.TASK,
-  GUARDRAIL: RespanLogType.TASK,
-  EVALUATOR: RespanLogType.TASK,
-};
-
-/** OI span kinds that imply an LLM request type */
-const OI_LLM_REQUEST_KINDS: Record<string, string> = {
-  LLM: RespanLogType.CHAT,
-  EMBEDDING: RespanLogType.EMBEDDING,
-};
-
-/** Map OI span kinds → respan.entity.log_type values */
-const OI_LOG_TYPE: Record<string, string> = {
-  LLM: RespanLogType.CHAT,
-  CHAIN: RespanLogType.WORKFLOW,
-  TOOL: RespanLogType.TOOL,
-  AGENT: RespanLogType.AGENT,
-  EMBEDDING: RespanLogType.EMBEDDING,
-  RETRIEVER: RespanLogType.TASK,
-  RERANKER: RespanLogType.TASK,
-  GUARDRAIL: RespanLogType.GUARDRAIL,
-  EVALUATOR: RespanLogType.TASK,
-};
-
-/**
- * Build Traceloop/GenAI enrichment attributes for an OpenInference span.
- * Returns only the attributes that need to be *added*; callers merge them
- * on top of the original span attributes.
- */
-function getOIEnrichmentAttrs(span: ReadableSpan): Record<string, any> {
-  const attrs: Record<string, any> = {};
-  const oiKind = String(span.attributes[RespanSpanAttributes.OPENINFERENCE_SPAN_KIND] ?? "");
-
-  if (OI_KIND_TO_TRACELOOP[oiKind]) {
-    attrs[SpanAttributes.TRACELOOP_SPAN_KIND] = OI_KIND_TO_TRACELOOP[oiKind];
-  }
-  if (OI_LLM_REQUEST_KINDS[oiKind]) {
-    attrs[RespanSpanAttributes.LLM_REQUEST_TYPE] = OI_LLM_REQUEST_KINDS[oiKind];
-  }
-  if (OI_LOG_TYPE[oiKind]) {
-    attrs[RespanSpanAttributes.RESPAN_LOG_TYPE] = OI_LOG_TYPE[oiKind];
-  }
-
-  // Bridge OI semantic attrs → Traceloop/GenAI equivalents
-  if (span.attributes["input.value"] !== undefined)
-    attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = span.attributes["input.value"];
-  if (span.attributes["output.value"] !== undefined)
-    attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = span.attributes["output.value"];
-  if (span.attributes[RespanSpanAttributes.OPENINFERENCE_LLM_MODEL_NAME] !== undefined)
-    attrs[RespanSpanAttributes.GEN_AI_REQUEST_MODEL] = span.attributes[RespanSpanAttributes.OPENINFERENCE_LLM_MODEL_NAME];
-  if (span.attributes[RespanSpanAttributes.OPENINFERENCE_LLM_TOKEN_COUNT_PROMPT] !== undefined)
-    attrs[RespanSpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS] = span.attributes[RespanSpanAttributes.OPENINFERENCE_LLM_TOKEN_COUNT_PROMPT];
-  if (span.attributes[RespanSpanAttributes.OPENINFERENCE_LLM_TOKEN_COUNT_COMPLETION] !== undefined)
-    attrs[RespanSpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS] = span.attributes[RespanSpanAttributes.OPENINFERENCE_LLM_TOKEN_COUNT_COMPLETION];
-
-  // Entity name / path
-  attrs[SpanAttributes.TRACELOOP_ENTITY_NAME] = span.name;
-  if (OI_KIND_TO_TRACELOOP[oiKind] !== "workflow") {
-    attrs[SpanAttributes.TRACELOOP_ENTITY_PATH] = span.name;
-  }
-
-  return attrs;
-}
 
 // ── Composite processor ────────────────────────────────────────────────────
 
@@ -222,22 +147,11 @@ export class RespanCompositeProcessor implements SpanProcessor {
       // Route to processors
       this._processorManager.onEnd(span);
     } else if (span.attributes[RespanSpanAttributes.OPENINFERENCE_SPAN_KIND] !== undefined) {
-      // OpenInference span — enrich with Traceloop/GenAI attrs, then route
+      // OpenInference span — already enriched by OpenInferenceTranslator processor
       console.debug(
         `[Respan Debug] Processing OpenInference span: ${span.name} (kind: ${span.attributes[RespanSpanAttributes.OPENINFERENCE_SPAN_KIND]})`
       );
-
-      const enrichmentAttrs = getOIEnrichmentAttrs(span);
-      const enrichedSpan = Object.create(Object.getPrototypeOf(span));
-      Object.assign(enrichedSpan, span);
-      Object.defineProperty(enrichedSpan, "attributes", {
-        value: { ...span.attributes, ...enrichmentAttrs },
-        writable: false,
-        configurable: true,
-        enumerable: true,
-      });
-
-      this._processorManager.onEnd(enrichedSpan);
+      this._processorManager.onEnd(span);
     } else if (span.attributes[RespanSpanAttributes.RESPAN_LOG_TYPE] !== undefined) {
       // Enriched Respan span (from an instrumentation plugin)
       console.debug(

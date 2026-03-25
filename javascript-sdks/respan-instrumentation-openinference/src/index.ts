@@ -1,4 +1,7 @@
 import { trace } from "@opentelemetry/api";
+import { OpenInferenceTranslator } from "./_translator.js";
+
+export { OpenInferenceTranslator } from "./_translator.js";
 
 /**
  * Generic Respan instrumentation wrapper for any OpenInference instrumentor.
@@ -9,6 +12,9 @@ import { trace } from "@opentelemetry/api";
  * - SpanProcessor interface (added via `tracerProvider.addSpanProcessor()`)
  *
  * This wrapper detects the interface and handles both patterns.
+ *
+ * Automatically registers an {@link OpenInferenceTranslator} SpanProcessor that
+ * converts OI span attributes to OpenLLMetry/Traceloop format before export.
  *
  * ```typescript
  * import { Respan } from "@respan/respan";
@@ -28,8 +34,20 @@ export class OpenInferenceInstrumentor {
   private _isInstrumented = false;
   private _isSpanProcessor = false;
 
-  constructor(instrumentorClass: any) {
+  /** Class-level flag: only register the translator once across all instances */
+  private static _translatorRegistered = false;
+
+  private _sdkModule: any;
+
+  /**
+   * @param instrumentorClass - The OI instrumentor class (e.g. GoogleADKInstrumentor)
+   * @param sdkModule - Optional SDK module for ESM manual instrumentation.
+   *   Required for instrumentors that use `manuallyInstrument(module)` instead of
+   *   auto-patching (e.g. Claude Agent SDK in ESM environments).
+   */
+  constructor(instrumentorClass: any, sdkModule?: any) {
     this._instrumentorClass = instrumentorClass;
+    this._sdkModule = sdkModule;
     this.name = `openinference-${instrumentorClass.name || "unknown"}`;
   }
 
@@ -37,9 +55,27 @@ export class OpenInferenceInstrumentor {
     this._instrumentor = new this._instrumentorClass();
     const tp = trace.getTracerProvider();
 
-    if (typeof this._instrumentor.instrument === "function") {
+    // Register the OI → OpenLLMetry translator once
+    if (!OpenInferenceInstrumentor._translatorRegistered && tp && typeof (tp as any).addSpanProcessor === "function") {
+      (tp as any).addSpanProcessor(new OpenInferenceTranslator());
+      OpenInferenceInstrumentor._translatorRegistered = true;
+    }
+
+    // Set tracer provider if the instrumentor supports it
+    if (typeof this._instrumentor.setTracerProvider === "function") {
+      this._instrumentor.setTracerProvider(tp);
+    }
+
+    // ESM manual instrumentation (e.g. Claude Agent SDK)
+    if (this._sdkModule && typeof this._instrumentor.manuallyInstrument === "function") {
+      this._instrumentor.manuallyInstrument(this._sdkModule);
+    }
+    // Standard OTEL auto-patching
+    else if (typeof this._instrumentor.instrument === "function") {
       this._instrumentor.instrument({ tracerProvider: tp });
-    } else if (tp && typeof (tp as any).addSpanProcessor === "function") {
+    }
+    // SpanProcessor-based (e.g. pydantic-ai, strands-agents)
+    else if (tp && typeof (tp as any).addSpanProcessor === "function") {
       (tp as any).addSpanProcessor(this._instrumentor);
       this._isSpanProcessor = true;
     }

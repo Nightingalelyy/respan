@@ -13,8 +13,8 @@ const respan = new Respan({
 await respan.initialize();
 
 const client = new OpenAI({
-  apiKey: process.env.RESPAN_API_KEY,
-  baseURL: process.env.RESPAN_BASE_URL,
+  apiKey: process.env.OPENAI_API_KEY,
+  baseURL: process.env.OPENAI_BASE_URL,
 });
 
 const response = await client.chat.completions.create({

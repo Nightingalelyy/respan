@@ -3,11 +3,13 @@ from opentelemetry.semconv_ai import SpanAttributes
 import logging
 
 from respan_sdk.constants.span_attributes import (
+    GEN_AI_SYSTEM,
     GEN_AI_OPERATION_NAME,
     GEN_AI_AGENT_NAME,
     GEN_AI_TOOL_NAME,
     GEN_AI_TOOL_CALL_ARGUMENTS,
     GEN_AI_TOOL_CALL_RESULT,
+    LLM_REQUEST_TYPE,
     OPENINFERENCE_SPAN_KIND,
     PYDANTIC_AI_AGENT_NAME,
     PYDANTIC_AI_TOOL_ARGUMENTS,
@@ -20,7 +22,7 @@ logger = logging.getLogger(__name__)
 # Attribute names that indicate a GenAI span (OTEL incubating + Pydantic AI vendor attrs)
 _GENAI_INDICATOR_ATTRS = (
     GEN_AI_OPERATION_NAME,
-    SpanAttributes.LLM_SYSTEM,
+    GEN_AI_SYSTEM,
     GEN_AI_AGENT_NAME,
     PYDANTIC_AI_AGENT_NAME,
     GEN_AI_TOOL_NAME,
@@ -81,20 +83,20 @@ def is_processable_span(span: ReadableSpan) -> bool:
 
     # Standalone auto-instrumented LLM span (has llm.request.type, e.g. "chat")
     # This covers OpenAI/Anthropic/etc. calls made outside @workflow/@task decorators
-    if span.attributes.get(SpanAttributes.LLM_REQUEST_TYPE):
+    if span.attributes.get(LLM_REQUEST_TYPE):
         logger.debug(
             f"[Respan Debug] Processing standalone LLM span: {span.name} "
-            f"(llm.request.type: {span.attributes.get(SpanAttributes.LLM_REQUEST_TYPE)})"
+            f"(llm.request.type: {span.attributes.get(LLM_REQUEST_TYPE)})"
         )
         return True
 
     # Standalone GenAI span (has gen_ai.system, e.g. "openai")
     # This covers spans from OTEL instrumentors that don't set llm.request.type,
     # such as the OpenAI Responses API instrumentor.
-    if span.attributes.get(SpanAttributes.LLM_SYSTEM):
+    if span.attributes.get(GEN_AI_SYSTEM):
         logger.debug(
             f"[Respan Debug] Processing standalone GenAI span: {span.name} "
-            f"(gen_ai.system: {span.attributes.get(SpanAttributes.LLM_SYSTEM)})"
+            f"(gen_ai.system: {span.attributes.get(GEN_AI_SYSTEM)})"
         )
         return True
 
@@ -147,7 +149,7 @@ def is_root_span_candidate(span: ReadableSpan) -> bool:
     """
     span_kind = span.attributes.get(SpanAttributes.TRACELOOP_SPAN_KIND)
     entity_path = span.attributes.get(SpanAttributes.TRACELOOP_ENTITY_PATH, "")
-    llm_request_type = span.attributes.get(SpanAttributes.LLM_REQUEST_TYPE)
+    llm_request_type = span.attributes.get(LLM_REQUEST_TYPE)
 
     has_no_entity_path = not entity_path or entity_path == ""
 
@@ -162,7 +164,7 @@ def is_root_span_candidate(span: ReadableSpan) -> bool:
         return True
 
     # Standalone GenAI span (gen_ai.system) without entity path should become root
-    gen_ai_system = span.attributes.get(SpanAttributes.LLM_SYSTEM)
+    gen_ai_system = span.attributes.get(GEN_AI_SYSTEM)
     if gen_ai_system and span_kind is None and not llm_request_type and has_no_entity_path:
         logger.debug(f"[Respan Debug] Span is root candidate (standalone GenAI): {span.name}")
         return True

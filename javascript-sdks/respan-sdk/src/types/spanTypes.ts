@@ -38,13 +38,26 @@ export enum RespanSpanAttributes {
     RESPAN_LOG_ROOT_ID = "respan.entity.log_root_id",
     RESPAN_LOG_SOURCE = "respan.entity.log_source",
 
-    // OpenInference attributes (used for OI → Traceloop/GenAI enrichment)
+    // Respan metadata attributes (agent-specific)
+    RESPAN_METADATA_AGENT_NAME = "respan.metadata.agent_name",
+    RESPAN_METADATA_FROM_AGENT = "respan.metadata.from_agent",
+    RESPAN_METADATA_TO_AGENT = "respan.metadata.to_agent",
+    RESPAN_METADATA_GUARDRAIL_NAME = "respan.metadata.guardrail_name",
+    RESPAN_METADATA_TRIGGERED = "respan.metadata.triggered",
+    RESPAN_SPAN_TOOLS = "respan.span.tools",
+    RESPAN_SPAN_HANDOFFS = "respan.span.handoffs",
+
+    // OpenInference attributes (used by composite processor for span detection)
     OPENINFERENCE_SPAN_KIND = "openinference.span.kind",
     OPENINFERENCE_LLM_MODEL_NAME = "llm.model_name",
     OPENINFERENCE_LLM_TOKEN_COUNT_PROMPT = "llm.token_count.prompt",
     OPENINFERENCE_LLM_TOKEN_COUNT_COMPLETION = "llm.token_count.completion",
 
-    // GenAI / LLM semantic conventions (for packages that don't depend on @traceloop/ai-semantic-conventions)
+    // GenAI / LLM semantic conventions
+    // Used by composite processor and instrumentation emitters.
+    // Traceloop attrs (TRACELOOP_*) come from @traceloop/ai-semantic-conventions.
+    // OI attrs come from @arizeai/openinference-* packages.
+    // Only Respan-specific or attrs removed from upstream are defined here.
     GEN_AI_SYSTEM = "gen_ai.system",
     GEN_AI_REQUEST_MODEL = "gen_ai.request.model",
     GEN_AI_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens",

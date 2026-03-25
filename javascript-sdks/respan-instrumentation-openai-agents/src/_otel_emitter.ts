@@ -143,8 +143,12 @@ function buildReadableSpan(opts: BuildSpanOptions): ReadableSpan {
 
 function injectSpan(span: ReadableSpan): void {
   const tp = trace.getTracerProvider() as any;
+  // Walk the provider chain to find activeSpanProcessor:
+  // ProxyTracerProvider._delegate (NodeTracerProvider) has activeSpanProcessor
   const processor =
-    tp?.activeSpanProcessor ?? tp?._delegate?.activeSpanProcessor;
+    tp?.activeSpanProcessor ??
+    tp?._delegate?.activeSpanProcessor ??
+    tp?._delegate?._tracerProvider?.activeSpanProcessor;
   if (processor && typeof processor.onEnd === "function") {
     processor.onEnd(span);
   }
@@ -235,9 +239,9 @@ function emitAgent(item: Span<any>): void {
 
   const attrs = baseAttrs(RespanLogType.AGENT, name, name, RespanLogType.AGENT);
   attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] = name;
-  attrs["respan.metadata.agent_name"] = name;
-  if (data.tools) attrs["respan.span.tools"] = safeJson(data.tools);
-  if (data.handoffs) attrs["respan.span.handoffs"] = safeJson(data.handoffs);
+  attrs[RespanSpanAttributes.RESPAN_METADATA_AGENT_NAME] = name;
+  if (data.tools) attrs[RespanSpanAttributes.RESPAN_SPAN_TOOLS] = safeJson(data.tools);
+  if (data.handoffs) attrs[RespanSpanAttributes.RESPAN_SPAN_HANDOFFS] = safeJson(data.handoffs);
 
   const span = buildReadableSpan({
     name: `${name}.agent`,
@@ -383,8 +387,8 @@ function emitHandoff(item: Span<any>): void {
   const attrs = baseAttrs(RespanLogType.TASK, "handoff", "handoff", RespanLogType.HANDOFF);
   attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson(fromAgent);
   attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson(toAgent);
-  attrs["respan.metadata.from_agent"] = fromAgent;
-  attrs["respan.metadata.to_agent"] = toAgent;
+  attrs[RespanSpanAttributes.RESPAN_METADATA_FROM_AGENT] = fromAgent;
+  attrs[RespanSpanAttributes.RESPAN_METADATA_TO_AGENT] = toAgent;
 
   const span = buildReadableSpan({
     name: "handoff.task",
@@ -408,8 +412,8 @@ function emitGuardrail(item: Span<any>): void {
   const endHr = parseISOToHrTime(json.ended_at);
 
   const attrs = baseAttrs(RespanLogType.TASK, name, name, RespanLogType.GUARDRAIL);
-  attrs["respan.metadata.guardrail_name"] = data.name;
-  attrs["respan.metadata.triggered"] = String(data.triggered);
+  attrs[RespanSpanAttributes.RESPAN_METADATA_GUARDRAIL_NAME] = data.name;
+  attrs[RespanSpanAttributes.RESPAN_METADATA_TRIGGERED] = String(data.triggered);
 
   const span = buildReadableSpan({
     name: `${name}.task`,

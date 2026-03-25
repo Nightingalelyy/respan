@@ -1,6 +1,7 @@
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import { diag, DiagLogLevel } from "@opentelemetry/api";
-import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import { Resource } from "@opentelemetry/resources";
 import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 import { RespanOptions, ProcessorConfig } from "../types/clientTypes.js";
@@ -197,10 +198,10 @@ export const startTracing = async (options: RespanOptions) => {
   );
 
   // Prepare exporter URL and configuration
-  const exporterUrl = `${_resolveBaseURL(baseURL)}/api/v1/traces`;
+  // Use /v2/traces with OTLP JSON — same format as the Python RespanSpanExporter.
+  const exporterUrl = `${_resolveBaseURL(baseURL)}/api/v2/traces`;
   const exporterHeaders = {
     Authorization: `Bearer ${apiKey}`,
-    "Content-Type": "application/x-protobuf",
     ...headers,
   };
 
@@ -326,6 +327,26 @@ export const getClient = (): NodeSDK | undefined => {
  * 
  * @param config - Processor configuration
  */
+/**
+ * Inject a ReadableSpan into the OTEL pipeline.
+ *
+ * This is how plugin-constructed spans enter the pipeline without
+ * needing a live tracer context. The span passes through the
+ * RespanCompositeProcessor (filtering + routing) → exporter → /v2/traces.
+ *
+ * Equivalent to Python's ``inject_span()`` in ``span_factory.py``.
+ *
+ * @returns true if injected, false if SDK not initialized
+ */
+export const injectSpan = (span: ReadableSpan): boolean => {
+  if (!_compositeProcessor) {
+    console.warn("[Respan] Cannot inject span — SDK not initialized");
+    return false;
+  }
+  _compositeProcessor.onEnd(span);
+  return true;
+};
+
 export const addProcessorToSDK = (config: ProcessorConfig): void => {
   if (!_compositeProcessor) {
     console.error("[Respan] Cannot add processor - SDK not initialized");

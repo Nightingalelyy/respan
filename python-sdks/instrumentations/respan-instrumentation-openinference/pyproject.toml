@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "respan-instrumentation-openinference"
-version = "1.0.0"
+version = "1.1.0"
 description = "Respan instrumentation wrapper for OpenInference"
 authors = ["Respan <team@respan.ai>"]
 license = "Apache 2.0"
@@ -12,6 +12,8 @@ packages = [
 [tool.poetry.dependencies]
 python = ">=3.11,<3.14"
 respan-tracing = "^2.3.0"
+openinference-semantic-conventions = ">=0.1.12"
+opentelemetry-semantic-conventions-ai = ">=0.4.1"
 # Users install individual OpenInference packages as needed, e.g.:
 #   pip install openinference-instrumentation-google-adk
 
