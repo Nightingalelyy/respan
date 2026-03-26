@@ -18,7 +18,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { execFile, fork as cpFork } from 'node:child_process';
+import { execFile } from 'node:child_process';
 
 import {
   initLogging,
@@ -526,7 +526,6 @@ function processBeforeTool(hookData: Msg): void {
   // Increment send_version to cancel any pending delayed sends —
   // the turn isn't done yet, a tool is about to execute.
   state.send_version = (state.send_version ?? 0) + 1;
-  state.tool_turns = (state.tool_turns ?? 0) + 1;
   saveStreamState(sessionId, state);
 }
 
@@ -730,61 +729,75 @@ function processChunk(hookData: Msg): void {
 
 // ── Main ──────────────────────────────────────────────────────────
 
-function mainWorker(raw: string): void {
+function processChunkInWorker(dataFile: string): void {
   try {
+    const raw = fs.readFileSync(dataFile, 'utf-8');
+    fs.unlinkSync(dataFile);
     if (!raw.trim()) return;
-
     const hookData = JSON.parse(raw) as Msg;
-    const event = String(hookData.hook_event_name ?? '');
-
     const unlock = acquireLock(LOCK_PATH);
     try {
-      if (event === 'BeforeTool') {
-        processBeforeTool(hookData);
-      } else if (event === 'AfterTool') {
-        processAfterTool(hookData);
-      } else {
-        processChunk(hookData);
-      }
+      processChunk(hookData);
     } finally {
       unlock?.();
     }
   } catch (e) {
-    if (e instanceof SyntaxError) {
-      log('ERROR', `Invalid JSON from stdin: ${e}`);
-    } else {
-      log('ERROR', `Hook error: ${e}`);
-    }
+    log('ERROR', `Worker error: ${e}`);
+    try { fs.unlinkSync(dataFile); } catch {}
   }
 }
 
 function main(): void {
-  // Worker mode: re-invoked as detached subprocess
+  // Worker mode: process chunk from temp file
   if (process.env._RESPAN_GEM_WORKER === '1') {
-    const raw = process.env._RESPAN_GEM_DATA ?? '';
-    mainWorker(raw);
+    const dataFile = process.env._RESPAN_GEM_FILE ?? '';
+    if (dataFile) processChunkInWorker(dataFile);
     return;
   }
 
-  // Read stdin synchronously, respond immediately, fork worker, exit
   let raw = '';
   try {
     raw = fs.readFileSync(0, 'utf-8');
   } catch {}
+  // Respond immediately so Gemini CLI doesn't block
   process.stdout.write('{}\n');
   if (!raw.trim()) { process.exit(0); }
 
   try {
-    const scriptPath = __filename || process.argv[1];
-    const child = execFile('node', [scriptPath], {
-      env: { ...process.env, _RESPAN_GEM_WORKER: '1', _RESPAN_GEM_DATA: raw },
-      stdio: 'ignore' as any,
-      detached: true,
-    } as any);
-    child.unref();
+    const hookData = JSON.parse(raw) as Msg;
+    const event = String(hookData.hook_event_name ?? '');
+
+    if (event === 'BeforeTool' || event === 'AfterTool') {
+      // Tool events are fast (just state updates) and must run in order.
+      // Process inline, don't fork.
+      const unlock = acquireLock(LOCK_PATH);
+      try {
+        if (event === 'BeforeTool') processBeforeTool(hookData);
+        else processAfterTool(hookData);
+      } finally {
+        unlock?.();
+      }
+    } else {
+      // AfterModel chunks: fork to background so Gemini CLI doesn't block.
+      // Write data to temp file (avoids env var size limits).
+      const dataFile = path.join(STATE_DIR, `respan_chunk_${process.pid}.json`);
+      fs.mkdirSync(STATE_DIR, { recursive: true });
+      fs.writeFileSync(dataFile, raw);
+      try {
+        const scriptPath = __filename || process.argv[1];
+        const child = execFile('node', [scriptPath], {
+          env: { ...process.env, _RESPAN_GEM_WORKER: '1', _RESPAN_GEM_FILE: dataFile },
+          stdio: 'ignore' as any,
+          detached: true,
+        } as any);
+        child.unref();
+      } catch (e) {
+        // Fallback: run inline
+        processChunkInWorker(dataFile);
+      }
+    }
   } catch (e) {
-    // Fallback: run inline
-    mainWorker(raw);
+    log('ERROR', `Hook error: ${e}`);
   }
   process.exit(0);
 }
