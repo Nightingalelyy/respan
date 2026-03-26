@@ -18,7 +18,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, fork as cpFork } from 'node:child_process';
 
 import {
   initLogging,
@@ -650,11 +650,8 @@ function processChunk(hookData: Msg): void {
 
 // ── Main ──────────────────────────────────────────────────────────
 
-function main(): void {
+function mainWorker(raw: string): void {
   try {
-    const raw = fs.readFileSync(0, 'utf-8');
-    // Respond to Gemini CLI immediately so it doesn't block
-    process.stdout.write('{}\n');
     if (!raw.trim()) return;
 
     const hookData = JSON.parse(raw) as Msg;
@@ -679,6 +676,37 @@ function main(): void {
       log('ERROR', `Hook error: ${e}`);
     }
   }
+}
+
+function main(): void {
+  // Worker mode: re-invoked as detached subprocess
+  if (process.env._RESPAN_GEM_WORKER === '1') {
+    const raw = process.env._RESPAN_GEM_DATA ?? '';
+    mainWorker(raw);
+    return;
+  }
+
+  // Read stdin synchronously, respond immediately, fork worker, exit
+  let raw = '';
+  try {
+    raw = fs.readFileSync(0, 'utf-8');
+  } catch {}
+  process.stdout.write('{}\n');
+  if (!raw.trim()) { process.exit(0); }
+
+  try {
+    const scriptPath = __filename || process.argv[1];
+    const child = execFile('node', [scriptPath], {
+      env: { ...process.env, _RESPAN_GEM_WORKER: '1', _RESPAN_GEM_DATA: raw },
+      stdio: 'ignore' as any,
+      detached: true,
+    } as any);
+    child.unref();
+  } catch (e) {
+    // Fallback: run inline
+    mainWorker(raw);
+  }
+  process.exit(0);
 }
 
 main();
