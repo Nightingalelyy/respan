@@ -65,6 +65,7 @@ interface Turn {
   tool_calls: Array<{ name: string; arguments: string; call_id: string; timestamp: string }>;
   tool_outputs: Array<{ call_id: string; output: string; timestamp: string }>;
   reasoning: boolean;
+  reasoning_text: string;
   token_usage: Msg;
 }
 
@@ -142,6 +143,7 @@ function extractTurns(events: Msg[]): Turn[] {
           tool_calls: [],
           tool_outputs: [],
           reasoning: false,
+          reasoning_text: '',
           token_usage: {},
         };
       } else if (msgType === 'task_complete' && current) {
@@ -179,13 +181,24 @@ function extractTurns(events: Msg[]): Turn[] {
           timestamp,
         });
       } else if (itemType === 'reasoning') {
-        if (current) current.reasoning = true;
+        if (current) {
+          current.reasoning = true;
+          const summary = String(payload.summary ?? payload.text ?? '');
+          if (summary) current.reasoning_text += (current.reasoning_text ? '\n' : '') + summary;
+        }
       } else if (itemType === 'web_search_call') {
         const action = (payload.action ?? {}) as Msg;
+        const syntheticId = `web_search_${timestamp}`;
         current.tool_calls.push({
           name: 'web_search',
           arguments: JSON.stringify({ query: action.query ?? '' }),
-          call_id: `web_search_${timestamp}`,
+          call_id: syntheticId,
+          timestamp,
+        });
+        // Web search has no separate output event; record query as output
+        current.tool_outputs.push({
+          call_id: syntheticId,
+          output: `Search: ${action.query ?? ''}`,
           timestamp,
         });
       }
@@ -256,7 +269,7 @@ function createSpans(
     provider_id: '',
     span_path: '',
     input: promptMessages.length ? JSON.stringify(promptMessages) : '',
-    output: completionMessage ? JSON.stringify(completionMessage) : '',
+    output: turn.assistant_message,
     timestamp: endTimeStr,
     start_time: startTimeStr,
     metadata,
@@ -275,7 +288,7 @@ function createSpans(
     provider_id: 'openai',
     metadata: {},
     input: promptMessages.length ? JSON.stringify(promptMessages) : '',
-    output: completionMessage ? JSON.stringify(completionMessage) : '',
+    output: turn.assistant_message,
     prompt_messages: promptMessages,
     completion_message: completionMessage,
     timestamp: endTimeStr,
@@ -297,7 +310,7 @@ function createSpans(
       provider_id: '',
       metadata: reasoningTokens > 0 ? { reasoning_tokens: reasoningTokens } : {},
       input: '',
-      output: reasoningTokens > 0 ? `[Reasoning: ${reasoningTokens} tokens]` : '[Reasoning]',
+      output: turn.reasoning_text || (reasoningTokens > 0 ? `[Reasoning: ${reasoningTokens} tokens]` : '[Reasoning]'),
       timestamp: endTimeStr,
       start_time: startTimeStr,
     });
