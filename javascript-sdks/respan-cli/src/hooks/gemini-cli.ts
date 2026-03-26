@@ -204,8 +204,10 @@ function buildSpans(
   });
 
   const safeId = sessionId.replace(/[/\\]/g, '_').slice(0, 50);
-  const traceUniqueId = `gcli_${safeId}`;
-  const rootSpanId = `gcli_${safeId}_root`;
+  // Use first chunk timestamp to differentiate turns within the same session
+  const turnTs = beginTime.replace(/[^0-9]/g, '').slice(0, 14);
+  const traceUniqueId = `gcli_${safeId}_${turnTs}`;
+  const rootSpanId = `gcli_${safeId}_${turnTs}_root`;
   const threadId = `gcli_${sessionId}`;
 
   // LLM config
@@ -240,7 +242,7 @@ function buildSpans(
   // Generation child span
   const genSpan: SpanData = {
     trace_unique_id: traceUniqueId,
-    span_unique_id: `gcli_${safeId}_gen`,
+    span_unique_id: `gcli_${safeId}_${turnTs}_gen`,
     span_parent_id: rootSpanId,
     span_name: 'gemini.chat',
     span_workflow_name: workflowName,
@@ -265,7 +267,7 @@ function buildSpans(
   if (thoughtsTokens > 0) {
     spans.push({
       trace_unique_id: traceUniqueId,
-      span_unique_id: `gcli_${safeId}_reasoning`,
+      span_unique_id: `gcli_${safeId}_${turnTs}_reasoning`,
       span_parent_id: rootSpanId,
       span_name: 'Reasoning',
       span_workflow_name: workflowName,
@@ -297,7 +299,7 @@ function buildSpans(
 
     spans.push({
       trace_unique_id: traceUniqueId,
-      span_unique_id: `gcli_${safeId}_tool_${i + 1}`,
+      span_unique_id: `gcli_${safeId}_${turnTs}_tool_${i + 1}`,
       span_parent_id: rootSpanId,
       span_name: `Tool: ${displayName}`,
       span_workflow_name: workflowName,
