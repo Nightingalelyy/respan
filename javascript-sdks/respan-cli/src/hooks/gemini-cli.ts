@@ -459,6 +459,10 @@ function processBeforeTool(hookData: Msg): void {
   const pending = state.pending_tools ?? [];
   pending.push({ name: toolName, input: toolInput, start_time: nowISO() });
   state.pending_tools = pending;
+  // Increment send_version to cancel any pending delayed sends —
+  // the turn isn't done yet, a tool is about to execute.
+  state.send_version = (state.send_version ?? 0) + 1;
+  state.tool_turns = (state.tool_turns ?? 0) + 1;
   saveStreamState(sessionId, state);
 }
 
