@@ -88,49 +88,63 @@ def _format_input_messages(raw_input: Any) -> List[Dict[str, Any]]:
     return [{"role": "user", "content": str(serialized)}]
 
 
-def _format_output(resp_output: Any) -> Dict[str, Any]:
-    """Extract a clean ``{"role": "assistant", "content": ...}`` from Response output."""
+def _format_output(resp_output: Any) -> str:
+    """Extract the text content from response output items.
+
+    Returns the plain text string from message output items.
+    Function-call / tool items are intentionally skipped here because
+    they are extracted separately via ``_extract_tool_calls`` and stored
+    as their own span attribute.
+    """
     serialized = serialize_value(resp_output)
     if not serialized:
-        return {"role": "assistant", "content": "", "_is_placeholder": True}
+        return ""
 
     if isinstance(serialized, str):
-        return {"role": "assistant", "content": serialized}
+        return serialized
 
     if isinstance(serialized, dict):
-        if "role" in serialized:
-            return serialized
-        return {"role": "assistant", "content": str(serialized)}
+        content = serialized.get("content")
+        if content is None:
+            return json.dumps(serialized, default=str)
+        if isinstance(content, str):
+            return content
+        return json.dumps(content, default=str)
 
     if isinstance(serialized, list):
-        text_parts = []
-        tool_calls = []
+        text_parts: List[str] = []
         for item in serialized:
             if not isinstance(item, dict):
+                text_parts.append(str(item))
                 continue
             item_type = item.get("type", "")
-            if item_type == "message":
-                for block in item.get("content", []):
-                    if isinstance(block, dict) and block.get("type") == "output_text":
-                        text_parts.append(block.get("text", ""))
-            elif item_type == "function_call":
-                tool_calls.append({
-                    "id": item.get("call_id", ""),
-                    "type": "function",
-                    "function": {
-                        "name": item.get("name", ""),
-                        "arguments": item.get("arguments", ""),
-                    },
-                })
-            elif item_type == "output_text":
+            if item_type in ("function_call", "function_call_output"):
+                continue
+            if item_type in ("output_text", "text", "input_text"):
                 text_parts.append(item.get("text", ""))
+                continue
+            if item_type == "message":
+                content_blocks = item.get("content", [])
+                if isinstance(content_blocks, str):
+                    text_parts.append(content_blocks)
+                elif isinstance(content_blocks, list):
+                    for block in content_blocks:
+                        if isinstance(block, dict):
+                            bt = block.get("type", "")
+                            if bt in ("output_text", "text", "input_text"):
+                                text_parts.append(block.get("text", ""))
+                        elif isinstance(block, str):
+                            text_parts.append(block)
+                continue
+            if "content" in item:
+                content = item["content"]
+                if content is not None:
+                    text_parts.append(str(content))
+                continue
+            text_parts.append(str(item))
+        return "\n".join(text_parts) if text_parts else ""
 
-        msg: Dict[str, Any] = {"role": "assistant", "content": "\n".join(text_parts)}
-        if tool_calls:
-            msg["tool_calls"] = tool_calls
-        return msg
-
-    return {"role": "assistant", "content": str(serialized)}
+    return str(serialized)
 
 
 def _parse_ts(ts: str) -> datetime:

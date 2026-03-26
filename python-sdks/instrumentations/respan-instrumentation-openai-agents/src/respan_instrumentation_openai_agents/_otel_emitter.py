@@ -54,6 +54,7 @@ from respan_sdk.constants.span_attributes import (
     RESPAN_METADATA_TO_AGENT,
     RESPAN_METADATA_TRIGGERED,
     RESPAN_SPAN_HANDOFFS,
+    RESPAN_SPAN_TOOL_CALLS,
     RESPAN_SPAN_TOOLS,
 )
 from respan_sdk.utils.serialization import serialize_value
@@ -110,6 +111,53 @@ def _safe_json(obj: Any) -> str:
         return json.dumps(obj, default=str)
     except Exception:
         return str(obj)
+
+
+def _set_json_structured_attr(attrs: Dict[str, Any], key: str, value: Any) -> None:
+    """Store structured values as JSON strings for OTEL attribute safety."""
+    if value:
+        attrs[key] = _safe_json(value)
+
+
+def _extract_tools(tools: list) -> list:
+    """Convert Response API tool definitions to Chat Completions format."""
+    result = []
+    for tool in tools:
+        tool_dict = serialize_value(tool)
+        if not isinstance(tool_dict, dict):
+            continue
+        tool_type = tool_dict.get("type", "")
+        if tool_type == "function":
+            func = {
+                "name": tool_dict.get("name", ""),
+            }
+            desc = tool_dict.get("description")
+            if desc:
+                func["description"] = desc
+            params = tool_dict.get("parameters")
+            if params:
+                func["parameters"] = params
+            result.append({"type": "function", "function": func})
+        else:
+            result.append(tool_dict)
+    return result
+
+
+def _extract_tool_calls(output: list) -> list:
+    """Extract function tool calls from Response API output items."""
+    result = []
+    for item in output:
+        item_dict = serialize_value(item)
+        if isinstance(item_dict, dict) and item_dict.get("type") == "function_call":
+            result.append({
+                "id": item_dict.get("call_id", ""),
+                "type": "function",
+                "function": {
+                    "name": item_dict.get("name", ""),
+                    "arguments": item_dict.get("arguments", ""),
+                },
+            })
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +241,14 @@ def emit_response(item: SpanImpl, span_data: ResponseSpanData) -> None:
 
         if hasattr(resp, "output") and resp.output:
             output = _format_output(resp.output)
-            attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _safe_json(output)
+            attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = output
+
+            tool_calls = _extract_tool_calls(resp.output)
+            _set_json_structured_attr(attrs, RESPAN_SPAN_TOOL_CALLS, tool_calls)
+
+        if hasattr(resp, "tools") and resp.tools:
+            tools_list = _extract_tools(resp.tools)
+            _set_json_structured_attr(attrs, RESPAN_SPAN_TOOLS, tools_list)
 
         usage = getattr(resp, "usage", None)
         if usage:
@@ -268,7 +323,12 @@ def emit_generation(item: SpanImpl, span_data: GenerationSpanData) -> None:
         attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = _safe_json(input_msgs)
 
     output = _format_output(span_data.output)
-    attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _safe_json(output)
+    attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = output
+    _set_json_structured_attr(
+        attrs,
+        RESPAN_SPAN_TOOL_CALLS,
+        _extract_tool_calls(span_data.output or []),
+    )
 
     if span_data.usage:
         u = span_data.usage
