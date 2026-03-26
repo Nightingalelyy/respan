@@ -596,13 +596,19 @@ function processChunk(hookData: Msg): void {
     return;
   }
 
-  // Detect completion and send
+  // Detect completion and send.
+  // If tools have been used this turn, only send on STOP to avoid
+  // splitting a multi-tool turn into separate traces.
+  const hasPendingTools = (state.pending_tools ?? []).length > 0;
+  const hadToolsThisTurn = (state.tool_turns ?? 0) > 0 || hasPendingTools;
   const hasNewText = state.accumulated_text.length > (state.last_send_text_len ?? 0);
   const shouldSend = (
-    (!toolCallDetected || isFinished)
-    && hasNewText
+    hasNewText
     && state.accumulated_text
-    && (!chunkText || isFinished)
+    && (
+      isFinished
+      || (!hadToolsThisTurn && !toolCallDetected && !chunkText)
+    )
   );
 
   process.stdout.write('{}\n');
