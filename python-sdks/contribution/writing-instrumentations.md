@@ -430,7 +430,7 @@ For spans to be processed and displayed correctly by the Respan backend:
 | `llm.request.type` | `"chat"` | Triggers prompt/completion/model/token parsing on the backend. |
 | `gen_ai.request.model` | Model name string | Displayed in dashboard. |
 | `traceloop.entity.input` | JSON string of messages | The input messages. Format: `[{"role": "user", "content": "..."}]` |
-| `traceloop.entity.output` | JSON string | The output. Format: `{"role": "assistant", "content": "..."}` |
+| `traceloop.entity.output` | Plain text string | The output text content. The backend wraps this in `{"role": "assistant", "content": "..."}` automatically — do **not** pre-wrap it or it will be double-wrapped. |
 
 ### Should-have (LLM call spans)
 
