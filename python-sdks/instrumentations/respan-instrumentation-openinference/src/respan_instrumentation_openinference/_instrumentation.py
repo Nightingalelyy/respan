@@ -31,6 +31,8 @@ class OpenInferenceInstrumentor:
 
     def __init__(self, instrumentor_class: type, **kwargs) -> None:
         self._instrumentor_class = instrumentor_class
+        # tracer_provider is always set by activate(); drop to avoid collision
+        kwargs.pop("tracer_provider", None)
         self._instrumentor_kwargs = kwargs
         self._instrumentor = None
         self._is_instrumented = False
