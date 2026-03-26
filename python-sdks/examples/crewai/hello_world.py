@@ -10,7 +10,13 @@ from respan_instrumentation_openinference import OpenInferenceInstrumentor
 from openinference.instrumentation.crewai import CrewAIInstrumentor
 
 respan = Respan(
-    instrumentations=[OpenInferenceInstrumentor(CrewAIInstrumentor)],
+    instrumentations=[
+        OpenInferenceInstrumentor(
+            CrewAIInstrumentor,
+            use_event_listener=True,
+            create_llm_spans=True,
+        ),
+    ],
 )
 
 # Import CrewAI AFTER Respan init so it uses our TracerProvider

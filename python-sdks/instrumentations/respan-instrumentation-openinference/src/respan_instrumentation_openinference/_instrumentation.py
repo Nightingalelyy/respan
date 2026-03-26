@@ -29,8 +29,9 @@ class OpenInferenceInstrumentor:
     # Class-level flag: only register the translator once across all instances
     _translator_registered = False
 
-    def __init__(self, instrumentor_class: type) -> None:
+    def __init__(self, instrumentor_class: type, **kwargs) -> None:
         self._instrumentor_class = instrumentor_class
+        self._instrumentor_kwargs = kwargs
         self._instrumentor = None
         self._is_instrumented = False
         self._is_span_processor = False
@@ -59,7 +60,7 @@ class OpenInferenceInstrumentor:
 
         # Standard OI instrumentors expose .instrument()
         if hasattr(self._instrumentor, "instrument"):
-            self._instrumentor.instrument(tracer_provider=tp)
+            self._instrumentor.instrument(tracer_provider=tp, **self._instrumentor_kwargs)
         # SpanProcessor-based OI packages (pydantic-ai, strands-agents)
         elif hasattr(tp, "add_span_processor"):
             tp.add_span_processor(self._instrumentor)
