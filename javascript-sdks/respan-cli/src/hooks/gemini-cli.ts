@@ -460,8 +460,6 @@ function processBeforeTool(hookData: Msg): void {
   pending.push({ name: toolName, input: toolInput, start_time: nowISO() });
   state.pending_tools = pending;
   saveStreamState(sessionId, state);
-
-  process.stdout.write('{}\n');
 }
 
 function processAfterTool(hookData: Msg): void {
@@ -491,8 +489,6 @@ function processAfterTool(hookData: Msg): void {
   state.pending_tools = pending;
   state.tool_details = completed;
   saveStreamState(sessionId, state);
-
-  process.stdout.write('{}\n');
 }
 
 // ── AfterModel chunk processing ──────────────────────────────────
@@ -592,7 +588,6 @@ function processChunk(hookData: Msg): void {
     }
     saveStreamState(sessionId, state);
     debug(`Tool call via response parts (finish=${finishReason}), tool_turns=${state.tool_turns}`);
-    process.stdout.write('{}\n');
     return;
   }
 
@@ -610,8 +605,6 @@ function processChunk(hookData: Msg): void {
       || (!hadToolsThisTurn && !toolCallDetected && !chunkText)
     )
   );
-
-  process.stdout.write('{}\n');
 
   if (!shouldSend) {
     if (toolCallDetected) saveStreamState(sessionId, state);
@@ -660,10 +653,9 @@ function processChunk(hookData: Msg): void {
 function main(): void {
   try {
     const raw = fs.readFileSync(0, 'utf-8');
-    if (!raw.trim()) {
-      process.stdout.write('{}\n');
-      return;
-    }
+    // Respond to Gemini CLI immediately so it doesn't block
+    process.stdout.write('{}\n');
+    if (!raw.trim()) return;
 
     const hookData = JSON.parse(raw) as Msg;
     const event = String(hookData.hook_event_name ?? '');
@@ -686,7 +678,6 @@ function main(): void {
     } else {
       log('ERROR', `Hook error: ${e}`);
     }
-    process.stdout.write('{}\n');
   }
 }
 
