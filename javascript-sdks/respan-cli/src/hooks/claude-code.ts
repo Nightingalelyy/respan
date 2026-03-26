@@ -695,6 +695,8 @@ function main(): void {
   } catch (e) {
     log('ERROR', `Failed to fork worker: ${e}`);
   }
+  // Exit immediately so Claude Code doesn't block
+  process.exit(0);
 }
 
 main();
