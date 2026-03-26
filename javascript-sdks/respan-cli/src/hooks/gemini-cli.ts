@@ -191,6 +191,46 @@ function detectModel(hookData: Msg): string {
 
 // ── Span construction ─────────────────────────────────────────────
 
+function buildToolSpan(
+  detail: ToolDetail,
+  idx: number,
+  traceUniqueId: string,
+  rootSpanId: string,
+  safeId: string,
+  turnTs: string,
+  workflowName: string,
+  beginTime: string,
+  endTime: string,
+): SpanData {
+  const toolName = detail?.name ?? '';
+  const toolArgs = detail?.args ?? detail?.input ?? {};
+  const toolOutput = detail?.output ?? '';
+  const displayName = toolName ? toolDisplayName(toolName) : `Call ${idx + 1}`;
+  const toolInputStr = toolName ? formatToolInput(toolName, toolArgs) : '';
+  const toolMeta: Record<string, unknown> = {};
+  if (toolName) toolMeta.tool_name = toolName;
+  if (detail?.error) toolMeta.error = detail.error;
+  const toolStart = detail?.start_time ?? beginTime;
+  const toolEnd = detail?.end_time ?? endTime;
+  const toolLat = latencySeconds(toolStart, toolEnd);
+
+  return {
+    trace_unique_id: traceUniqueId,
+    span_unique_id: `gcli_${safeId}_${turnTs}_tool_${idx + 1}`,
+    span_parent_id: rootSpanId,
+    span_name: `Tool: ${displayName}`,
+    span_workflow_name: workflowName,
+    span_path: toolName ? `tool_${toolName}` : 'tool_call',
+    provider_id: '',
+    metadata: toolMeta,
+    input: toolInputStr,
+    output: truncate(toolOutput, MAX_CHARS),
+    timestamp: toolEnd,
+    start_time: toolStart,
+    ...(toolLat !== undefined ? { latency: toolLat } : {}),
+  };
+}
+
 function buildSpans(
   hookData: Msg,
   outputText: string,
@@ -299,75 +339,18 @@ function buildSpans(
 
     // Tool spans that come after this round (before next round)
     if (r < rounds.length - 1) {
-      // Emit all tools between this round and the next
       while (toolIdx < toolDetails.length) {
-        const detail = toolDetails[toolIdx];
-        const toolName = detail?.name ?? '';
-        const toolArgs = detail?.args ?? detail?.input ?? {};
-        const toolOutput = detail?.output ?? '';
-        const displayName = toolName ? toolDisplayName(toolName) : `Call ${toolIdx + 1}`;
-        const toolInputStr = toolName ? formatToolInput(toolName, toolArgs) : '';
-        const toolMeta: Record<string, unknown> = {};
-        if (toolName) toolMeta.tool_name = toolName;
-        if (detail?.error) toolMeta.error = detail.error;
-
-        const toolStart = detail?.start_time ?? beginTime;
-        const toolEnd = detail?.end_time ?? endTime;
-        const toolLat = latencySeconds(toolStart, toolEnd);
-
-        spans.push({
-          trace_unique_id: traceUniqueId,
-          span_unique_id: `gcli_${safeId}_${turnTs}_tool_${toolIdx + 1}`,
-          span_parent_id: rootSpanId,
-          span_name: `Tool: ${displayName}`,
-          span_workflow_name: workflowName,
-          span_path: toolName ? `tool_${toolName}` : 'tool_call',
-          provider_id: '',
-          metadata: toolMeta,
-          input: toolInputStr,
-          output: truncate(toolOutput, MAX_CHARS),
-          timestamp: toolEnd,
-          start_time: toolStart,
-          ...(toolLat !== undefined ? { latency: toolLat } : {}),
-        });
+        spans.push(buildToolSpan(toolDetails[toolIdx], toolIdx, traceUniqueId, rootSpanId, safeId, turnTs, workflowName, beginTime, endTime));
         toolIdx++;
-        // If next tool starts after next round's start time, break — it belongs to a later gap
         const nextDetail = toolDetails[toolIdx];
         if (nextDetail && roundStarts[r + 1] && nextDetail.start_time && nextDetail.start_time > roundStarts[r + 1]) break;
       }
     }
   }
 
-  // Any remaining tools not yet emitted (e.g. only one round but tools exist)
+  // Any remaining tools not yet emitted
   while (toolIdx < toolDetails.length) {
-    const detail = toolDetails[toolIdx];
-    const toolName = detail?.name ?? '';
-    const toolArgs = detail?.args ?? detail?.input ?? {};
-    const toolOutput = detail?.output ?? '';
-    const displayName = toolName ? toolDisplayName(toolName) : `Call ${toolIdx + 1}`;
-    const toolInputStr = toolName ? formatToolInput(toolName, toolArgs) : '';
-    const toolMeta: Record<string, unknown> = {};
-    if (toolName) toolMeta.tool_name = toolName;
-    if (detail?.error) toolMeta.error = detail.error;
-    const toolStart = detail?.start_time ?? beginTime;
-    const toolEnd = detail?.end_time ?? endTime;
-    const toolLat = latencySeconds(toolStart, toolEnd);
-
-    spans.push({
-      trace_unique_id: traceUniqueId,
-      span_unique_id: `gcli_${safeId}_${turnTs}_tool_${toolIdx + 1}`,
-      span_parent_id: rootSpanId,
-      span_name: `Tool: ${displayName}`,
-      span_workflow_name: workflowName,
-      span_path: toolName ? `tool_${toolName}` : 'tool_call',
-      provider_id: '',
-      metadata: toolMeta,
-      input: toolInputStr,
-      output: truncate(toolOutput, MAX_CHARS),
-      timestamp: toolEnd,
-      start_time: toolStart,
-      ...(toolLat !== undefined ? { latency: toolLat } : {}),
-    });
+    spans.push(buildToolSpan(toolDetails[toolIdx], toolIdx, traceUniqueId, rootSpanId, safeId, turnTs, workflowName, beginTime, endTime));
     toolIdx++;
   }
 
