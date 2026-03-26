@@ -65,6 +65,9 @@ interface StreamState {
   pending_tools?: ToolDetail[];
   thoughts_tokens?: number;
   last_send_text_len?: number;
+  text_rounds?: string[];        // text per LLM round (split by tool calls)
+  current_round?: number;        // which round we're accumulating into
+  round_start_times?: string[];  // start time of each text round
 }
 
 interface ToolDetail {
@@ -197,6 +200,8 @@ function buildSpans(
   toolTurns: number,
   toolDetails: ToolDetail[],
   thoughtsTokens: number,
+  textRounds: string[],
+  roundStartTimes: string[],
 ): SpanData[] {
   const spans: SpanData[] = [];
   const sessionId = String(hookData.session_id ?? '');
@@ -207,7 +212,6 @@ function buildSpans(
   const lat = latencySeconds(beginTime, endTime);
 
   const promptMessages = extractMessages(hookData);
-  const completionMessage = { role: 'assistant', content: truncate(outputText, MAX_CHARS) };
 
   const { workflowName, spanName, customerId } = resolveSpanFields(config, {
     workflowName: 'gemini-cli',
@@ -215,17 +219,14 @@ function buildSpans(
   });
 
   const safeId = sessionId.replace(/[/\\]/g, '_').slice(0, 50);
-  // Use first chunk timestamp to differentiate turns within the same session
   const turnTs = beginTime.replace(/[^0-9]/g, '').slice(0, 14);
   const traceUniqueId = `gcli_${safeId}_${turnTs}`;
   const rootSpanId = `gcli_${safeId}_${turnTs}_root`;
   const threadId = `gcli_${sessionId}`;
 
-  // LLM config
   const llmReq = (hookData.llm_request ?? {}) as Msg;
   const reqConfig = (llmReq.config ?? {}) as Msg;
 
-  // Metadata
   const baseMeta: Record<string, unknown> = { source: 'gemini-cli' };
   if (toolTurns > 0) baseMeta.tool_turns = toolTurns;
   if (thoughtsTokens > 0) baseMeta.reasoning_tokens = thoughtsTokens;
@@ -250,29 +251,125 @@ function buildSpans(
     ...(lat !== undefined ? { latency: lat } : {}),
   });
 
-  // Generation child span
-  const genSpan: SpanData = {
-    trace_unique_id: traceUniqueId,
-    span_unique_id: `gcli_${safeId}_${turnTs}_gen`,
-    span_parent_id: rootSpanId,
-    span_name: 'gemini.chat',
-    span_workflow_name: workflowName,
-    span_path: 'gemini_chat',
-    model,
-    provider_id: 'google',
-    metadata: {},
-    input: promptMessages.length ? JSON.stringify(promptMessages) : '',
-    output: truncate(outputText, MAX_CHARS),
-    timestamp: endTime,
-    start_time: beginTime,
-    prompt_tokens: tokens.prompt_tokens,
-    completion_tokens: tokens.completion_tokens,
-    total_tokens: tokens.total_tokens,
-    ...(lat !== undefined ? { latency: lat } : {}),
-  };
-  if (reqConfig.temperature != null) (genSpan as any).temperature = reqConfig.temperature;
-  if (reqConfig.maxOutputTokens != null) (genSpan as any).max_tokens = reqConfig.maxOutputTokens;
-  spans.push(genSpan);
+  // Build interleaved LLM + Tool spans in chronological order.
+  // If we have text rounds, create one gemini.chat per round with tools between them.
+  // Otherwise fall back to a single gemini.chat span.
+  const rounds = textRounds.length > 0 ? textRounds : [outputText];
+  const roundStarts = roundStartTimes.length > 0 ? roundStartTimes : [beginTime];
+  let toolIdx = 0;
+
+  for (let r = 0; r < rounds.length; r++) {
+    const roundText = rounds[r];
+    const roundStart = roundStarts[r] || beginTime;
+    // Round end: next tool start, or endTime for last round
+    const nextTool = toolIdx < toolDetails.length ? toolDetails[toolIdx] : null;
+    const roundEnd = (r < rounds.length - 1 && nextTool?.start_time) ? nextTool.start_time : endTime;
+    const roundLat = latencySeconds(roundStart, roundEnd);
+
+    // LLM generation span for this round
+    if (roundText) {
+      const genSpan: SpanData = {
+        trace_unique_id: traceUniqueId,
+        span_unique_id: `gcli_${safeId}_${turnTs}_gen_${r}`,
+        span_parent_id: rootSpanId,
+        span_name: 'gemini.chat',
+        span_workflow_name: workflowName,
+        span_path: 'gemini_chat',
+        model,
+        provider_id: 'google',
+        metadata: {},
+        input: r === 0 && promptMessages.length ? JSON.stringify(promptMessages) : '',
+        output: truncate(roundText, MAX_CHARS),
+        timestamp: roundEnd,
+        start_time: roundStart,
+        ...(roundLat !== undefined ? { latency: roundLat } : {}),
+        // Only attach tokens to the first round (aggregate usage from Gemini)
+        ...(r === 0 ? {
+          prompt_tokens: tokens.prompt_tokens,
+          completion_tokens: tokens.completion_tokens,
+          total_tokens: tokens.total_tokens,
+        } : {}),
+      };
+      if (r === 0) {
+        if (reqConfig.temperature != null) (genSpan as any).temperature = reqConfig.temperature;
+        if (reqConfig.maxOutputTokens != null) (genSpan as any).max_tokens = reqConfig.maxOutputTokens;
+      }
+      spans.push(genSpan);
+    }
+
+    // Tool spans that come after this round (before next round)
+    if (r < rounds.length - 1) {
+      // Emit all tools between this round and the next
+      while (toolIdx < toolDetails.length) {
+        const detail = toolDetails[toolIdx];
+        const toolName = detail?.name ?? '';
+        const toolArgs = detail?.args ?? detail?.input ?? {};
+        const toolOutput = detail?.output ?? '';
+        const displayName = toolName ? toolDisplayName(toolName) : `Call ${toolIdx + 1}`;
+        const toolInputStr = toolName ? formatToolInput(toolName, toolArgs) : '';
+        const toolMeta: Record<string, unknown> = {};
+        if (toolName) toolMeta.tool_name = toolName;
+        if (detail?.error) toolMeta.error = detail.error;
+
+        const toolStart = detail?.start_time ?? beginTime;
+        const toolEnd = detail?.end_time ?? endTime;
+        const toolLat = latencySeconds(toolStart, toolEnd);
+
+        spans.push({
+          trace_unique_id: traceUniqueId,
+          span_unique_id: `gcli_${safeId}_${turnTs}_tool_${toolIdx + 1}`,
+          span_parent_id: rootSpanId,
+          span_name: `Tool: ${displayName}`,
+          span_workflow_name: workflowName,
+          span_path: toolName ? `tool_${toolName}` : 'tool_call',
+          provider_id: '',
+          metadata: toolMeta,
+          input: toolInputStr,
+          output: truncate(toolOutput, MAX_CHARS),
+          timestamp: toolEnd,
+          start_time: toolStart,
+          ...(toolLat !== undefined ? { latency: toolLat } : {}),
+        });
+        toolIdx++;
+        // If next tool starts after next round's start time, break — it belongs to a later gap
+        const nextDetail = toolDetails[toolIdx];
+        if (nextDetail && roundStarts[r + 1] && nextDetail.start_time && nextDetail.start_time > roundStarts[r + 1]) break;
+      }
+    }
+  }
+
+  // Any remaining tools not yet emitted (e.g. only one round but tools exist)
+  while (toolIdx < toolDetails.length) {
+    const detail = toolDetails[toolIdx];
+    const toolName = detail?.name ?? '';
+    const toolArgs = detail?.args ?? detail?.input ?? {};
+    const toolOutput = detail?.output ?? '';
+    const displayName = toolName ? toolDisplayName(toolName) : `Call ${toolIdx + 1}`;
+    const toolInputStr = toolName ? formatToolInput(toolName, toolArgs) : '';
+    const toolMeta: Record<string, unknown> = {};
+    if (toolName) toolMeta.tool_name = toolName;
+    if (detail?.error) toolMeta.error = detail.error;
+    const toolStart = detail?.start_time ?? beginTime;
+    const toolEnd = detail?.end_time ?? endTime;
+    const toolLat = latencySeconds(toolStart, toolEnd);
+
+    spans.push({
+      trace_unique_id: traceUniqueId,
+      span_unique_id: `gcli_${safeId}_${turnTs}_tool_${toolIdx + 1}`,
+      span_parent_id: rootSpanId,
+      span_name: `Tool: ${displayName}`,
+      span_workflow_name: workflowName,
+      span_path: toolName ? `tool_${toolName}` : 'tool_call',
+      provider_id: '',
+      metadata: toolMeta,
+      input: toolInputStr,
+      output: truncate(toolOutput, MAX_CHARS),
+      timestamp: toolEnd,
+      start_time: toolStart,
+      ...(toolLat !== undefined ? { latency: toolLat } : {}),
+    });
+    toolIdx++;
+  }
 
   // Reasoning span
   if (thoughtsTokens > 0) {
@@ -289,39 +386,6 @@ function buildSpans(
       output: `[Reasoning: ${thoughtsTokens} tokens]`,
       timestamp: endTime,
       start_time: beginTime,
-    });
-  }
-
-  // Tool child spans
-  for (let i = 0; i < toolTurns; i++) {
-    const detail = toolDetails[i] ?? null;
-    const toolName = detail?.name ?? '';
-    const toolArgs = detail?.args ?? detail?.input ?? {};
-    const toolOutput = detail?.output ?? '';
-    const displayName = toolName ? toolDisplayName(toolName) : `Call ${i + 1}`;
-    const toolInputStr = toolName ? formatToolInput(toolName, toolArgs) : '';
-    const toolMeta: Record<string, unknown> = {};
-    if (toolName) toolMeta.tool_name = toolName;
-    if (detail?.error) toolMeta.error = detail.error;
-
-    const toolStart = detail?.start_time ?? beginTime;
-    const toolEnd = detail?.end_time ?? endTime;
-    const toolLat = latencySeconds(toolStart, toolEnd);
-
-    spans.push({
-      trace_unique_id: traceUniqueId,
-      span_unique_id: `gcli_${safeId}_${turnTs}_tool_${i + 1}`,
-      span_parent_id: rootSpanId,
-      span_name: `Tool: ${displayName}`,
-      span_workflow_name: workflowName,
-      span_path: toolName ? `tool_${toolName}` : 'tool_call',
-      provider_id: '',
-      metadata: toolMeta,
-      input: toolInputStr,
-      output: truncate(toolOutput, MAX_CHARS),
-      timestamp: toolEnd,
-      start_time: toolStart,
-      ...(toolLat !== undefined ? { latency: toolLat } : {}),
     });
   }
 
@@ -565,21 +629,31 @@ function processChunk(hookData: Msg): void {
       state.tool_turns = (state.tool_turns ?? 0) + 1;
       state.send_version = (state.send_version ?? 0) + 1;
       toolCallDetected = true;
-      debug(`Tool call detected via msg_count (${savedMsgCount} → ${currentMsgCount}), tool_turns=${state.tool_turns}`);
+      // Start a new text round after tool completes
+      state.current_round = (state.current_round ?? 0) + 1;
+      debug(`Tool call detected via msg_count (${savedMsgCount} → ${currentMsgCount}), tool_turns=${state.tool_turns}, round=${state.current_round}`);
     }
   }
   state.msg_count = currentMsgCount;
 
-  // Accumulate text and grounding tool details
+  // Accumulate text into both total and per-round tracking
   if (chunkText) {
     if (!state.first_chunk_time) state.first_chunk_time = nowISO();
     state.accumulated_text += chunkText;
     state.last_tokens = completionTokens || state.last_tokens;
     if (thoughtsTokens > 0) state.thoughts_tokens = thoughtsTokens;
-  }
-  if (chunkText) {
+
+    // Track text per round
+    const round = state.current_round ?? 0;
+    if (!state.text_rounds) state.text_rounds = [];
+    if (!state.round_start_times) state.round_start_times = [];
+    while (state.text_rounds.length <= round) state.text_rounds.push('');
+    while (state.round_start_times.length <= round) state.round_start_times.push('');
+    state.text_rounds[round] += chunkText;
+    if (!state.round_start_times[round]) state.round_start_times[round] = nowISO();
+
     saveStreamState(sessionId, state);
-    debug(`Accumulated chunk: +${chunkText.length} chars, total=${state.accumulated_text.length}`);
+    debug(`Accumulated chunk: +${chunkText.length} chars, total=${state.accumulated_text.length}, round=${round}`);
   }
 
   // Tool call in response parts
@@ -634,6 +708,8 @@ function processChunk(hookData: Msg): void {
     state.tool_turns ?? 0,
     state.tool_details ?? [],
     state.thoughts_tokens ?? 0,
+    state.text_rounds ?? [],
+    state.round_start_times ?? [],
   );
 
   // Method b: text + STOP → send immediately
