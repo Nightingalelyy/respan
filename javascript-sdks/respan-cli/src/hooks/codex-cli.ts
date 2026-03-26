@@ -16,6 +16,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { execFile } from 'node:child_process';
 
 import {
   initLogging,
@@ -408,13 +409,73 @@ function findLatestSessionFile(): { sessionId: string; sessionFile: string } | n
 
 // ── Main ──────────────────────────────────────────────────────────
 
-async function main(): Promise<void> {
+async function mainWorker(): Promise<void> {
   const scriptStart = Date.now();
+  debug('Worker started');
+
+  const sessionId = process.env._RESPAN_CODEX_SESSION!;
+  const sessionFile = process.env._RESPAN_CODEX_FILE!;
+  const cwd = process.env._RESPAN_CODEX_CWD ?? '';
+
+  const creds = resolveCredentials();
+  if (!creds) { log('ERROR', 'No API key'); return; }
+
+  const config = cwd ? loadRespanConfig(path.join(cwd, '.codex', 'respan.json')) : null;
+
+  const maxAttempts = 3;
+  let turns = 0;
+  try {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const unlock = acquireLock(LOCK_PATH);
+      try {
+        const state = loadState(STATE_FILE);
+        const sessionState = (state[sessionId] ?? {}) as Msg;
+        const lastTurnCount = Number(sessionState.turn_count ?? 0);
+
+        const lines = fs.readFileSync(sessionFile, 'utf-8').trim().split('\n');
+        const events = parseSession(lines);
+        const allTurns = extractTurns(events);
+
+        if (allTurns.length > lastTurnCount) {
+          const newTurns = allTurns.slice(lastTurnCount);
+          for (const turn of newTurns) {
+            turns++;
+            const turnNum = lastTurnCount + turns;
+            const spans = createSpans(sessionId, turnNum, turn, config);
+            await sendSpans(spans, creds.apiKey, creds.baseUrl, `turn_${turnNum}`);
+          }
+          state[sessionId] = {
+            turn_count: lastTurnCount + turns,
+            updated: nowISO(),
+          };
+          saveState(STATE_FILE, state);
+        }
+      } finally {
+        unlock?.();
+      }
+      if (turns > 0) break;
+      if (attempt < maxAttempts - 1) {
+        await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+      }
+    }
+    const duration = (Date.now() - scriptStart) / 1000;
+    log('INFO', `Processed ${turns} turns in ${duration.toFixed(1)}s`);
+  } catch (e) {
+    log('ERROR', `Failed to process session: ${e}`);
+  }
+}
+
+function main(): void {
+  // Worker mode: re-invoked as detached subprocess
+  if (process.env._RESPAN_CODEX_WORKER === '1') {
+    mainWorker().catch((e) => log('ERROR', `Worker crashed: ${e}`));
+    return;
+  }
+
   debug('Codex hook started');
 
-  // Parse notify payload from argv[2] (argv[0]=node, argv[1]=script)
   if (process.argv.length < 3) {
-    debug('No argument provided (expected JSON payload in argv[2])');
+    debug('No argument provided');
     process.exit(0);
   }
 
@@ -438,14 +499,6 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  debug(`Processing notify: type=${eventType}, session=${sessionId}`);
-
-  const creds = resolveCredentials();
-  if (!creds) {
-    log('ERROR', 'No API key found. Run: respan auth login');
-    process.exit(0);
-  }
-
   // Find session file
   let sessionFile = findSessionFile(sessionId);
   if (!sessionFile) {
@@ -459,62 +512,28 @@ async function main(): Promise<void> {
     }
   }
 
-  // Load config
+  // Fork self as detached worker so Codex CLI doesn't block
   const cwd = String(payload.cwd ?? '');
-  const config = cwd ? loadRespanConfig(path.join(cwd, '.codex', 'respan.json')) : null;
-  if (config) debug(`Loaded respan.json config from ${cwd}`);
-
-  // Process with retry
-  const maxAttempts = 3;
-  let turns = 0;
+  debug(`Forking worker for session: ${sessionId}`);
   try {
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const unlock = acquireLock(LOCK_PATH);
-      try {
-        const state = loadState(STATE_FILE);
-        const sessionState = (state[sessionId] ?? {}) as Msg;
-        const lastTurnCount = Number(sessionState.turn_count ?? 0);
-
-        const lines = fs.readFileSync(sessionFile!, 'utf-8').trim().split('\n');
-        const events = parseSession(lines);
-        const allTurns = extractTurns(events);
-
-        if (allTurns.length > lastTurnCount) {
-          const newTurns = allTurns.slice(lastTurnCount);
-          for (const turn of newTurns) {
-            turns++;
-            const turnNum = lastTurnCount + turns;
-            const spans = createSpans(sessionId, turnNum, turn, config);
-            await sendSpans(spans, creds.apiKey, creds.baseUrl, `turn_${turnNum}`);
-          }
-          state[sessionId] = {
-            turn_count: lastTurnCount + turns,
-            updated: nowISO(),
-          };
-          saveState(STATE_FILE, state);
-        }
-      } finally {
-        unlock?.();
-      }
-
-      if (turns > 0) break;
-      if (attempt < maxAttempts - 1) {
-        const delay = 500 * (attempt + 1);
-        debug(`No turns processed (attempt ${attempt + 1}/${maxAttempts}), retrying in ${delay}ms...`);
-        await new Promise((r) => setTimeout(r, delay));
-      }
-    }
-
-    const duration = (Date.now() - scriptStart) / 1000;
-    log('INFO', `Processed ${turns} turns in ${duration.toFixed(1)}s`);
-    if (duration > 180) log('WARN', `Hook took ${duration.toFixed(1)}s (>3min)`);
+    const scriptPath = __filename || process.argv[1];
+    const child = execFile('node', [scriptPath], {
+      env: {
+        ...process.env,
+        _RESPAN_CODEX_WORKER: '1',
+        _RESPAN_CODEX_SESSION: sessionId,
+        _RESPAN_CODEX_FILE: sessionFile!,
+        _RESPAN_CODEX_CWD: cwd,
+      },
+      stdio: 'ignore' as any,
+      detached: true,
+    } as any);
+    child.unref();
+    debug('Worker launched');
   } catch (e) {
-    log('ERROR', `Failed to process session: ${e}`);
-    if (DEBUG_MODE) debug(String((e as Error).stack ?? e));
+    log('ERROR', `Failed to fork worker: ${e}`);
   }
+  process.exit(0);
 }
 
-main().catch((e) => {
-  log('ERROR', `Hook crashed: ${e}`);
-  process.exit(1);
-});
+main();
