@@ -162,10 +162,21 @@ function clearStreamState(sessionId: string): void {
 function extractMessages(hookData: Msg): Msg[] {
   const llmReq = (hookData.llm_request ?? {}) as Msg;
   const messages = (llmReq.messages ?? []) as Msg[];
-  return messages.map((msg) => ({
-    role: String(msg.role ?? 'user') === 'model' ? 'assistant' : String(msg.role ?? 'user'),
-    content: truncate(String(msg.content ?? ''), MAX_CHARS),
-  }));
+  // Only include the last user message, not the full conversation history
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const role = String(messages[i].role ?? 'user');
+    if (role === 'user') {
+      return [{ role: 'user', content: truncate(String(messages[i].content ?? ''), MAX_CHARS) }];
+    }
+  }
+  if (messages.length > 0) {
+    const last = messages[messages.length - 1];
+    return [{
+      role: String(last.role ?? 'user') === 'model' ? 'assistant' : String(last.role ?? 'user'),
+      content: truncate(String(last.content ?? ''), MAX_CHARS),
+    }];
+  }
+  return [];
 }
 
 function detectModel(hookData: Msg): string {
@@ -519,6 +530,18 @@ function processChunk(hookData: Msg): void {
         }
       }
     }
+    // Detect server-side grounding (google_web_search) from groundingMetadata
+    const grounding = (candidates[0].groundingMetadata ?? llmResp.groundingMetadata) as Msg | undefined;
+    if (grounding && typeof grounding === 'object') {
+      const queries = (grounding.webSearchQueries ?? grounding.searchQueries ?? []) as string[];
+      if (queries.length > 0) {
+        chunkToolDetails.push({
+          name: 'google_web_search',
+          args: { queries },
+          output: truncate(queries.join(', '), MAX_CHARS),
+        });
+      }
+    }
   }
 
   const messages = ((hookData.llm_request as Msg)?.messages ?? []) as Msg[];
@@ -547,12 +570,21 @@ function processChunk(hookData: Msg): void {
   }
   state.msg_count = currentMsgCount;
 
-  // Accumulate text
+  // Accumulate text and grounding tool details
   if (chunkText) {
     if (!state.first_chunk_time) state.first_chunk_time = nowISO();
     state.accumulated_text += chunkText;
     state.last_tokens = completionTokens || state.last_tokens;
     if (thoughtsTokens > 0) state.thoughts_tokens = thoughtsTokens;
+  }
+  // Save grounding tool details (these arrive with text, not as separate tool turns)
+  const groundingDetails = chunkToolDetails.filter(d => d.name === 'google_web_search');
+  if (groundingDetails.length) {
+    state.tool_details = [...(state.tool_details ?? []), ...groundingDetails];
+    state.tool_turns = (state.tool_turns ?? 0) + groundingDetails.length;
+    debug(`Grounding search detected: ${groundingDetails.length} queries`);
+  }
+  if (chunkText || groundingDetails.length) {
     saveStreamState(sessionId, state);
     debug(`Accumulated chunk: +${chunkText.length} chars, total=${state.accumulated_text.length}`);
   }
