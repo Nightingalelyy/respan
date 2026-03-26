@@ -54,6 +54,7 @@ from respan_sdk.constants.span_attributes import (
     RESPAN_METADATA_TO_AGENT,
     RESPAN_METADATA_TRIGGERED,
     RESPAN_SPAN_HANDOFFS,
+    RESPAN_SPAN_TOOL_CALLS,
     RESPAN_SPAN_TOOLS,
 )
 from respan_sdk.utils.serialization import serialize_value
@@ -110,6 +111,12 @@ def _safe_json(obj: Any) -> str:
         return json.dumps(obj, default=str)
     except Exception:
         return str(obj)
+
+
+def _set_json_structured_attr(attrs: Dict[str, Any], key: str, value: Any) -> None:
+    """Store structured values as JSON strings for OTEL attribute safety."""
+    if value:
+        attrs[key] = _safe_json(value)
 
 
 def _extract_tools(tools: list) -> list:
@@ -237,13 +244,11 @@ def emit_response(item: SpanImpl, span_data: ResponseSpanData) -> None:
             attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = output
 
             tool_calls = _extract_tool_calls(resp.output)
-            if tool_calls:
-                attrs["tool_calls"] = tool_calls
+            _set_json_structured_attr(attrs, RESPAN_SPAN_TOOL_CALLS, tool_calls)
 
         if hasattr(resp, "tools") and resp.tools:
             tools_list = _extract_tools(resp.tools)
-            if tools_list:
-                attrs["tools"] = tools_list
+            _set_json_structured_attr(attrs, RESPAN_SPAN_TOOLS, tools_list)
 
         usage = getattr(resp, "usage", None)
         if usage:
@@ -319,6 +324,11 @@ def emit_generation(item: SpanImpl, span_data: GenerationSpanData) -> None:
 
     output = _format_output(span_data.output)
     attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = output
+    _set_json_structured_attr(
+        attrs,
+        RESPAN_SPAN_TOOL_CALLS,
+        _extract_tool_calls(span_data.output or []),
+    )
 
     if span_data.usage:
         u = span_data.usage
