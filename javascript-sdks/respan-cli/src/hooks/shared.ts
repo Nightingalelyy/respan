@@ -456,7 +456,7 @@ export function toOtlpPayload(spans: SpanData[]): Record<string, unknown> {
         }),
       },
       scopeSpans: [{
-        scope: { name: 'respan-cli-hooks', version: '0.5.3' },
+        scope: { name: 'respan-cli-hooks', version: '0.7.1' },
         spans: otlpSpans,
       }],
     }],

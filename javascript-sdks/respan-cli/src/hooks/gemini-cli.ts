@@ -65,6 +65,9 @@ interface StreamState {
   pending_tools?: ToolDetail[];
   thoughts_tokens?: number;
   last_send_text_len?: number;
+  text_rounds?: string[];        // text per LLM round (split by tool calls)
+  current_round?: number;        // which round we're accumulating into
+  round_start_times?: string[];  // start time of each text round
 }
 
 interface ToolDetail {
@@ -162,10 +165,21 @@ function clearStreamState(sessionId: string): void {
 function extractMessages(hookData: Msg): Msg[] {
   const llmReq = (hookData.llm_request ?? {}) as Msg;
   const messages = (llmReq.messages ?? []) as Msg[];
-  return messages.map((msg) => ({
-    role: String(msg.role ?? 'user') === 'model' ? 'assistant' : String(msg.role ?? 'user'),
-    content: truncate(String(msg.content ?? ''), MAX_CHARS),
-  }));
+  // Only include the last user message, not the full conversation history
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const role = String(messages[i].role ?? 'user');
+    if (role === 'user') {
+      return [{ role: 'user', content: truncate(String(messages[i].content ?? ''), MAX_CHARS) }];
+    }
+  }
+  if (messages.length > 0) {
+    const last = messages[messages.length - 1];
+    return [{
+      role: String(last.role ?? 'user') === 'model' ? 'assistant' : String(last.role ?? 'user'),
+      content: truncate(String(last.content ?? ''), MAX_CHARS),
+    }];
+  }
+  return [];
 }
 
 function detectModel(hookData: Msg): string {
@@ -177,6 +191,46 @@ function detectModel(hookData: Msg): string {
 
 // ── Span construction ─────────────────────────────────────────────
 
+function buildToolSpan(
+  detail: ToolDetail,
+  idx: number,
+  traceUniqueId: string,
+  rootSpanId: string,
+  safeId: string,
+  turnTs: string,
+  workflowName: string,
+  beginTime: string,
+  endTime: string,
+): SpanData {
+  const toolName = detail?.name ?? '';
+  const toolArgs = detail?.args ?? detail?.input ?? {};
+  const toolOutput = detail?.output ?? '';
+  const displayName = toolName ? toolDisplayName(toolName) : `Call ${idx + 1}`;
+  const toolInputStr = toolName ? formatToolInput(toolName, toolArgs) : '';
+  const toolMeta: Record<string, unknown> = {};
+  if (toolName) toolMeta.tool_name = toolName;
+  if (detail?.error) toolMeta.error = detail.error;
+  const toolStart = detail?.start_time ?? beginTime;
+  const toolEnd = detail?.end_time ?? endTime;
+  const toolLat = latencySeconds(toolStart, toolEnd);
+
+  return {
+    trace_unique_id: traceUniqueId,
+    span_unique_id: `gcli_${safeId}_${turnTs}_tool_${idx + 1}`,
+    span_parent_id: rootSpanId,
+    span_name: `Tool: ${displayName}`,
+    span_workflow_name: workflowName,
+    span_path: toolName ? `tool_${toolName}` : 'tool_call',
+    provider_id: '',
+    metadata: toolMeta,
+    input: toolInputStr,
+    output: truncate(toolOutput, MAX_CHARS),
+    timestamp: toolEnd,
+    start_time: toolStart,
+    ...(toolLat !== undefined ? { latency: toolLat } : {}),
+  };
+}
+
 function buildSpans(
   hookData: Msg,
   outputText: string,
@@ -186,6 +240,8 @@ function buildSpans(
   toolTurns: number,
   toolDetails: ToolDetail[],
   thoughtsTokens: number,
+  textRounds: string[],
+  roundStartTimes: string[],
 ): SpanData[] {
   const spans: SpanData[] = [];
   const sessionId = String(hookData.session_id ?? '');
@@ -196,7 +252,6 @@ function buildSpans(
   const lat = latencySeconds(beginTime, endTime);
 
   const promptMessages = extractMessages(hookData);
-  const completionMessage = { role: 'assistant', content: truncate(outputText, MAX_CHARS) };
 
   const { workflowName, spanName, customerId } = resolveSpanFields(config, {
     workflowName: 'gemini-cli',
@@ -204,15 +259,14 @@ function buildSpans(
   });
 
   const safeId = sessionId.replace(/[/\\]/g, '_').slice(0, 50);
-  const traceUniqueId = `gcli_${safeId}`;
-  const rootSpanId = `gcli_${safeId}_root`;
+  const turnTs = beginTime.replace(/[^0-9]/g, '').slice(0, 14);
+  const traceUniqueId = `gcli_${safeId}_${turnTs}`;
+  const rootSpanId = `gcli_${safeId}_${turnTs}_root`;
   const threadId = `gcli_${sessionId}`;
 
-  // LLM config
   const llmReq = (hookData.llm_request ?? {}) as Msg;
   const reqConfig = (llmReq.config ?? {}) as Msg;
 
-  // Metadata
   const baseMeta: Record<string, unknown> = { source: 'gemini-cli' };
   if (toolTurns > 0) baseMeta.tool_turns = toolTurns;
   if (thoughtsTokens > 0) baseMeta.reasoning_tokens = thoughtsTokens;
@@ -230,42 +284,81 @@ function buildSpans(
     provider_id: '',
     span_path: '',
     input: promptMessages.length ? JSON.stringify(promptMessages) : '',
-    output: JSON.stringify(completionMessage),
+    output: truncate(outputText, MAX_CHARS),
     timestamp: endTime,
     start_time: beginTime,
     metadata,
     ...(lat !== undefined ? { latency: lat } : {}),
   });
 
-  // Generation child span
-  const genSpan: SpanData = {
-    trace_unique_id: traceUniqueId,
-    span_unique_id: `gcli_${safeId}_gen`,
-    span_parent_id: rootSpanId,
-    span_name: 'gemini.chat',
-    span_workflow_name: workflowName,
-    span_path: 'gemini_chat',
-    model,
-    provider_id: 'google',
-    metadata: {},
-    input: promptMessages.length ? JSON.stringify(promptMessages) : '',
-    output: JSON.stringify(completionMessage),
-    timestamp: endTime,
-    start_time: beginTime,
-    prompt_tokens: tokens.prompt_tokens,
-    completion_tokens: tokens.completion_tokens,
-    total_tokens: tokens.total_tokens,
-    ...(lat !== undefined ? { latency: lat } : {}),
-  };
-  if (reqConfig.temperature != null) (genSpan as any).temperature = reqConfig.temperature;
-  if (reqConfig.maxOutputTokens != null) (genSpan as any).max_tokens = reqConfig.maxOutputTokens;
-  spans.push(genSpan);
+  // Build interleaved LLM + Tool spans in chronological order.
+  // If we have text rounds, create one gemini.chat per round with tools between them.
+  // Otherwise fall back to a single gemini.chat span.
+  const rounds = textRounds.length > 0 ? textRounds : [outputText];
+  const roundStarts = roundStartTimes.length > 0 ? roundStartTimes : [beginTime];
+  let toolIdx = 0;
+
+  for (let r = 0; r < rounds.length; r++) {
+    const roundText = rounds[r];
+    const roundStart = roundStarts[r] || beginTime;
+    // Round end: next tool start, or endTime for last round
+    const nextTool = toolIdx < toolDetails.length ? toolDetails[toolIdx] : null;
+    const roundEnd = (r < rounds.length - 1 && nextTool?.start_time) ? nextTool.start_time : endTime;
+    const roundLat = latencySeconds(roundStart, roundEnd);
+
+    // LLM generation span for this round
+    if (roundText) {
+      const genSpan: SpanData = {
+        trace_unique_id: traceUniqueId,
+        span_unique_id: `gcli_${safeId}_${turnTs}_gen_${r}`,
+        span_parent_id: rootSpanId,
+        span_name: 'gemini.chat',
+        span_workflow_name: workflowName,
+        span_path: 'gemini_chat',
+        model,
+        provider_id: 'google',
+        metadata: {},
+        input: r === 0 && promptMessages.length ? JSON.stringify(promptMessages) : '',
+        output: truncate(roundText, MAX_CHARS),
+        timestamp: roundEnd,
+        start_time: roundStart,
+        ...(roundLat !== undefined ? { latency: roundLat } : {}),
+        // Only attach tokens to the first round (aggregate usage from Gemini)
+        ...(r === 0 ? {
+          prompt_tokens: tokens.prompt_tokens,
+          completion_tokens: tokens.completion_tokens,
+          total_tokens: tokens.total_tokens,
+        } : {}),
+      };
+      if (r === 0) {
+        if (reqConfig.temperature != null) (genSpan as any).temperature = reqConfig.temperature;
+        if (reqConfig.maxOutputTokens != null) (genSpan as any).max_tokens = reqConfig.maxOutputTokens;
+      }
+      spans.push(genSpan);
+    }
+
+    // Tool spans that come after this round (before next round)
+    if (r < rounds.length - 1) {
+      while (toolIdx < toolDetails.length) {
+        spans.push(buildToolSpan(toolDetails[toolIdx], toolIdx, traceUniqueId, rootSpanId, safeId, turnTs, workflowName, beginTime, endTime));
+        toolIdx++;
+        const nextDetail = toolDetails[toolIdx];
+        if (nextDetail && roundStarts[r + 1] && nextDetail.start_time && nextDetail.start_time > roundStarts[r + 1]) break;
+      }
+    }
+  }
+
+  // Any remaining tools not yet emitted
+  while (toolIdx < toolDetails.length) {
+    spans.push(buildToolSpan(toolDetails[toolIdx], toolIdx, traceUniqueId, rootSpanId, safeId, turnTs, workflowName, beginTime, endTime));
+    toolIdx++;
+  }
 
   // Reasoning span
   if (thoughtsTokens > 0) {
     spans.push({
       trace_unique_id: traceUniqueId,
-      span_unique_id: `gcli_${safeId}_reasoning`,
+      span_unique_id: `gcli_${safeId}_${turnTs}_reasoning`,
       span_parent_id: rootSpanId,
       span_name: 'Reasoning',
       span_workflow_name: workflowName,
@@ -276,39 +369,6 @@ function buildSpans(
       output: `[Reasoning: ${thoughtsTokens} tokens]`,
       timestamp: endTime,
       start_time: beginTime,
-    });
-  }
-
-  // Tool child spans
-  for (let i = 0; i < toolTurns; i++) {
-    const detail = toolDetails[i] ?? null;
-    const toolName = detail?.name ?? '';
-    const toolArgs = detail?.args ?? detail?.input ?? {};
-    const toolOutput = detail?.output ?? '';
-    const displayName = toolName ? toolDisplayName(toolName) : `Call ${i + 1}`;
-    const toolInputStr = toolName ? formatToolInput(toolName, toolArgs) : '';
-    const toolMeta: Record<string, unknown> = {};
-    if (toolName) toolMeta.tool_name = toolName;
-    if (detail?.error) toolMeta.error = detail.error;
-
-    const toolStart = detail?.start_time ?? beginTime;
-    const toolEnd = detail?.end_time ?? endTime;
-    const toolLat = latencySeconds(toolStart, toolEnd);
-
-    spans.push({
-      trace_unique_id: traceUniqueId,
-      span_unique_id: `gcli_${safeId}_tool_${i + 1}`,
-      span_parent_id: rootSpanId,
-      span_name: `Tool: ${displayName}`,
-      span_workflow_name: workflowName,
-      span_path: toolName ? `tool_${toolName}` : 'tool_call',
-      provider_id: '',
-      metadata: toolMeta,
-      input: toolInputStr,
-      output: truncate(toolOutput, MAX_CHARS),
-      timestamp: toolEnd,
-      start_time: toolStart,
-      ...(toolLat !== undefined ? { latency: toolLat } : {}),
     });
   }
 
@@ -446,9 +506,10 @@ function processBeforeTool(hookData: Msg): void {
   const pending = state.pending_tools ?? [];
   pending.push({ name: toolName, input: toolInput, start_time: nowISO() });
   state.pending_tools = pending;
+  // Increment send_version to cancel any pending delayed sends —
+  // the turn isn't done yet, a tool is about to execute.
+  state.send_version = (state.send_version ?? 0) + 1;
   saveStreamState(sessionId, state);
-
-  process.stdout.write('{}\n');
 }
 
 function processAfterTool(hookData: Msg): void {
@@ -478,8 +539,6 @@ function processAfterTool(hookData: Msg): void {
   state.pending_tools = pending;
   state.tool_details = completed;
   saveStreamState(sessionId, state);
-
-  process.stdout.write('{}\n');
 }
 
 // ── AfterModel chunk processing ──────────────────────────────────
@@ -531,8 +590,20 @@ function processChunk(hookData: Msg): void {
 
   if (savedMsgCount > 0 && currentMsgCount > savedMsgCount) {
     const newMsgs = messages.slice(savedMsgCount);
-    const hasNewUserMsg = newMsgs.some((m) => m.role === 'user');
-    if (hasNewUserMsg) {
+    // Distinguish real user messages from tool-result messages injected by Gemini.
+    // Tool results contain functionResponse / toolResponse objects in their parts.
+    const hasRealUserMsg = newMsgs.some((m) => {
+      if (String(m.role ?? '') !== 'user') return false;
+      const parts = (m.parts ?? m.content) as unknown;
+      if (Array.isArray(parts)) {
+        // If any part has functionResponse/toolResponse, it's a tool result, not a user message
+        return !parts.some((p: Msg) =>
+          typeof p === 'object' && p !== null && (p.functionResponse || p.toolResponse)
+        );
+      }
+      return true; // plain text user message
+    });
+    if (hasRealUserMsg) {
       debug(`New user message detected (msgs ${savedMsgCount} → ${currentMsgCount}), starting fresh turn`);
       clearStreamState(sessionId);
       state = { accumulated_text: '', last_tokens: 0, first_chunk_time: '' };
@@ -540,19 +611,31 @@ function processChunk(hookData: Msg): void {
       state.tool_turns = (state.tool_turns ?? 0) + 1;
       state.send_version = (state.send_version ?? 0) + 1;
       toolCallDetected = true;
-      debug(`Tool call detected via msg_count (${savedMsgCount} → ${currentMsgCount}), tool_turns=${state.tool_turns}`);
+      // Start a new text round after tool completes
+      state.current_round = (state.current_round ?? 0) + 1;
+      debug(`Tool call detected via msg_count (${savedMsgCount} → ${currentMsgCount}), tool_turns=${state.tool_turns}, round=${state.current_round}`);
     }
   }
   state.msg_count = currentMsgCount;
 
-  // Accumulate text
+  // Accumulate text into both total and per-round tracking
   if (chunkText) {
     if (!state.first_chunk_time) state.first_chunk_time = nowISO();
     state.accumulated_text += chunkText;
     state.last_tokens = completionTokens || state.last_tokens;
     if (thoughtsTokens > 0) state.thoughts_tokens = thoughtsTokens;
+
+    // Track text per round
+    const round = state.current_round ?? 0;
+    if (!state.text_rounds) state.text_rounds = [];
+    if (!state.round_start_times) state.round_start_times = [];
+    while (state.text_rounds.length <= round) state.text_rounds.push('');
+    while (state.round_start_times.length <= round) state.round_start_times.push('');
+    state.text_rounds[round] += chunkText;
+    if (!state.round_start_times[round]) state.round_start_times[round] = nowISO();
+
     saveStreamState(sessionId, state);
-    debug(`Accumulated chunk: +${chunkText.length} chars, total=${state.accumulated_text.length}`);
+    debug(`Accumulated chunk: +${chunkText.length} chars, total=${state.accumulated_text.length}, round=${round}`);
   }
 
   // Tool call in response parts
@@ -565,20 +648,23 @@ function processChunk(hookData: Msg): void {
     }
     saveStreamState(sessionId, state);
     debug(`Tool call via response parts (finish=${finishReason}), tool_turns=${state.tool_turns}`);
-    process.stdout.write('{}\n');
     return;
   }
 
-  // Detect completion and send
+  // Detect completion and send.
+  // If tools have been used this turn, only send on STOP to avoid
+  // splitting a multi-tool turn into separate traces.
+  const hasPendingTools = (state.pending_tools ?? []).length > 0;
+  const hadToolsThisTurn = (state.tool_turns ?? 0) > 0 || hasPendingTools;
   const hasNewText = state.accumulated_text.length > (state.last_send_text_len ?? 0);
   const shouldSend = (
-    (!toolCallDetected || isFinished)
-    && hasNewText
+    hasNewText
     && state.accumulated_text
-    && (!chunkText || isFinished)
+    && (
+      isFinished
+      || (!hadToolsThisTurn && !toolCallDetected && !chunkText)
+    )
   );
-
-  process.stdout.write('{}\n');
 
   if (!shouldSend) {
     if (toolCallDetected) saveStreamState(sessionId, state);
@@ -604,6 +690,8 @@ function processChunk(hookData: Msg): void {
     state.tool_turns ?? 0,
     state.tool_details ?? [],
     state.thoughts_tokens ?? 0,
+    state.text_rounds ?? [],
+    state.round_start_times ?? [],
   );
 
   // Method b: text + STOP → send immediately
@@ -624,37 +712,77 @@ function processChunk(hookData: Msg): void {
 
 // ── Main ──────────────────────────────────────────────────────────
 
-function main(): void {
+function processChunkInWorker(dataFile: string): void {
   try {
-    const raw = fs.readFileSync(0, 'utf-8');
-    if (!raw.trim()) {
-      process.stdout.write('{}\n');
-      return;
-    }
-
+    const raw = fs.readFileSync(dataFile, 'utf-8');
+    fs.unlinkSync(dataFile);
+    if (!raw.trim()) return;
     const hookData = JSON.parse(raw) as Msg;
-    const event = String(hookData.hook_event_name ?? '');
-
     const unlock = acquireLock(LOCK_PATH);
     try {
-      if (event === 'BeforeTool') {
-        processBeforeTool(hookData);
-      } else if (event === 'AfterTool') {
-        processAfterTool(hookData);
-      } else {
-        processChunk(hookData);
-      }
+      processChunk(hookData);
     } finally {
       unlock?.();
     }
   } catch (e) {
-    if (e instanceof SyntaxError) {
-      log('ERROR', `Invalid JSON from stdin: ${e}`);
-    } else {
-      log('ERROR', `Hook error: ${e}`);
-    }
-    process.stdout.write('{}\n');
+    log('ERROR', `Worker error: ${e}`);
+    try { fs.unlinkSync(dataFile); } catch {}
   }
+}
+
+function main(): void {
+  // Worker mode: process chunk from temp file
+  if (process.env._RESPAN_GEM_WORKER === '1') {
+    const dataFile = process.env._RESPAN_GEM_FILE ?? '';
+    if (dataFile) processChunkInWorker(dataFile);
+    return;
+  }
+
+  let raw = '';
+  try {
+    raw = fs.readFileSync(0, 'utf-8');
+  } catch {}
+  // Respond immediately so Gemini CLI doesn't block
+  process.stdout.write('{}\n');
+  if (!raw.trim()) { process.exit(0); }
+
+  try {
+    const hookData = JSON.parse(raw) as Msg;
+    const event = String(hookData.hook_event_name ?? '');
+
+    if (event === 'BeforeTool' || event === 'AfterTool') {
+      // Tool events are fast (just state updates) and must run in order.
+      // Process inline, don't fork.
+      const unlock = acquireLock(LOCK_PATH);
+      try {
+        if (event === 'BeforeTool') processBeforeTool(hookData);
+        else processAfterTool(hookData);
+      } finally {
+        unlock?.();
+      }
+    } else {
+      // AfterModel chunks: fork to background so Gemini CLI doesn't block.
+      // Write data to temp file (avoids env var size limits).
+      const dataFile = path.join(STATE_DIR, `respan_chunk_${process.pid}.json`);
+      fs.mkdirSync(STATE_DIR, { recursive: true });
+      fs.writeFileSync(dataFile, raw);
+      try {
+        const scriptPath = __filename || process.argv[1];
+        const child = execFile('node', [scriptPath], {
+          env: { ...process.env, _RESPAN_GEM_WORKER: '1', _RESPAN_GEM_FILE: dataFile },
+          stdio: 'ignore' as any,
+          detached: true,
+        } as any);
+        child.unref();
+      } catch (e) {
+        // Fallback: run inline
+        processChunkInWorker(dataFile);
+      }
+    }
+  } catch (e) {
+    log('ERROR', `Hook error: ${e}`);
+  }
+  process.exit(0);
 }
 
 main();

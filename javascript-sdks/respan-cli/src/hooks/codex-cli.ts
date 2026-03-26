@@ -16,6 +16,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { execFile } from 'node:child_process';
 
 import {
   initLogging,
@@ -65,6 +66,7 @@ interface Turn {
   tool_calls: Array<{ name: string; arguments: string; call_id: string; timestamp: string }>;
   tool_outputs: Array<{ call_id: string; output: string; timestamp: string }>;
   reasoning: boolean;
+  reasoning_text: string;
   token_usage: Msg;
 }
 
@@ -142,6 +144,7 @@ function extractTurns(events: Msg[]): Turn[] {
           tool_calls: [],
           tool_outputs: [],
           reasoning: false,
+          reasoning_text: '',
           token_usage: {},
         };
       } else if (msgType === 'task_complete' && current) {
@@ -179,13 +182,24 @@ function extractTurns(events: Msg[]): Turn[] {
           timestamp,
         });
       } else if (itemType === 'reasoning') {
-        if (current) current.reasoning = true;
+        if (current) {
+          current.reasoning = true;
+          const summary = String(payload.summary ?? payload.text ?? '');
+          if (summary) current.reasoning_text += (current.reasoning_text ? '\n' : '') + summary;
+        }
       } else if (itemType === 'web_search_call') {
         const action = (payload.action ?? {}) as Msg;
+        const syntheticId = `web_search_${timestamp}`;
         current.tool_calls.push({
           name: 'web_search',
           arguments: JSON.stringify({ query: action.query ?? '' }),
-          call_id: `web_search_${timestamp}`,
+          call_id: syntheticId,
+          timestamp,
+        });
+        // Web search has no separate output event; record query as output
+        current.tool_outputs.push({
+          call_id: syntheticId,
+          output: `Search: ${action.query ?? ''}`,
           timestamp,
         });
       }
@@ -256,7 +270,7 @@ function createSpans(
     provider_id: '',
     span_path: '',
     input: promptMessages.length ? JSON.stringify(promptMessages) : '',
-    output: completionMessage ? JSON.stringify(completionMessage) : '',
+    output: turn.assistant_message,
     timestamp: endTimeStr,
     start_time: startTimeStr,
     metadata,
@@ -275,7 +289,7 @@ function createSpans(
     provider_id: 'openai',
     metadata: {},
     input: promptMessages.length ? JSON.stringify(promptMessages) : '',
-    output: completionMessage ? JSON.stringify(completionMessage) : '',
+    output: turn.assistant_message,
     prompt_messages: promptMessages,
     completion_message: completionMessage,
     timestamp: endTimeStr,
@@ -297,7 +311,7 @@ function createSpans(
       provider_id: '',
       metadata: reasoningTokens > 0 ? { reasoning_tokens: reasoningTokens } : {},
       input: '',
-      output: reasoningTokens > 0 ? `[Reasoning: ${reasoningTokens} tokens]` : '[Reasoning]',
+      output: turn.reasoning_text || (reasoningTokens > 0 ? `[Reasoning: ${reasoningTokens} tokens]` : '[Reasoning]'),
       timestamp: endTimeStr,
       start_time: startTimeStr,
     });
@@ -395,13 +409,73 @@ function findLatestSessionFile(): { sessionId: string; sessionFile: string } | n
 
 // ── Main ──────────────────────────────────────────────────────────
 
-async function main(): Promise<void> {
+async function mainWorker(): Promise<void> {
   const scriptStart = Date.now();
+  debug('Worker started');
+
+  const sessionId = process.env._RESPAN_CODEX_SESSION!;
+  const sessionFile = process.env._RESPAN_CODEX_FILE!;
+  const cwd = process.env._RESPAN_CODEX_CWD ?? '';
+
+  const creds = resolveCredentials();
+  if (!creds) { log('ERROR', 'No API key'); return; }
+
+  const config = cwd ? loadRespanConfig(path.join(cwd, '.codex', 'respan.json')) : null;
+
+  const maxAttempts = 3;
+  let turns = 0;
+  try {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const unlock = acquireLock(LOCK_PATH);
+      try {
+        const state = loadState(STATE_FILE);
+        const sessionState = (state[sessionId] ?? {}) as Msg;
+        const lastTurnCount = Number(sessionState.turn_count ?? 0);
+
+        const lines = fs.readFileSync(sessionFile, 'utf-8').trim().split('\n');
+        const events = parseSession(lines);
+        const allTurns = extractTurns(events);
+
+        if (allTurns.length > lastTurnCount) {
+          const newTurns = allTurns.slice(lastTurnCount);
+          for (const turn of newTurns) {
+            turns++;
+            const turnNum = lastTurnCount + turns;
+            const spans = createSpans(sessionId, turnNum, turn, config);
+            await sendSpans(spans, creds.apiKey, creds.baseUrl, `turn_${turnNum}`);
+          }
+          state[sessionId] = {
+            turn_count: lastTurnCount + turns,
+            updated: nowISO(),
+          };
+          saveState(STATE_FILE, state);
+        }
+      } finally {
+        unlock?.();
+      }
+      if (turns > 0) break;
+      if (attempt < maxAttempts - 1) {
+        await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+      }
+    }
+    const duration = (Date.now() - scriptStart) / 1000;
+    log('INFO', `Processed ${turns} turns in ${duration.toFixed(1)}s`);
+  } catch (e) {
+    log('ERROR', `Failed to process session: ${e}`);
+  }
+}
+
+function main(): void {
+  // Worker mode: re-invoked as detached subprocess
+  if (process.env._RESPAN_CODEX_WORKER === '1') {
+    mainWorker().catch((e) => log('ERROR', `Worker crashed: ${e}`));
+    return;
+  }
+
   debug('Codex hook started');
 
-  // Parse notify payload from argv[2] (argv[0]=node, argv[1]=script)
   if (process.argv.length < 3) {
-    debug('No argument provided (expected JSON payload in argv[2])');
+    debug('No argument provided');
     process.exit(0);
   }
 
@@ -425,14 +499,6 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  debug(`Processing notify: type=${eventType}, session=${sessionId}`);
-
-  const creds = resolveCredentials();
-  if (!creds) {
-    log('ERROR', 'No API key found. Run: respan auth login');
-    process.exit(0);
-  }
-
   // Find session file
   let sessionFile = findSessionFile(sessionId);
   if (!sessionFile) {
@@ -446,62 +512,28 @@ async function main(): Promise<void> {
     }
   }
 
-  // Load config
+  // Fork self as detached worker so Codex CLI doesn't block
   const cwd = String(payload.cwd ?? '');
-  const config = cwd ? loadRespanConfig(path.join(cwd, '.codex', 'respan.json')) : null;
-  if (config) debug(`Loaded respan.json config from ${cwd}`);
-
-  // Process with retry
-  const maxAttempts = 3;
-  let turns = 0;
+  debug(`Forking worker for session: ${sessionId}`);
   try {
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const unlock = acquireLock(LOCK_PATH);
-      try {
-        const state = loadState(STATE_FILE);
-        const sessionState = (state[sessionId] ?? {}) as Msg;
-        const lastTurnCount = Number(sessionState.turn_count ?? 0);
-
-        const lines = fs.readFileSync(sessionFile!, 'utf-8').trim().split('\n');
-        const events = parseSession(lines);
-        const allTurns = extractTurns(events);
-
-        if (allTurns.length > lastTurnCount) {
-          const newTurns = allTurns.slice(lastTurnCount);
-          for (const turn of newTurns) {
-            turns++;
-            const turnNum = lastTurnCount + turns;
-            const spans = createSpans(sessionId, turnNum, turn, config);
-            await sendSpans(spans, creds.apiKey, creds.baseUrl, `turn_${turnNum}`);
-          }
-          state[sessionId] = {
-            turn_count: lastTurnCount + turns,
-            updated: nowISO(),
-          };
-          saveState(STATE_FILE, state);
-        }
-      } finally {
-        unlock?.();
-      }
-
-      if (turns > 0) break;
-      if (attempt < maxAttempts - 1) {
-        const delay = 500 * (attempt + 1);
-        debug(`No turns processed (attempt ${attempt + 1}/${maxAttempts}), retrying in ${delay}ms...`);
-        await new Promise((r) => setTimeout(r, delay));
-      }
-    }
-
-    const duration = (Date.now() - scriptStart) / 1000;
-    log('INFO', `Processed ${turns} turns in ${duration.toFixed(1)}s`);
-    if (duration > 180) log('WARN', `Hook took ${duration.toFixed(1)}s (>3min)`);
+    const scriptPath = __filename || process.argv[1];
+    const child = execFile('node', [scriptPath], {
+      env: {
+        ...process.env,
+        _RESPAN_CODEX_WORKER: '1',
+        _RESPAN_CODEX_SESSION: sessionId,
+        _RESPAN_CODEX_FILE: sessionFile!,
+        _RESPAN_CODEX_CWD: cwd,
+      },
+      stdio: 'ignore' as any,
+      detached: true,
+    } as any);
+    child.unref();
+    debug('Worker launched');
   } catch (e) {
-    log('ERROR', `Failed to process session: ${e}`);
-    if (DEBUG_MODE) debug(String((e as Error).stack ?? e));
+    log('ERROR', `Failed to fork worker: ${e}`);
   }
+  process.exit(0);
 }
 
-main().catch((e) => {
-  log('ERROR', `Hook crashed: ${e}`);
-  process.exit(1);
-});
+main();

@@ -14,6 +14,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { execFile } from 'node:child_process';
 
 import {
   initLogging,
@@ -289,7 +290,7 @@ function createSpans(
     provider_id: '',
     span_path: '',
     input: promptMessages.length ? JSON.stringify(promptMessages) : '',
-    output: completionMessage ? JSON.stringify(completionMessage) : '',
+    output: finalOutput,
     timestamp: timestampStr,
     start_time: startTimeStr,
     metadata,
@@ -311,7 +312,7 @@ function createSpans(
     provider_id: 'anthropic',
     metadata: {},
     input: promptMessages.length ? JSON.stringify(promptMessages) : '',
-    output: completionMessage ? JSON.stringify(completionMessage) : '',
+    output: finalOutput,
     prompt_messages: promptMessages,
     completion_message: completionMessage,
     timestamp: genEnd,
@@ -593,32 +594,20 @@ function findLatestTranscript(): { sessionId: string; transcriptPath: string } |
 
 // ── Main ──────────────────────────────────────────────────────────
 
-async function main(): Promise<void> {
+async function mainWorker(): Promise<void> {
   const scriptStart = Date.now();
-  debug('Hook started');
-
-  if ((process.env.TRACE_TO_RESPAN ?? '').toLowerCase() !== 'true') {
-    debug('Tracing disabled (TRACE_TO_RESPAN != true)');
-    process.exit(0);
-  }
+  debug('Worker started');
 
   const creds = resolveCredentials();
   if (!creds) {
     log('ERROR', 'No API key found. Run: respan auth login');
-    process.exit(0);
+    return;
   }
 
-  // Find transcript
-  const payload = readStdinPayload() ?? findLatestTranscript();
-  if (!payload) {
-    debug('No transcript file found');
-    process.exit(0);
-  }
-
-  const { sessionId, transcriptPath } = payload;
+  const sessionId = process.env._RESPAN_SESSION_ID!;
+  const transcriptPath = process.env._RESPAN_TRANSCRIPT_PATH!;
   debug(`Processing session: ${sessionId}`);
 
-  // Load respan.json config from project directory
   let config: RespanConfig | null = null;
   try {
     const content = fs.readFileSync(transcriptPath, 'utf-8');
@@ -633,13 +622,9 @@ async function main(): Promise<void> {
     }
     if (cwd) {
       config = loadRespanConfig(path.join(cwd, '.claude', 'respan.json'));
-      debug(`Loaded respan.json config from ${cwd}`);
     }
-  } catch (e) {
-    debug(`Failed to load config: ${e}`);
-  }
+  } catch {}
 
-  // Process with retry
   const maxAttempts = 3;
   let turns = 0;
   try {
@@ -649,7 +634,6 @@ async function main(): Promise<void> {
         const state = loadState(STATE_FILE);
         const result = processTranscript(sessionId, transcriptPath, state, creds.apiKey, creds.baseUrl, config);
         turns = result.turnsProcessed;
-
         state[sessionId] = {
           last_line: result.lastCommittedLine,
           turn_count: (Number((state[sessionId] as Msg)?.turn_count ?? 0)) + turns,
@@ -659,25 +643,60 @@ async function main(): Promise<void> {
       } finally {
         unlock?.();
       }
-
       if (turns > 0) break;
       if (attempt < maxAttempts - 1) {
-        const delay = 500 * (attempt + 1);
-        debug(`No turns processed (attempt ${attempt + 1}/${maxAttempts}), retrying in ${delay}ms...`);
-        await new Promise((r) => setTimeout(r, delay));
+        await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
       }
     }
-
     const duration = (Date.now() - scriptStart) / 1000;
     log('INFO', `Processed ${turns} turns in ${duration.toFixed(1)}s`);
-    if (duration > 180) log('WARN', `Hook took ${duration.toFixed(1)}s (>3min)`);
   } catch (e) {
     log('ERROR', `Failed to process transcript: ${e}`);
-    if (DEBUG_MODE) debug(String((e as Error).stack ?? e));
   }
 }
 
-main().catch((e) => {
-  log('ERROR', `Hook crashed: ${e}`);
-  process.exit(1);
-});
+function main(): void {
+  // Worker mode: re-invoked as detached subprocess
+  if (process.env._RESPAN_WORKER === '1') {
+    mainWorker().catch((e) => log('ERROR', `Worker crashed: ${e}`));
+    return;
+  }
+
+  debug('Hook started');
+
+  if ((process.env.TRACE_TO_RESPAN ?? '').toLowerCase() !== 'true') {
+    debug('Tracing disabled (TRACE_TO_RESPAN != true)');
+    process.exit(0);
+  }
+
+  const payload = readStdinPayload() ?? findLatestTranscript();
+  if (!payload) {
+    debug('No transcript file found');
+    process.exit(0);
+  }
+
+  // Fork self as detached worker so Claude Code doesn't block
+  const { sessionId, transcriptPath } = payload;
+  debug(`Forking worker for session: ${sessionId}`);
+  try {
+    const scriptPath = __filename || process.argv[1];
+    const child = execFile('node', [scriptPath], {
+      env: {
+        ...process.env,
+        _RESPAN_WORKER: '1',
+        _RESPAN_SESSION_ID: sessionId,
+        _RESPAN_TRANSCRIPT_PATH: transcriptPath,
+      },
+      stdio: 'ignore' as any,
+      detached: true,
+    } as any);
+    child.unref();
+    debug('Worker launched');
+  } catch (e) {
+    log('ERROR', `Failed to fork worker: ${e}`);
+  }
+  // Exit immediately so Claude Code doesn't block
+  process.exit(0);
+}
+
+main();
