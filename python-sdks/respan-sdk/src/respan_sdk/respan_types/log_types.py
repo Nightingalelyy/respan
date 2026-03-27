@@ -362,6 +362,8 @@ class RespanFullLogParams(RespanLogParams):
     mock_response: Optional[str] = None
     log_method: Optional[str] = None
     log_type: Optional[LogType] = None
+    # Beta feature flags (set by X-Respan-Beta header extraction in preprocessing)
+    is_token_breakdown_enabled: Optional[bool] = None
     # endregion: respan logging control
 
     # region: embedding (additional)
