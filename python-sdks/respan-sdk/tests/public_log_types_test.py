@@ -3,7 +3,7 @@ Test the new public log types to ensure they work correctly with LLM parameter m
 """
 import pytest
 from respan_sdk.respan_types.log_types import RespanLogParams, RespanTextLogParams
-from respan_sdk.utils.pre_processing import validate_and_separate_log_and_llm_params
+from respan_sdk.respan_types._internal_types import LiteLLMCompletionParams
 
 
 def test_respan_log_params_basic():
@@ -58,7 +58,7 @@ def test_respan_text_log_params():
 
 
 def test_validate_and_separate_public_params():
-    """Test the new public validation function."""
+    """Test Pydantic model_validate on log params + LLM params."""
     params = {
         "model": "gpt-4",
         "messages": [{"role": "user", "content": "Test"}],
@@ -66,13 +66,14 @@ def test_validate_and_separate_public_params():
         "custom_identifier": "validation_test",
         "metadata": {"test": True},
     }
-    
-    llm_params, log_params = validate_and_separate_log_and_llm_params(params)
-    
+
+    llm_params = LiteLLMCompletionParams.model_validate(params)
+    log_params = RespanLogParams.model_validate(params)
+
     # Check LLM params
     assert llm_params.model == "gpt-4"
     assert llm_params.temperature == 0.5
-    
+
     # Check log params
     assert log_params.custom_identifier == "validation_test"
     assert log_params.metadata == {"test": True}
