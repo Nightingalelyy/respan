@@ -206,3 +206,57 @@ def test_invocation_params_extracted(translator):
     assert span._attributes["gen_ai.request.temperature"] == 0.7
     assert span._attributes["gen_ai.request.top_p"] == 0.9
     assert span._attributes["gen_ai.request.max_tokens"] == 1024
+
+
+# ------------------------------------------------------------------
+# 13. noisy raw OI attrs are removed after translation
+# ------------------------------------------------------------------
+
+def test_redundant_oi_attrs_removed_after_translation(translator):
+    span = _make_span({
+        "openinference.span.kind": "LLM",
+        "input.value": "hello world",
+        "input.mime_type": "text/plain",
+        "output.value": "goodbye world",
+        "output.mime_type": "text/plain",
+        "llm.model_name": "gpt-4o",
+        "llm.system": "OpenAI",
+        "llm.provider": "OpenAI",
+        "llm.invocation_parameters": json.dumps({"temperature": 0.3}),
+        "llm.input_messages.0.message.role": "user",
+        "llm.input_messages.0.message.content": "Hello!",
+        "llm.output_messages.0.message.role": "assistant",
+        "llm.output_messages.0.message.content": "Goodbye!",
+        "llm.token_count.prompt": 10,
+        "llm.token_count.completion": 4,
+        "llm.token_count.total": 14,
+    })
+
+    translator.on_end(span)
+
+    assert span._attributes["traceloop.entity.input"] == "hello world"
+    assert span._attributes["traceloop.entity.output"] == "goodbye world"
+    assert span._attributes["gen_ai.request.model"] == "gpt-4o"
+    assert span._attributes["gen_ai.system"] == "openai"
+    assert span._attributes["gen_ai.provider.name"] == "openai"
+    assert span._attributes["gen_ai.prompt.0.content"] == "Hello!"
+    assert span._attributes["gen_ai.completion.0.content"] == "Goodbye!"
+    assert span._attributes["gen_ai.usage.prompt_tokens"] == 10
+    assert span._attributes["gen_ai.usage.completion_tokens"] == 4
+
+    assert "input.value" not in span._attributes
+    assert "input.mime_type" not in span._attributes
+    assert "output.value" not in span._attributes
+    assert "output.mime_type" not in span._attributes
+    assert "openinference.span.kind" not in span._attributes
+    assert "llm.model_name" not in span._attributes
+    assert "llm.system" not in span._attributes
+    assert "llm.provider" not in span._attributes
+    assert "llm.invocation_parameters" not in span._attributes
+    assert "llm.input_messages.0.message.role" not in span._attributes
+    assert "llm.input_messages.0.message.content" not in span._attributes
+    assert "llm.output_messages.0.message.role" not in span._attributes
+    assert "llm.output_messages.0.message.content" not in span._attributes
+    assert "llm.token_count.prompt" not in span._attributes
+    assert "llm.token_count.completion" not in span._attributes
+    assert "llm.token_count.total" not in span._attributes

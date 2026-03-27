@@ -279,7 +279,8 @@ class OpenInferenceTranslator(SpanProcessor):
     enriches them with the Traceloop attributes the Respan backend expects.
 
     All mappings are the exact reverse of Arize's openinference-instrumentation-openllmetry.
-    OI attributes are preserved (additive enrichment via setdefault, not destructive).
+    After translation, redundant raw OpenInference attributes are removed so they
+    do not leak into passthrough metadata / custom properties.
     """
 
     def on_start(self, span: Any, parent_context: Any = None) -> None:
@@ -357,6 +358,8 @@ class OpenInferenceTranslator(SpanProcessor):
         if oi_kind_upper in _LLM_KINDS:
             self._translate_llm(attrs)
 
+        self._remove_redundant_oi_attrs(attrs)
+
     def _translate_llm(self, attrs: Dict[str, Any]) -> None:
         """Extra translation for LLM/EMBEDDING spans."""
         # Mark as chat request type
@@ -383,6 +386,39 @@ class OpenInferenceTranslator(SpanProcessor):
         tools_raw = attrs.get(OI_LLM_TOOLS)
         if tools_raw:
             attrs.setdefault(_TL_REQUEST_FUNCTIONS, tools_raw)
+
+    @staticmethod
+    def _remove_redundant_oi_attrs(attrs: Dict[str, Any]) -> None:
+        """Remove noisy raw OpenInference attrs while keeping useful passthrough."""
+        keys_to_remove = {
+            OPENINFERENCE_SPAN_KIND,
+            OI_INPUT_VALUE,
+            "input.mime_type",
+            OI_OUTPUT_VALUE,
+            "output.mime_type",
+            OI_LLM_MODEL_NAME,
+            OI_LLM_PROVIDER,
+            OI_LLM_SYSTEM,
+            OI_LLM_INVOCATION_PARAMETERS,
+            OI_LLM_TOKEN_COUNT_PROMPT,
+            OI_LLM_TOKEN_COUNT_COMPLETION,
+            OI_LLM_TOKEN_COUNT_TOTAL,
+            OI_LLM_TOKEN_COUNT_CACHE_READ,
+            OI_LLM_TOOLS,
+            OI_AGENT_NAME,
+        }
+        prefixes_to_remove = (
+            "llm.input_messages.",
+            "llm.output_messages.",
+            "llm.token_count.",
+        )
+
+        for key in keys_to_remove:
+            attrs.pop(key, None)
+
+        for key in list(attrs.keys()):
+            if any(key.startswith(prefix) for prefix in prefixes_to_remove):
+                attrs.pop(key, None)
 
     def shutdown(self) -> None:
         pass
