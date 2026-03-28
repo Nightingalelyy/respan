@@ -223,7 +223,8 @@ function extractToolCalls(output: any): Record<string, any>[] {
       continue;
     }
 
-    if ((item as any).type === "function_call") {
+    const itemType = (item as any).type ?? "";
+    if (itemType === "function_call" || itemType === "function") {
       const toolCall = normalizeToolCall(item);
       if (toolCall) result.push(toolCall);
       continue;

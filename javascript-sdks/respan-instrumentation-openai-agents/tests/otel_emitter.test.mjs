@@ -228,3 +228,55 @@ test("emit generation preserves boolean false output", () => {
   assert.equal(attrs["traceloop.entity.output"], "false");
   assert.equal(attrs["traceloop.span.kind"], undefined);
 });
+
+test("emit response preserves Chat Completions tool_calls messages", () => {
+  const attrs = emitAndCapture(
+    makeBaseSpanData({
+      type: "response",
+      _input: [
+        { role: "user", content: "Check Tokyo weather" },
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            {
+              id: "call_weather_chat",
+              type: "function",
+              function: {
+                name: "get_weather",
+                arguments: "{\"city\":\"Tokyo\"}",
+              },
+            },
+          ],
+        },
+      ],
+      _response: {
+        model: "gpt-4o",
+        output: "Done",
+        usage: {
+          input_tokens: 5,
+          output_tokens: 1,
+        },
+      },
+    }),
+  );
+
+  assert.deepEqual(JSON.parse(attrs["traceloop.entity.input"]), [
+    { role: "user", content: "Check Tokyo weather" },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        {
+          id: "call_weather_chat",
+          type: "function",
+          function: {
+            name: "get_weather",
+            arguments: "{\"city\":\"Tokyo\"}",
+          },
+        },
+      ],
+    },
+  ]);
+  assert.equal(attrs["traceloop.span.kind"], undefined);
+});
