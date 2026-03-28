@@ -9,7 +9,11 @@ from respan_sdk import FilterParamDict
 from respan_tracing.constants.context_constants import (
     ENABLE_CONTENT_TRACING_KEY
 )
+from respan_tracing.constants.generic_constants import LOGGER_NAME_DECORATORS
+from respan_tracing.utils.logging import get_respan_logger
 from respan_tracing.utils.span_setup import setup_span, cleanup_span, LinksParam
+
+logger = get_respan_logger(LOGGER_NAME_DECORATORS)
 
 
 P = ParamSpec("P")
@@ -123,7 +127,7 @@ async def _ahandle_generator(span, ctx_token, async_generator):
 
 
 def create_entity_method(
-    name: Optional[str] = None,
+    name=None,
     version: Optional[int] = None,
     method_name: Optional[str] = None,
     span_kind: str = "task",
@@ -160,7 +164,7 @@ def create_entity_method(
 
 
 def _create_entity_method_decorator(
-    name: Optional[str] = None,
+    name=None,
     version: Optional[int] = None,
     span_kind: str = "task",
     processors=None,
@@ -168,16 +172,40 @@ def _create_entity_method_decorator(
     links: LinksParam = None,
     sample_rate: Optional[float] = None,
 ) -> Callable[[F], F]:
-    """Create method decorator"""
+    """Create method decorator.
+
+    Args:
+        name: Span name. Can be:
+            - str: static name used for all invocations
+            - callable: called with (*args, **kwargs) at each invocation,
+              must return a str. Useful for dynamic span names based on
+              runtime arguments (e.g., evaluator config).
+            - None: defaults to the decorated function's __name__
+    """
 
     def decorator(fn: F) -> F:
-        entity_name = name or fn.__name__
+        # Static name resolved once; callable resolved per-call below
+        is_name_callable = callable(name)
+        static_name = None if is_name_callable else (name or fn.__name__)
+
+        def _resolve_name(*args, **kwargs) -> str:
+            if is_name_callable:
+                try:
+                    return name(*args, **kwargs)
+                except Exception as e:
+                    logger.warning(
+                        f"Dynamic span name callable failed for {fn.__name__}: {e}. "
+                        f"Falling back to function name."
+                    )
+                    return fn.__name__
+            return static_name
 
         if _is_async_method(fn):
             if inspect.isasyncgenfunction(fn):
                 # Async generator
                 @wraps(fn)
                 async def async_gen_wrapper(*args: Any, **kwargs: Any) -> Any:
+                    entity_name = _resolve_name(*args, **kwargs)
                     span, ctx_token = _setup_span(
                         entity_name=entity_name,
                         span_kind=span_kind,
@@ -204,6 +232,7 @@ def _create_entity_method_decorator(
                 # Regular async function
                 @wraps(fn)
                 async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                    entity_name = _resolve_name(*args, **kwargs)
                     span, ctx_token = _setup_span(
                         entity_name=entity_name,
                         span_kind=span_kind,
@@ -231,6 +260,7 @@ def _create_entity_method_decorator(
             # Sync function
             @wraps(fn)
             def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+                entity_name = _resolve_name(*args, **kwargs)
                 span, ctx_token = _setup_span(
                     entity_name=entity_name,
                     span_kind=span_kind,
