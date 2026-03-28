@@ -10,7 +10,7 @@
  *
  * Arize direction (OpenLLMetry → OI)          | Our reverse (OI → OpenLLMetry)
  * ---------------------------------------------|------------------------------------------
- * traceloop.span.kind → openinference.span.kind | openinference.span.kind → traceloop.span.kind
+ * traceloop.span.kind → openinference.span.kind | openinference.span.kind → respan.log_type
  * traceloop.entity.input → input.value          | input.value → traceloop.entity.input
  * traceloop.entity.output → output.value        | output.value → traceloop.entity.output
  * gen_ai.prompt.N.* → llm.input_messages.N.*    | llm.input_messages.N.* → gen_ai.prompt.N.*
@@ -60,7 +60,6 @@ const OI_AGENT_NAME = "agent.name";
 // ---------------------------------------------------------------------------
 // OpenLLMetry wire-format attribute keys (not in SDK — mapping targets only)
 // ---------------------------------------------------------------------------
-const TL_SPAN_KIND = "traceloop.span.kind";
 const TL_ENTITY_NAME = "traceloop.entity.name";
 const TL_ENTITY_INPUT = "traceloop.entity.input";
 const TL_ENTITY_OUTPUT = "traceloop.entity.output";
@@ -79,6 +78,12 @@ const TL_FREQUENCY_PENALTY = "llm.frequency_penalty";
 const TL_PRESENCE_PENALTY = "llm.presence_penalty";
 const TL_PROVIDER_NAME = "gen_ai.provider.name";
 const TL_REQUEST_FUNCTIONS = "llm.request.functions";
+const CLAUDE_AGENT_SDK_SCOPE_NAME =
+  "@arizeai/openinference-instrumentation-claude-agent-sdk";
+const DIRECT_MODEL = "model";
+const DIRECT_PROMPT_TOKENS = "prompt_tokens";
+const DIRECT_COMPLETION_TOKENS = "completion_tokens";
+const DIRECT_TOTAL_REQUEST_TOKENS = "total_request_tokens";
 
 // ---------------------------------------------------------------------------
 // Span kind mapping: OpenInference → Traceloop (reverse of Arize)
@@ -199,6 +204,47 @@ function oiMessagesToOpenLLMetry(
 
     const content = raw.get("message.content");
     if (content !== undefined) attrs[`${target}.content`] = content;
+    else {
+      const contentBlocks = new Map<number, Map<string, any>>();
+
+      for (const [fieldKey, fieldVal] of raw) {
+        if (!fieldKey.startsWith("message.contents.")) continue;
+        const blockRest = fieldKey.slice("message.contents.".length);
+        const blockDotIdx = blockRest.indexOf(".");
+        if (blockDotIdx === -1) continue;
+
+        const blockIdxStr = blockRest.slice(0, blockDotIdx);
+        if (!/^\d+$/.test(blockIdxStr)) continue;
+
+        const blockIdx = parseInt(blockIdxStr, 10);
+        let blockField = blockRest.slice(blockDotIdx + 1);
+        if (blockField.startsWith("message_content.")) {
+          blockField = blockField.slice("message_content.".length);
+        }
+
+        if (!contentBlocks.has(blockIdx)) {
+          contentBlocks.set(blockIdx, new Map());
+        }
+        contentBlocks.get(blockIdx)!.set(blockField, fieldVal);
+      }
+
+      if (contentBlocks.size > 0) {
+        const orderedBlocks = [...contentBlocks.keys()]
+          .sort((a, b) => a - b)
+          .map((blockIdx) => Object.fromEntries(contentBlocks.get(blockIdx)!));
+
+        const textParts = orderedBlocks
+          .map((block) =>
+            typeof block.text === "string" ? block.text : undefined
+          )
+          .filter((part): part is string => part !== undefined);
+
+        attrs[`${target}.content`] =
+          textParts.length > 0 && textParts.length === orderedBlocks.length
+            ? textParts.join("\n")
+            : safeJsonStr(orderedBlocks);
+      }
+    }
 
     // Tool calls
     for (const [fieldKey, fieldVal] of raw) {
@@ -230,6 +276,70 @@ function setDefault(attrs: Record<string, any>, key: string, value: any): void {
   if (attrs[key] === undefined) attrs[key] = value;
 }
 
+function firstDefined<T>(...values: Array<T | undefined>): T | undefined {
+  for (const value of values) {
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
+function getInstrumentationScopeName(span: ReadableSpan): string {
+  return (
+    ((span as any).instrumentationScope?.name as string | undefined) ??
+    ((span as any).instrumentationLibrary?.name as string | undefined) ??
+    ""
+  );
+}
+
+function buildCleanedAttrs(
+  attrs: Record<string, any>,
+  exactKeys: Set<string>,
+  prefixes: string[],
+): Record<string, any> {
+  return Object.fromEntries(
+    Object.entries(attrs).filter(
+      ([key]) =>
+        !exactKeys.has(key) &&
+        !prefixes.some((prefix) => key.startsWith(prefix)),
+    ),
+  );
+}
+
+const REDUNDANT_OI_EXACT_KEYS = new Set([
+  OI_SPAN_KIND,
+  OI_INPUT_VALUE,
+  "input.mime_type",
+  OI_OUTPUT_VALUE,
+  "output.mime_type",
+  OI_LLM_MODEL_NAME,
+  OI_LLM_PROVIDER,
+  OI_LLM_SYSTEM,
+  OI_LLM_INVOCATION_PARAMETERS,
+  OI_LLM_TOKEN_COUNT_PROMPT,
+  OI_LLM_TOKEN_COUNT_COMPLETION,
+  OI_LLM_TOKEN_COUNT_TOTAL,
+  OI_LLM_TOKEN_COUNT_CACHE_READ,
+  OI_LLM_TOOLS,
+  OI_AGENT_NAME,
+]);
+
+const REDUNDANT_OI_PREFIXES = [
+  "llm.input_messages.",
+  "llm.output_messages.",
+  "llm.token_count.",
+];
+
+const REDUNDANT_OTEL_EXACT_KEYS = new Set([
+  "otel.scope.name",
+  "otel.scope.version",
+]);
+
+const REDUNDANT_OTEL_PREFIXES = [
+  "process.",
+  "host.",
+  "telemetry.sdk.",
+];
+
 // ---------------------------------------------------------------------------
 // Main processor
 // ---------------------------------------------------------------------------
@@ -241,7 +351,8 @@ function setDefault(attrs: Record<string, any>, key: string, value: any): void {
  * Traceloop attributes the Respan backend expects. All mappings are the exact
  * reverse of Arize's openinference-instrumentation-openllmetry.
  *
- * OI attributes are preserved (additive enrichment via setDefault, not destructive).
+ * After promotion, redundant raw OpenInference attributes are removed so they
+ * don't flood Respan metadata with duplicate information.
  */
 export class OpenInferenceTranslator implements SpanProcessor {
   onStart(_span: Span, _parentContext: Context): void {
@@ -256,13 +367,26 @@ export class OpenInferenceTranslator implements SpanProcessor {
     if (oiKind === undefined) return;
 
     const oiKindUpper = String(oiKind).toUpperCase();
+    const instrumentationScopeName = getInstrumentationScopeName(span);
 
-    // --- Span kind ---
-    setDefault(attrs, TL_SPAN_KIND, OI_KIND_TO_TRACELOOP[oiKindUpper] ?? "task");
+    // Do not set traceloop.span.kind for translated OpenInference spans.
+    // In Respan's composite processor that attribute is reserved for
+    // user-decorated spans and would incorrectly force auto spans to root.
     setDefault(attrs, RESPAN_LOG_TYPE, OI_KIND_TO_LOG_TYPE[oiKindUpper] ?? "task");
 
     if (OI_LLM_REQUEST_KINDS[oiKindUpper]) {
       setDefault(attrs, LLM_REQUEST_TYPE, OI_LLM_REQUEST_KINDS[oiKindUpper]);
+    }
+
+    // Claude Agent SDK currently emits AGENT spans with exact token counts but the
+    // current backend only preserves those typed token fields for chat/completion-
+    // shaped spans. Mark these specific Claude Agent SDK spans as chat requests for
+    // ingestion so token/model fields survive without affecting other agent SDKs.
+    if (
+      oiKindUpper === "AGENT" &&
+      instrumentationScopeName === CLAUDE_AGENT_SDK_SCOPE_NAME
+    ) {
+      setDefault(attrs, LLM_REQUEST_TYPE, RespanLogType.CHAT);
     }
 
     // --- Entity name ---
@@ -310,10 +434,52 @@ export class OpenInferenceTranslator implements SpanProcessor {
       setDefault(attrs, TL_USAGE_CACHE_READ, attrs[OI_LLM_TOKEN_COUNT_CACHE_READ]);
     }
 
+    // Direct overrides for Respan ingestion. These ensure non-chat OpenInference
+    // spans like AGENT still populate typed model/token columns even though the
+    // backend's generic span path only auto-promotes input/output.
+    const directModel = firstDefined(
+      attrs[GEN_AI_REQUEST_MODEL],
+      attrs[OI_LLM_MODEL_NAME],
+    );
+    if (directModel !== undefined) {
+      setDefault(attrs, DIRECT_MODEL, directModel);
+    }
+
+    const directPromptTokens = firstDefined(
+      attrs[GEN_AI_USAGE_PROMPT_TOKENS],
+      attrs[TL_USAGE_INPUT_TOKENS],
+      attrs[OI_LLM_TOKEN_COUNT_PROMPT],
+    );
+    if (directPromptTokens !== undefined) {
+      setDefault(attrs, DIRECT_PROMPT_TOKENS, directPromptTokens);
+    }
+
+    const directCompletionTokens = firstDefined(
+      attrs[GEN_AI_USAGE_COMPLETION_TOKENS],
+      attrs[TL_USAGE_OUTPUT_TOKENS],
+      attrs[OI_LLM_TOKEN_COUNT_COMPLETION],
+    );
+    if (directCompletionTokens !== undefined) {
+      setDefault(attrs, DIRECT_COMPLETION_TOKENS, directCompletionTokens);
+    }
+
+    const directTotalRequestTokens = firstDefined(
+      attrs[TL_USAGE_TOTAL_TOKENS],
+      attrs[OI_LLM_TOKEN_COUNT_TOTAL],
+      directPromptTokens !== undefined && directCompletionTokens !== undefined
+        ? Number(directPromptTokens) + Number(directCompletionTokens)
+        : undefined,
+    );
+    if (directTotalRequestTokens !== undefined) {
+      setDefault(attrs, DIRECT_TOTAL_REQUEST_TOKENS, directTotalRequestTokens);
+    }
+
     // --- LLM-specific: messages, invocation params, tools ---
     if (LLM_KINDS.has(oiKindUpper)) {
       this._translateLlm(attrs);
     }
+
+    this._cleanupTranslatedOiAttrs(span, attrs);
   }
 
   private _translateLlm(attrs: Record<string, any>): void {
@@ -336,6 +502,29 @@ export class OpenInferenceTranslator implements SpanProcessor {
     // Tools
     if (attrs[OI_LLM_TOOLS] !== undefined) {
       setDefault(attrs, TL_REQUEST_FUNCTIONS, attrs[OI_LLM_TOOLS]);
+    }
+  }
+
+  private _cleanupTranslatedOiAttrs(
+    span: ReadableSpan,
+    attrs: Record<string, any>,
+  ): void {
+    const withoutOiAttrs = buildCleanedAttrs(
+      attrs,
+      REDUNDANT_OI_EXACT_KEYS,
+      REDUNDANT_OI_PREFIXES,
+    );
+
+    const cleanedAttrs = buildCleanedAttrs(
+      withoutOiAttrs,
+      REDUNDANT_OTEL_EXACT_KEYS,
+      REDUNDANT_OTEL_PREFIXES,
+    );
+
+    (span as any).attributes = cleanedAttrs;
+
+    if ((span as any)._attributes && typeof (span as any)._attributes === "object") {
+      (span as any)._attributes = cleanedAttrs;
     }
   }
 

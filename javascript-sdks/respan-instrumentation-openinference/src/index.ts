@@ -1,7 +1,69 @@
 import { trace } from "@opentelemetry/api";
+import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import { OpenInferenceTranslator } from "./_translator.js";
 
 export { OpenInferenceTranslator } from "./_translator.js";
+
+const OI_SPAN_KIND_ATTR = "openinference.span.kind";
+const EMPTY_SCOPE_NAME = "";
+const OTEL_RESOURCE_NOISE_PREFIXES = [
+  "process.",
+  "host.",
+  "telemetry.sdk.",
+];
+
+function filterResourceAttributes(
+  attrs: Record<string, any> | undefined,
+): Record<string, any> | undefined {
+  if (!attrs) return attrs;
+
+  return Object.fromEntries(
+    Object.entries(attrs).filter(
+      ([key]) =>
+        !OTEL_RESOURCE_NOISE_PREFIXES.some((prefix) => key.startsWith(prefix)),
+    ),
+  );
+}
+
+function sanitizeTranslatedSpanForExport(span: ReadableSpan): ReadableSpan {
+  const clonedSpan = Object.assign(
+    Object.create(Object.getPrototypeOf(span)),
+    span,
+  ) as ReadableSpan & {
+    resource?: { attributes?: Record<string, any> };
+    instrumentationLibrary?: { name?: string; version?: string };
+    instrumentationScope?: { name?: string; version?: string };
+  };
+
+  const resource = (span as any).resource;
+  const filteredResourceAttrs = filterResourceAttributes(resource?.attributes);
+  if (resource && filteredResourceAttrs) {
+    clonedSpan.resource = {
+      ...resource,
+      attributes: filteredResourceAttrs,
+    };
+  }
+
+  const instrumentationLibrary = (span as any).instrumentationLibrary;
+  if (instrumentationLibrary) {
+    clonedSpan.instrumentationLibrary = {
+      ...instrumentationLibrary,
+      name: EMPTY_SCOPE_NAME,
+      version: EMPTY_SCOPE_NAME,
+    };
+  }
+
+  const instrumentationScope = (span as any).instrumentationScope;
+  if (instrumentationScope) {
+    clonedSpan.instrumentationScope = {
+      ...instrumentationScope,
+      name: EMPTY_SCOPE_NAME,
+      version: EMPTY_SCOPE_NAME,
+    };
+  }
+
+  return clonedSpan;
+}
 
 /**
  * Generic Respan instrumentation wrapper for any OpenInference instrumentor.
@@ -13,8 +75,10 @@ export { OpenInferenceTranslator } from "./_translator.js";
  *
  * This wrapper detects the interface and handles both patterns.
  *
- * Automatically registers an {@link OpenInferenceTranslator} SpanProcessor that
- * converts OI span attributes to OpenLLMetry/Traceloop format before export.
+ * Automatically ensures the {@link OpenInferenceTranslator} runs before the
+ * active Respan processor exports the span. This keeps the translation logic
+ * in the OpenInference package while still allowing the core Respan pipeline
+ * to see the translated attributes.
  *
  * ```typescript
  * import { Respan } from "@respan/respan";
@@ -33,9 +97,13 @@ export class OpenInferenceInstrumentor {
   private _instrumentor: any = null;
   private _isInstrumented = false;
   private _isSpanProcessor = false;
+  private _ownsTranslatorHook = false;
 
-  /** Class-level flag: only register the translator once across all instances */
-  private static _translatorRegistered = false;
+  private static _translator = new OpenInferenceTranslator();
+  private static _translatorHookRefCount = 0;
+  private static _patchedProcessor: any = null;
+  private static _originalOnEnd: ((span: ReadableSpan) => void) | null = null;
+  private static _wrappedOnEnd: ((span: ReadableSpan) => void) | null = null;
 
   private _sdkModule: any;
 
@@ -51,15 +119,82 @@ export class OpenInferenceInstrumentor {
     this.name = `openinference-${instrumentorClass.name || "unknown"}`;
   }
 
+  private static _getActiveSpanProcessor(): any {
+    const tracerProvider = trace.getTracerProvider() as any;
+    return (
+      tracerProvider?.activeSpanProcessor ??
+      tracerProvider?._delegate?.activeSpanProcessor ??
+      tracerProvider?._delegate?._tracerProvider?.activeSpanProcessor
+    );
+  }
+
+  private static _installTranslatorHook(): void {
+    const processor = OpenInferenceInstrumentor._getActiveSpanProcessor();
+    if (!processor || typeof processor.onEnd !== "function") {
+      return;
+    }
+
+    if (OpenInferenceInstrumentor._patchedProcessor === processor) {
+      return;
+    }
+
+    if (
+      OpenInferenceInstrumentor._patchedProcessor &&
+      OpenInferenceInstrumentor._originalOnEnd
+    ) {
+      if (
+        !OpenInferenceInstrumentor._wrappedOnEnd ||
+        OpenInferenceInstrumentor._patchedProcessor.onEnd ===
+          OpenInferenceInstrumentor._wrappedOnEnd
+      ) {
+        OpenInferenceInstrumentor._patchedProcessor.onEnd =
+          OpenInferenceInstrumentor._originalOnEnd;
+      }
+    }
+
+    const originalOnEnd = processor.onEnd.bind(processor);
+    const wrappedOnEnd = (span: ReadableSpan) => {
+      const isOpenInferenceSpan =
+        (span as any).attributes?.[OI_SPAN_KIND_ATTR] !== undefined;
+
+      try {
+        OpenInferenceInstrumentor._translator.onEnd(span);
+      } catch {
+        // Never block export if translation hits an unexpected span shape.
+      }
+
+      return originalOnEnd(
+        isOpenInferenceSpan ? sanitizeTranslatedSpanForExport(span) : span,
+      );
+    };
+    processor.onEnd = wrappedOnEnd;
+
+    OpenInferenceInstrumentor._patchedProcessor = processor;
+    OpenInferenceInstrumentor._originalOnEnd = originalOnEnd;
+    OpenInferenceInstrumentor._wrappedOnEnd = wrappedOnEnd;
+  }
+
+  private static _removeTranslatorHook(): void {
+    if (
+      OpenInferenceInstrumentor._patchedProcessor &&
+      OpenInferenceInstrumentor._originalOnEnd &&
+      (
+        !OpenInferenceInstrumentor._wrappedOnEnd ||
+        OpenInferenceInstrumentor._patchedProcessor.onEnd ===
+          OpenInferenceInstrumentor._wrappedOnEnd
+      )
+    ) {
+      OpenInferenceInstrumentor._patchedProcessor.onEnd =
+        OpenInferenceInstrumentor._originalOnEnd;
+    }
+    OpenInferenceInstrumentor._patchedProcessor = null;
+    OpenInferenceInstrumentor._originalOnEnd = null;
+    OpenInferenceInstrumentor._wrappedOnEnd = null;
+  }
+
   activate(): void {
     this._instrumentor = new this._instrumentorClass();
     const tp = trace.getTracerProvider();
-
-    // Register the OI → OpenLLMetry translator once
-    if (!OpenInferenceInstrumentor._translatorRegistered && tp && typeof (tp as any).addSpanProcessor === "function") {
-      (tp as any).addSpanProcessor(new OpenInferenceTranslator());
-      OpenInferenceInstrumentor._translatorRegistered = true;
-    }
 
     // Set tracer provider if the instrumentor supports it
     if (typeof this._instrumentor.setTracerProvider === "function") {
@@ -79,6 +214,13 @@ export class OpenInferenceInstrumentor {
       (tp as any).addSpanProcessor(this._instrumentor);
       this._isSpanProcessor = true;
     }
+
+    OpenInferenceInstrumentor._installTranslatorHook();
+    if (!this._ownsTranslatorHook) {
+      OpenInferenceInstrumentor._translatorHookRefCount += 1;
+      this._ownsTranslatorHook = true;
+    }
+
     this._isInstrumented = true;
   }
 
@@ -94,6 +236,18 @@ export class OpenInferenceInstrumentor {
         /* ignore */
       }
       this._isInstrumented = false;
+    }
+
+    if (this._ownsTranslatorHook) {
+      OpenInferenceInstrumentor._translatorHookRefCount = Math.max(
+        0,
+        OpenInferenceInstrumentor._translatorHookRefCount - 1
+      );
+      this._ownsTranslatorHook = false;
+    }
+
+    if (OpenInferenceInstrumentor._translatorHookRefCount === 0) {
+      OpenInferenceInstrumentor._removeTranslatorHook();
     }
   }
 }
