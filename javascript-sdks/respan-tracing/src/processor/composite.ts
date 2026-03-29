@@ -124,12 +124,9 @@ export class RespanCompositeProcessor implements SpanProcessor {
       span.attributes[RespanSpanAttributes.GEN_AI_REQUEST_MODEL] !== undefined ||
       LLM_SPAN_NAME_PATTERNS.some((pattern) => span.name.includes(pattern));
 
-    // Strip traceloop entity name/path from metadata (routing attrs, not user-facing).
-    // Keep TRACELOOP_SPAN_KIND — backend needs it to determine log_type.
-    if (attrs) {
-      delete attrs[SpanAttributes.TRACELOOP_ENTITY_NAME];
-      delete attrs[SpanAttributes.TRACELOOP_ENTITY_PATH];
-    }
+    // Note: traceloop.entity.name and traceloop.entity.path are kept — they may be
+    // needed by the backend (e.g. for logBatchResults, OpenAI Agents). Individual
+    // instrumentation translators (Vercel, OpenInference) strip them if not needed.
 
     // Filter: only process spans that are user-decorated, within entity context, or LLM calls
     if (spanKind) {

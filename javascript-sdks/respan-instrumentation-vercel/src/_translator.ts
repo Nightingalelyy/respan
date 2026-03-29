@@ -39,7 +39,6 @@ const CUSTOMER_ID = RespanSpanAttributes.RESPAN_CUSTOMER_PARAMS_ID;
 const CUSTOMER_EMAIL = RespanSpanAttributes.RESPAN_CUSTOMER_PARAMS_EMAIL;
 const CUSTOMER_NAME = RespanSpanAttributes.RESPAN_CUSTOMER_PARAMS_NAME;
 const THREAD_ID = RespanSpanAttributes.RESPAN_THREADS_ID;
-const RESPAN_ENVIRONMENT = RespanSpanAttributes.RESPAN_ENVIRONMENT;
 
 // Traceloop wire-format keys
 const TL_SPAN_KIND = "traceloop.span.kind";
@@ -430,8 +429,6 @@ function enrichMetadata(attrs: Record<string, any>, spanName: string): void {
     }
   }
 
-  // Always include span_type in metadata for context
-  setDefault(attrs, "respan.metadata.span_type", spanName);
 }
 
 // ── Token count normalization ────────────────────────────────────────────────
@@ -500,10 +497,6 @@ function enrichPerformanceMetrics(attrs: Record<string, any>, spanName: string):
     setDefault(attrs, "respan.metadata.type", String(type));
   }
 
-  // Environment
-  if (typeof process !== "undefined" && process.env) {
-    setDefault(attrs, RESPAN_ENVIRONMENT, process.env.NODE_ENV || "prod");
-  }
 }
 
 // ── Cleanup: strip redundant Vercel attrs after translation ──────────────────
@@ -559,12 +552,11 @@ const VERCEL_ATTRS_TO_STRIP = [
   "gen_ai.usage.output_tokens",
   "gen_ai.system",
 
-  // ── Traceloop/Respan internal routing attrs (not user-facing) ──────────
-  // Keep traceloop.span.kind and respan.entity.log_type — backend needs them for log_type.
+  // ── Traceloop routing attrs (Vercel-specific, not user-facing) ──────────
+  // Keep traceloop.span.kind and respan.entity.log_type — backend needs them.
+  // Keep respan.environment — may be set by user via propagateAttributes().
   "traceloop.entity.name",
   "traceloop.entity.path",
-  "respan.environment",
-  "respan.metadata.span_type",
 
   // ── OTEL resource / process noise (no user value in metadata) ──────────
   "service.name",
