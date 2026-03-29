@@ -39,6 +39,7 @@ const CUSTOMER_ID = RespanSpanAttributes.RESPAN_CUSTOMER_PARAMS_ID;
 const CUSTOMER_EMAIL = RespanSpanAttributes.RESPAN_CUSTOMER_PARAMS_EMAIL;
 const CUSTOMER_NAME = RespanSpanAttributes.RESPAN_CUSTOMER_PARAMS_NAME;
 const THREAD_ID = RespanSpanAttributes.RESPAN_THREADS_ID;
+const TRACE_GROUP_ID = RespanSpanAttributes.RESPAN_TRACE_GROUP_ID;
 const RESPAN_SPAN_TOOLS = RespanSpanAttributes.RESPAN_SPAN_TOOLS;
 const RESPAN_METADATA_AGENT_NAME = RespanSpanAttributes.RESPAN_METADATA_AGENT_NAME;
 const RESPAN_METADATA_PREFIX = RespanSpanAttributes.RESPAN_METADATA; // "respan.metadata"
@@ -84,16 +85,20 @@ function safeJsonParse(value: unknown): unknown {
 
 /**
  * Detect whether a span is from the Vercel AI SDK.
- * Checks for the ai.sdk attribute, an ai.* span name, or ai./gen_ai. attribute keys.
- * Matches the exporter's isAiSdkSpan() for full backward compatibility.
+ *
+ * Primary check: instrumentation scope name === "ai" (set by the Vercel AI SDK).
+ * Fallback: ai.sdk attribute or ai.* span name.
+ *
+ * Does NOT match on gen_ai.* attributes alone — those may come from other
+ * instrumentations (OpenInference, Traceloop) and must not be stripped.
  */
-function isVercelAISpan(span: { name: string; attributes: Record<string, any> }): boolean {
+function isVercelAISpan(span: ReadableSpan): boolean {
+  // Primary: check OTEL instrumentation scope (most reliable, no false positives)
+  if (span.instrumentationLibrary?.name === "ai") return true;
+  // Fallback: explicit Vercel marker or span name convention
   if (span.attributes["ai.sdk"] !== undefined) return true;
   if (span.name.startsWith("ai.")) return true;
-  // Fallback: check for any ai.* or gen_ai.* attribute key
-  return Object.keys(span.attributes).some(
-    (key) => key.startsWith("ai.") || key.startsWith("gen_ai.")
-  );
+  return false;
 }
 
 // ── Log type detection (with operationId + attribute fallbacks) ──────────────
@@ -407,6 +412,9 @@ function enrichMetadata(attrs: Record<string, any>, spanName: string): void {
       case "thread_identifier":
         setDefault(attrs, THREAD_ID, String(value));
         break;
+      case "trace_group_identifier":
+        setDefault(attrs, TRACE_GROUP_ID, String(value));
+        break;
       case "customer_params": {
         // customer_params can be a JSON object with all three fields
         try {
@@ -663,8 +671,6 @@ export class VercelAITranslator implements SpanProcessor {
     // ── Parent wrapper spans: minimal enrichment only ─────────────────────
     if (parentLogType !== undefined && !config) {
       setDefault(attrs, RESPAN_LOG_TYPE, logType);
-      setDefault(attrs, TL_ENTITY_NAME, name);
-      setDefault(attrs, TL_ENTITY_PATH, name);
       stripRedundantAttrs(attrs);
       return;
     }
@@ -676,9 +682,6 @@ export class VercelAITranslator implements SpanProcessor {
 
     if (config) {
       setDefault(attrs, TL_SPAN_KIND, config.kind);
-      setDefault(attrs, TL_ENTITY_NAME, name);
-      // Non-empty path = child span (prevents root promotion by CompositeProcessor)
-      setDefault(attrs, TL_ENTITY_PATH, config.kind === RespanLogType.WORKFLOW ? "" : name);
 
       // LLM-specific enrichment
       if (config.isLLM) {
@@ -728,9 +731,7 @@ export class VercelAITranslator implements SpanProcessor {
         setDefault(attrs, RESPAN_METADATA_AGENT_NAME, String(agentName));
       }
     } else {
-      // Unknown ai.* span — set basic attributes with fallback-resolved type
-      setDefault(attrs, TL_ENTITY_NAME, name);
-      setDefault(attrs, TL_ENTITY_PATH, name);
+      // Unknown ai.* span — enrich with fallback-resolved type
 
       // If fallback detected it as an LLM span, add model + tokens
       if (logType === RespanLogType.TEXT || logType === RespanLogType.EMBEDDING) {

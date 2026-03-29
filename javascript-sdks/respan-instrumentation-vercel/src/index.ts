@@ -53,7 +53,8 @@ export class VercelAIInstrumentor {
   }
 
   deactivate(): void {
-    // The translator processor is managed by the TracerProvider lifecycle.
-    // No explicit cleanup needed — it shuts down with the SDK.
+    // Reset static flag so a subsequent initialize() can re-register.
+    // The old translator processor is torn down with the TracerProvider.
+    VercelAIInstrumentor._translatorRegistered = false;
   }
 }
