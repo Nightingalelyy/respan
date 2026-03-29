@@ -47,6 +47,12 @@ export class VercelAIInstrumentor {
       null;
 
     if (provider) {
+      // NOTE: The translator is registered AFTER CompositeProcessor (which was
+      // added during startTracing). This means CompositeProcessor.onEnd routes
+      // spans to BatchSpanProcessor before our onEnd enriches them. This works
+      // because BatchSpanProcessor holds span references and exports async —
+      // our enrichment completes before the next batch flush. If SimpleSpanProcessor
+      // is ever used, the translator would need to be registered first.
       provider.addSpanProcessor(new VercelAITranslator());
       VercelAIInstrumentor._translatorRegistered = true;
     }
