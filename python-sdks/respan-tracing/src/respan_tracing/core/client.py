@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from respan_tracing.core.tracer import RespanTracer
 from respan_tracing.processors import SpanBuffer
+from respan_tracing.processors.base import _active_span_buffer
 from respan_tracing.utils.logging import get_respan_logger
 from respan_tracing.utils.span_setup import setup_span, cleanup_span, LinksParam
 
@@ -361,6 +362,16 @@ class RespanClient:
         """
         if not self._tracer.is_enabled or not RespanTracer.is_initialized():
             logger.warning("Respan Telemetry not initialized or disabled.")
+            yield None
+            return
+
+        # Continuation mode: when inside a SpanBuffer with a parent span,
+        # skip creating wrapper spans — the parent already exists. Child spans
+        # (from @task/@workflow decorators via setup_span) attach directly to
+        # the parent context. Only client.start_span() is affected — decorators
+        # use setup_span() directly and are not skipped.
+        active_buffer = _active_span_buffer.get(None)
+        if active_buffer and active_buffer._parent_span_id:
             yield None
             return
 
