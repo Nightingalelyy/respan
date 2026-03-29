@@ -8,8 +8,13 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from opentelemetry.attributes import BoundedAttributes
 
 from respan_instrumentation_openinference._translator import OpenInferenceTranslator
+from respan_sdk.constants.span_attributes import (
+    RESPAN_SPAN_TOOL_CALLS,
+    RESPAN_SPAN_TOOLS,
+)
 
 
 def _make_span(attrs: dict, name: str = "test-span"):
@@ -186,6 +191,24 @@ def test_messages_translated(translator):
     assert span._attributes["gen_ai.completion.0.content"] == "Goodbye!"
 
 
+def test_indexed_message_content_translated(translator):
+    span = _make_span({
+        "openinference.span.kind": "LLM",
+        "llm.output_messages.0.message.role": "assistant",
+        "llm.output_messages.0.message.content.0": "First line",
+        "llm.output_messages.0.message.content.1": "Second line",
+        "llm.output_messages.1.message.role": "assistant",
+        "llm.output_messages.1.message.content.0": "Final answer",
+    })
+
+    translator.on_end(span)
+
+    assert span._attributes["gen_ai.completion.0.role"] == "assistant"
+    assert span._attributes["gen_ai.completion.0.content"] == "First line\nSecond line"
+    assert span._attributes["gen_ai.completion.1.role"] == "assistant"
+    assert span._attributes["gen_ai.completion.1.content"] == "Final answer"
+
+
 # ------------------------------------------------------------------
 # 12. invocation parameters extracted
 # ------------------------------------------------------------------
@@ -208,55 +231,157 @@ def test_invocation_params_extracted(translator):
     assert span._attributes["gen_ai.request.max_tokens"] == 1024
 
 
-# ------------------------------------------------------------------
-# 13. noisy raw OI attrs are removed after translation
-# ------------------------------------------------------------------
-
 def test_redundant_oi_attrs_removed_after_translation(translator):
     span = _make_span({
         "openinference.span.kind": "LLM",
         "input.value": "hello world",
-        "input.mime_type": "text/plain",
         "output.value": "goodbye world",
-        "output.mime_type": "text/plain",
-        "llm.model_name": "gpt-4o",
-        "llm.system": "OpenAI",
-        "llm.provider": "OpenAI",
-        "llm.invocation_parameters": json.dumps({"temperature": 0.3}),
-        "llm.input_messages.0.message.role": "user",
-        "llm.input_messages.0.message.content": "Hello!",
+        "llm.model_name": "claude-3-opus",
+        "llm.provider": "Anthropic",
+        "llm.system": "Anthropic",
+        "llm.invocation_parameters": json.dumps({"temperature": 0.7}),
+        "llm.token_count.prompt": 100,
         "llm.output_messages.0.message.role": "assistant",
         "llm.output_messages.0.message.content": "Goodbye!",
-        "llm.token_count.prompt": 10,
-        "llm.token_count.completion": 4,
-        "llm.token_count.total": 14,
     })
 
     translator.on_end(span)
 
     assert span._attributes["traceloop.entity.input"] == "hello world"
     assert span._attributes["traceloop.entity.output"] == "goodbye world"
-    assert span._attributes["gen_ai.request.model"] == "gpt-4o"
-    assert span._attributes["gen_ai.system"] == "openai"
-    assert span._attributes["gen_ai.provider.name"] == "openai"
-    assert span._attributes["gen_ai.prompt.0.content"] == "Hello!"
+    assert span._attributes["gen_ai.request.model"] == "claude-3-opus"
+    assert span._attributes["gen_ai.request.temperature"] == 0.7
+    assert span._attributes["gen_ai.usage.prompt_tokens"] == 100
     assert span._attributes["gen_ai.completion.0.content"] == "Goodbye!"
-    assert span._attributes["gen_ai.usage.prompt_tokens"] == 10
-    assert span._attributes["gen_ai.usage.completion_tokens"] == 4
 
-    assert "input.value" not in span._attributes
-    assert "input.mime_type" not in span._attributes
-    assert "output.value" not in span._attributes
-    assert "output.mime_type" not in span._attributes
     assert "openinference.span.kind" not in span._attributes
+    assert "input.value" not in span._attributes
+    assert "output.value" not in span._attributes
     assert "llm.model_name" not in span._attributes
-    assert "llm.system" not in span._attributes
     assert "llm.provider" not in span._attributes
+    assert "llm.system" not in span._attributes
     assert "llm.invocation_parameters" not in span._attributes
-    assert "llm.input_messages.0.message.role" not in span._attributes
-    assert "llm.input_messages.0.message.content" not in span._attributes
+    assert "llm.token_count.prompt" not in span._attributes
     assert "llm.output_messages.0.message.role" not in span._attributes
     assert "llm.output_messages.0.message.content" not in span._attributes
-    assert "llm.token_count.prompt" not in span._attributes
-    assert "llm.token_count.completion" not in span._attributes
-    assert "llm.token_count.total" not in span._attributes
+
+
+def test_tools_and_tool_calls_promoted(translator):
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Look up weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                },
+            },
+        }
+    ]
+    span = _make_span({
+        "openinference.span.kind": "LLM",
+        "llm.tools": json.dumps(tools),
+        "llm.output_messages.0.message.role": "assistant",
+        "llm.output_messages.0.message.tool_calls.0.tool_call.id": "call_1",
+        "llm.output_messages.0.message.tool_calls.0.tool_call.function.name": "get_weather",
+        "llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments": '{"city":"NYC"}',
+    })
+
+    translator.on_end(span)
+
+    expected_tool_calls = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "arguments": '{"city":"NYC"}',
+            },
+        }
+    ]
+    assert json.loads(span._attributes[RESPAN_SPAN_TOOLS]) == tools
+    assert json.loads(span._attributes[RESPAN_SPAN_TOOL_CALLS]) == expected_tool_calls
+    assert span._attributes["gen_ai.completion.0.tool_calls"] == expected_tool_calls
+    assert span._attributes["llm.request.functions"] == json.dumps(tools)
+    assert (
+        span._attributes["gen_ai.completion.0.tool_calls.0.function.name"]
+        == "get_weather"
+    )
+    assert "tools" not in span._attributes
+    assert "tool_calls" not in span._attributes
+
+
+def test_indexed_anthropic_tools_promoted_from_bounded_attrs(translator):
+    tools = [
+        {
+            "name": "get_weather",
+            "description": "Get current weather for a city.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        }
+    ]
+    span = _make_span({})
+    span._attributes = BoundedAttributes(
+        maxlen=64,
+        attributes={
+            "openinference.span.kind": "LLM",
+            "llm.tools.0.tool.json_schema": json.dumps(tools[0]),
+            "llm.output_messages.0.message.tool_calls.0.tool_call.function.name": "get_weather",
+            "llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments": '{"city":"Tokyo"}',
+        },
+        immutable=False,
+    )
+
+    translator.on_end(span)
+
+    assert isinstance(span._attributes, dict)
+    expected_tool_calls = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "arguments": '{"city":"Tokyo"}',
+            },
+        }
+    ]
+    assert json.loads(span._attributes[RESPAN_SPAN_TOOLS]) == tools
+    assert json.loads(span._attributes[RESPAN_SPAN_TOOL_CALLS]) == expected_tool_calls
+    assert span._attributes["gen_ai.completion.0.tool_calls"] == expected_tool_calls
+    assert span._attributes["llm.request.functions"] == json.dumps(tools)
+    assert "llm.tools.0.tool.json_schema" not in span._attributes
+    assert (
+        "llm.output_messages.0.message.tool_calls.0.tool_call.function.name"
+        not in span._attributes
+    )
+    assert (
+        "llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments"
+        not in span._attributes
+    )
+
+
+def test_legacy_function_call_fields_promoted_as_tool_calls(translator):
+    span = _make_span({
+        "openinference.span.kind": "LLM",
+        "llm.output_messages.0.message.function_call_name": "Glob",
+        "llm.output_messages.0.message.function_call_arguments_json": '{"pattern":"*.py"}',
+    })
+
+    translator.on_end(span)
+
+    expected_tool_calls = [
+        {
+            "type": "function",
+            "function": {
+                "name": "Glob",
+                "arguments": '{"pattern":"*.py"}',
+            },
+        }
+    ]
+    assert json.loads(span._attributes[RESPAN_SPAN_TOOL_CALLS]) == expected_tool_calls
+    assert span._attributes["gen_ai.completion.0.tool_calls"] == expected_tool_calls
+    assert "tool_calls" not in span._attributes

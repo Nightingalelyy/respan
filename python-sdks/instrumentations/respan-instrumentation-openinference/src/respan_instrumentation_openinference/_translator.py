@@ -40,7 +40,7 @@ References:
 import json
 import logging
 from collections import defaultdict
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from opentelemetry.sdk.trace import SpanProcessor, ReadableSpan
 from opentelemetry.semconv_ai import SpanAttributes as TLSpanAttributes
@@ -54,6 +54,8 @@ from respan_sdk.constants.span_attributes import (
     LLM_USAGE_PROMPT_TOKENS,
     OPENINFERENCE_SPAN_KIND,
     RESPAN_LOG_TYPE,
+    RESPAN_SPAN_TOOL_CALLS,
+    RESPAN_SPAN_TOOLS,
 )
 from respan_sdk.constants.llm_logging import (
     LOG_TYPE_AGENT,
@@ -188,6 +190,208 @@ def _parse_json(value: Any) -> Any:
         return value
 
 
+def _collect_oi_message_buckets(
+    attrs: Dict[str, Any],
+    oi_prefix: str,
+) -> Dict[int, Dict[str, Any]]:
+    """Group indexed OI message attributes by message index."""
+    buckets: Dict[int, Dict[str, Any]] = defaultdict(dict)
+
+    for key, val in attrs.items():
+        if not key.startswith(oi_prefix):
+            continue
+        rest = key[len(oi_prefix):]
+        parts = rest.split(".", 1)
+        if not parts[0].isdigit():
+            continue
+        idx = int(parts[0])
+        field = parts[1] if len(parts) > 1 else ""
+        buckets[idx][field] = val
+
+    return buckets
+
+
+def _normalize_structured_list(value: Any) -> List[Dict[str, Any]] | None:
+    """Parse a JSON string or structured object into a list of dicts."""
+    parsed = _parse_json(value)
+    if isinstance(parsed, list):
+        normalized = [item for item in parsed if isinstance(item, dict)]
+        return normalized or None
+    if isinstance(parsed, dict):
+        return [parsed]
+    return None
+
+
+def _set_nested_value(target: Dict[str, Any], dotted_path: str, value: Any) -> None:
+    """Assign a nested dict field from a dotted path."""
+    parts = dotted_path.split(".")
+    cursor = target
+    for part in parts[:-1]:
+        current = cursor.get(part)
+        if not isinstance(current, dict):
+            current = {}
+            cursor[part] = current
+        cursor = current
+    cursor[parts[-1]] = value
+
+
+def _extract_tool_calls_from_buckets(
+    buckets: Dict[int, Dict[str, Any]],
+) -> List[Dict[str, Any]] | None:
+    """Rebuild direct tool_calls payloads from indexed OI message attrs."""
+    result: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for idx in sorted(buckets):
+        raw = buckets[idx]
+        tool_call_buckets: Dict[int, Dict[str, Any]] = defaultdict(dict)
+
+        for field_key, field_val in raw.items():
+            if not field_key.startswith("message.tool_calls."):
+                continue
+            rest = field_key[len("message.tool_calls."):]
+            parts = rest.split(".", 1)
+            if not parts[0].isdigit() or len(parts) == 1:
+                continue
+            tc_idx = int(parts[0])
+            tc_field = parts[1]
+            if tc_field.startswith("tool_call."):
+                tc_field = tc_field[len("tool_call."):]
+            tool_call_buckets[tc_idx][tc_field] = field_val
+
+        for tc_idx in sorted(tool_call_buckets):
+            tool_call: Dict[str, Any] = {}
+            for field_key, field_val in tool_call_buckets[tc_idx].items():
+                _set_nested_value(tool_call, field_key, field_val)
+            if "function" in tool_call and "type" not in tool_call:
+                tool_call["type"] = "function"
+            if not tool_call:
+                continue
+            signature = _safe_json_str(tool_call)
+            if signature not in seen:
+                seen.add(signature)
+                result.append(tool_call)
+
+        func_name = raw.get("message.function_call_name")
+        func_args = raw.get("message.function_call_arguments_json")
+        if func_name is None and func_args is None:
+            continue
+
+        legacy_tool_call: Dict[str, Any] = {
+            "type": "function",
+            "function": {},
+        }
+        if func_name is not None:
+            legacy_tool_call["function"]["name"] = func_name
+        if func_args is not None:
+            legacy_tool_call["function"]["arguments"] = func_args
+        if not legacy_tool_call["function"]:
+            continue
+        signature = _safe_json_str(legacy_tool_call)
+        if signature not in seen:
+            seen.add(signature)
+            result.append(legacy_tool_call)
+
+    return result or None
+
+
+def _extract_message_content(raw: Dict[str, Any]) -> Any:
+    """Rebuild message content from scalar or indexed OpenInference fields."""
+    content = raw.get("message.content")
+    if content is not None:
+        return content
+
+    indexed_content: List[tuple[int, Any]] = []
+    for field_key, field_val in raw.items():
+        if not field_key.startswith("message.content."):
+            continue
+        idx_str = field_key[len("message.content."):]
+        if not idx_str.isdigit():
+            continue
+        indexed_content.append((int(idx_str), field_val))
+
+    if not indexed_content:
+        return None
+
+    ordered_values = [value for _, value in sorted(indexed_content)]
+    if len(ordered_values) == 1:
+        return ordered_values[0]
+    if all(isinstance(value, str) for value in ordered_values):
+        return "\n".join(value for value in ordered_values if value)
+    return ordered_values
+
+
+def _extract_tool_calls(
+    attrs: Dict[str, Any],
+    oi_prefixes: List[str],
+) -> List[Dict[str, Any]] | None:
+    """Collect unique tool calls across one or more indexed OI message groups."""
+    result: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for prefix in oi_prefixes:
+        tool_calls = _extract_tool_calls_from_buckets(
+            _collect_oi_message_buckets(attrs=attrs, oi_prefix=prefix)
+        )
+        if not tool_calls:
+            continue
+        for tool_call in tool_calls:
+            signature = _safe_json_str(tool_call)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            result.append(tool_call)
+
+    return result or None
+
+
+def _extract_tools_from_indexed_attrs(
+    attrs: Dict[str, Any],
+) -> List[Dict[str, Any]] | None:
+    """Rebuild tool definitions from indexed OI llm.tools.N.tool.* attributes."""
+    buckets = _collect_oi_message_buckets(attrs=attrs, oi_prefix="llm.tools.")
+    result: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for idx in sorted(buckets):
+        raw = buckets[idx]
+        tool: Dict[str, Any] = {}
+
+        json_schema = raw.get("tool.json_schema")
+        if json_schema is not None:
+            parsed_json_schema = _parse_json(json_schema)
+            if isinstance(parsed_json_schema, dict):
+                tool.update(parsed_json_schema)
+            else:
+                tool["json_schema"] = parsed_json_schema
+
+        for field_key, field_val in raw.items():
+            if field_key == "tool.json_schema":
+                continue
+            normalized_key = (
+                field_key[len("tool."):]
+                if field_key.startswith("tool.")
+                else field_key
+            )
+            _set_nested_value(
+                target=tool,
+                dotted_path=normalized_key,
+                value=_parse_json(field_val),
+            )
+
+        if "tool" in tool and len(tool) == 1 and isinstance(tool["tool"], dict):
+            tool = tool["tool"]
+        if not tool:
+            continue
+
+        signature = _safe_json_str(tool)
+        if signature not in seen:
+            seen.add(signature)
+            result.append(tool)
+
+    return result or None
+
+
 def _oi_messages_to_openllmetry(
     attrs: Dict[str, Any],
     oi_prefix: str,
@@ -212,18 +416,7 @@ def _oi_messages_to_openllmetry(
         gen_ai.prompt.0.tool_calls.0.function.name = "get_weather"
         gen_ai.prompt.0.tool_calls.0.function.arguments = '{"city":"NYC"}'
     """
-    buckets: Dict[int, Dict[str, Any]] = defaultdict(dict)
-
-    for key, val in attrs.items():
-        if not key.startswith(oi_prefix):
-            continue
-        rest = key[len(oi_prefix):]
-        parts = rest.split(".", 1)
-        if not parts[0].isdigit():
-            continue
-        idx = int(parts[0])
-        field = parts[1] if len(parts) > 1 else ""
-        buckets[idx][field] = val
+    buckets = _collect_oi_message_buckets(attrs=attrs, oi_prefix=oi_prefix)
 
     for idx in sorted(buckets):
         raw = buckets[idx]
@@ -234,8 +427,8 @@ def _oi_messages_to_openllmetry(
         if role:
             attrs[f"{target}.role"] = role
 
-        # message.content → gen_ai.prompt.N.content
-        content = raw.get("message.content")
+        # message.content / message.content.K → gen_ai.prompt.N.content
+        content = _extract_message_content(raw)
         if content is not None:
             attrs[f"{target}.content"] = content
 
@@ -251,6 +444,10 @@ def _oi_messages_to_openllmetry(
                     if tc_field.startswith("tool_call."):
                         tc_field = tc_field[len("tool_call."):]
                     attrs[f"{target}.tool_calls.{tc_idx}.{tc_field}"] = field_val
+
+        structured_tool_calls = _extract_tool_calls_from_buckets({idx: raw})
+        if structured_tool_calls:
+            attrs.setdefault(f"{target}.tool_calls", structured_tool_calls)
 
         # message.function_call_name → gen_ai.prompt.N.function_call.name
         func_name = raw.get("message.function_call_name")
@@ -287,9 +484,10 @@ class OpenInferenceTranslator(SpanProcessor):
         pass
 
     def on_end(self, span: ReadableSpan) -> None:
-        attrs = getattr(span, "_attributes", None)
-        if attrs is None:
+        original_attrs = getattr(span, "_attributes", None)
+        if original_attrs is None:
             return
+        attrs = dict(original_attrs)
 
         oi_kind = attrs.get(OPENINFERENCE_SPAN_KIND)
         if not oi_kind:
@@ -354,11 +552,25 @@ class OpenInferenceTranslator(SpanProcessor):
         if cache_read is not None:
             attrs.setdefault(_TL_USAGE_CACHE_READ, cache_read)
 
+        direct_tools = _normalize_structured_list(attrs.get(OI_LLM_TOOLS))
+        if direct_tools is None:
+            direct_tools = _extract_tools_from_indexed_attrs(attrs)
+        if direct_tools is not None:
+            attrs.setdefault(RESPAN_SPAN_TOOLS, _safe_json_str(direct_tools))
+
+        direct_tool_calls = _extract_tool_calls(
+            attrs=attrs,
+            oi_prefixes=["llm.output_messages.", "llm.input_messages."],
+        )
+        if direct_tool_calls is not None:
+            attrs.setdefault(RESPAN_SPAN_TOOL_CALLS, _safe_json_str(direct_tool_calls))
+
         # --- LLM-specific: messages, invocation params, tools ---
         if oi_kind_upper in _LLM_KINDS:
             self._translate_llm(attrs)
 
         self._remove_redundant_oi_attrs(attrs)
+        span._attributes = attrs
 
     def _translate_llm(self, attrs: Dict[str, Any]) -> None:
         """Extra translation for LLM/EMBEDDING spans."""
@@ -386,10 +598,12 @@ class OpenInferenceTranslator(SpanProcessor):
         tools_raw = attrs.get(OI_LLM_TOOLS)
         if tools_raw:
             attrs.setdefault(_TL_REQUEST_FUNCTIONS, tools_raw)
+        elif attrs.get(RESPAN_SPAN_TOOLS):
+            attrs.setdefault(_TL_REQUEST_FUNCTIONS, attrs[RESPAN_SPAN_TOOLS])
 
     @staticmethod
     def _remove_redundant_oi_attrs(attrs: Dict[str, Any]) -> None:
-        """Remove noisy raw OpenInference attrs while keeping useful passthrough."""
+        """Remove noisy raw OpenInference attrs while keeping promoted fields."""
         keys_to_remove = {
             OPENINFERENCE_SPAN_KIND,
             OI_INPUT_VALUE,
@@ -411,6 +625,7 @@ class OpenInferenceTranslator(SpanProcessor):
             "llm.input_messages.",
             "llm.output_messages.",
             "llm.token_count.",
+            "llm.tools.",
         )
 
         for key in keys_to_remove:

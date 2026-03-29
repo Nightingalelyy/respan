@@ -1,6 +1,9 @@
 import base64
+import hashlib
 import json
+from datetime import datetime, timezone
 from collections.abc import Mapping
+from types import SimpleNamespace
 from typing import Dict, Optional, Sequence, List, Any
 
 import requests
@@ -56,15 +59,30 @@ from respan_sdk.constants.otlp_constants import (
 
 from opentelemetry.semconv_ai import SpanAttributes, LLMRequestTypeValues
 
+from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT, LOG_TYPE_TASK
 from respan_sdk.constants.span_attributes import (
     GEN_AI_SYSTEM,
+    LLM_REQUEST_MODEL,
     LLM_REQUEST_TYPE,
+    LLM_USAGE_COMPLETION_TOKENS,
+    LLM_USAGE_PROMPT_TOKENS,
+    RESPAN_LOG_TYPE,
+    RESPAN_SPAN_ATTRIBUTES_MAP,
+    RESPAN_SPAN_TOOL_CALLS,
+    RESPAN_SPAN_TOOLS,
 )
+from respan_sdk.respan_types.param_types import RespanTextLogParams
 from respan_tracing.utils.logging import get_respan_logger, build_spans_export_preview
 from respan_tracing.utils.preprocessing.span_processing import is_root_span_candidate
 from respan_tracing.constants.generic_constants import LOGGER_NAME_EXPORTER
 
 logger = get_respan_logger(LOGGER_NAME_EXPORTER)
+
+_DIRECT_ATTR_TO_PARAM_FIELD: Dict[str, str] = {}
+for _field_name, _attr_key in RESPAN_SPAN_ATTRIBUTES_MAP.items():
+    if _field_name == "group_identifier":
+        continue
+    _DIRECT_ATTR_TO_PARAM_FIELD.setdefault(_attr_key, _field_name)
 
 class ModifiedSpan:
     """A proxy wrapper that forwards the original span with optional overrides."""
@@ -82,6 +100,152 @@ class ModifiedSpan:
         if name in self._overrides:
             return self._overrides[name]
         return getattr(self._original_span, name)
+
+
+class SyntheticSpan:
+    """A lightweight ReadableSpan-compatible object for exporter-only spans."""
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        trace_id: int,
+        span_id: int,
+        parent: Any,
+        attributes: Dict[str, Any],
+        start_time: Optional[int],
+        end_time: Optional[int],
+        status: Any,
+        kind: Any,
+        resource: Any,
+        instrumentation_scope: Any,
+    ) -> None:
+        self.name = name
+        self.parent = parent
+        self._parent = parent
+        self.attributes = attributes
+        self.kind = kind
+        self.start_time = start_time
+        self.end_time = end_time
+        self.status = status
+        self.events = []
+        self.links = ()
+        self.resource = resource
+        self.instrumentation_scope = instrumentation_scope
+        self._span_context = SimpleNamespace(trace_id=trace_id, span_id=span_id)
+
+    def get_span_context(self) -> Any:
+        return self._span_context
+
+
+_CLAUDE_AGENT_SCOPE_NAME = "openinference.instrumentation.claude_agent_sdk"
+_CLAUDE_AGENT_RESPONSE_SPAN_NAMES = frozenset({
+    "ClaudeAgentSDK.query",
+    "ClaudeAgentSDK.ClaudeSDKClient.receive_response",
+})
+_ASSISTANT_MESSAGE_SPAN_NAME = "assistant_message"
+_GEN_AI_PROMPT_PREFIX = "gen_ai.prompt."
+_GEN_AI_COMPLETION_PREFIX = "gen_ai.completion."
+
+
+def _derive_synthetic_span_id(*parts: Any) -> int:
+    """Generate a deterministic non-zero OTLP span ID for exporter-only spans."""
+    digest = hashlib.sha256(
+        "|".join(str(part) for part in parts).encode("utf-8")
+    ).digest()
+    span_id = int.from_bytes(digest[:8], byteorder="big", signed=False)
+    if span_id == 0:
+        return 1
+    return span_id
+
+
+def _is_claude_agent_response_span(span: ReadableSpan) -> bool:
+    """Return whether this span is a Claude Agent SDK response-turn parent."""
+    scope = getattr(span, "instrumentation_scope", None)
+    scope_name = getattr(scope, "name", None)
+    return (
+        scope_name == _CLAUDE_AGENT_SCOPE_NAME
+        and span.name in _CLAUDE_AGENT_RESPONSE_SPAN_NAMES
+    )
+
+
+def _build_claude_agent_final_chat_span(
+    span: ReadableSpan,
+) -> Optional[ReadableSpan]:
+    """Synthesize the missing final child chat span for Claude Agent tool turns."""
+    if not _is_claude_agent_response_span(span):
+        return None
+
+    attrs = span.attributes or {}
+    tool_calls = _parse_structured_json_attr(attrs.get(RESPAN_SPAN_TOOL_CALLS))
+    if not isinstance(tool_calls, list) or not tool_calls:
+        return None
+
+    primary_completion_message = _select_primary_completion_from_attrs(attrs)
+    completion_text = _extract_text_from_message(primary_completion_message)
+    if completion_text in {None, ""}:
+        return None
+
+    span_context = span.get_span_context()
+    if span_context is None:
+        return None
+
+    child_attributes: Dict[str, Any] = {
+        RESPAN_LOG_TYPE: LOG_TYPE_CHAT,
+        LLM_REQUEST_TYPE: LLMRequestTypeValues.CHAT.value,
+        "traceloop.entity.name": _ASSISTANT_MESSAGE_SPAN_NAME,
+        "gen_ai.completion.0.role": "assistant",
+        "gen_ai.completion.0.content": completion_text,
+        SpanAttributes.TRACELOOP_ENTITY_OUTPUT: json.dumps(
+            primary_completion_message,
+            default=str,
+        ),
+    }
+
+    input_value = attrs.get(SpanAttributes.TRACELOOP_ENTITY_INPUT)
+    if input_value is not None:
+        child_attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT] = input_value
+
+    model = attrs.get(LLM_REQUEST_MODEL)
+    if model is not None:
+        child_attributes[LLM_REQUEST_MODEL] = model
+
+    system = attrs.get(GEN_AI_SYSTEM)
+    if system is not None:
+        child_attributes[GEN_AI_SYSTEM] = system
+
+    child_attributes.update({
+        key: value
+        for key, value in attrs.items()
+        if key.startswith(_GEN_AI_PROMPT_PREFIX)
+    })
+
+    child_end_time = span.end_time
+    child_start_time = span.start_time
+    if child_end_time and child_start_time:
+        child_start_time = max(child_start_time, child_end_time - 1_000_000)
+
+    child_span_id = _derive_synthetic_span_id(
+        span_context.trace_id,
+        span_context.span_id,
+        _ASSISTANT_MESSAGE_SPAN_NAME,
+    )
+    if child_span_id == span_context.span_id:
+        child_span_id = (child_span_id + 1) % (1 << 64) or 1
+
+    return SyntheticSpan(
+        name=_ASSISTANT_MESSAGE_SPAN_NAME,
+        trace_id=span_context.trace_id,
+        span_id=child_span_id,
+        parent=span_context,
+        attributes=child_attributes,
+        start_time=child_start_time,
+        end_time=child_end_time,
+        status=getattr(span, "status", None),
+        kind=getattr(span, "kind", None),
+        resource=getattr(span, "resource", None),
+        instrumentation_scope=getattr(span, "instrumentation_scope", None),
+    )
 
 
 def _prepare_spans_for_export(spans: Sequence[ReadableSpan]) -> List[ReadableSpan]:
@@ -102,12 +266,16 @@ def _prepare_spans_for_export(spans: Sequence[ReadableSpan]) -> List[ReadableSpa
             merged_attrs.update(extra_attrs)
             overrides[OTEL_SPAN_ATTRIBUTES_FIELD] = merged_attrs
 
-        if overrides:
-            prepared_spans.append(
-                ModifiedSpan(original_span=span, overrides=overrides)
-            )
-        else:
-            prepared_spans.append(span)
+        prepared_span = (
+            ModifiedSpan(original_span=span, overrides=overrides)
+            if overrides
+            else span
+        )
+        prepared_spans.append(prepared_span)
+
+        synthetic_child = _build_claude_agent_final_chat_span(prepared_span)
+        if synthetic_child is not None:
+            prepared_spans.append(synthetic_child)
 
     return prepared_spans
 
@@ -154,7 +322,375 @@ def _convert_attribute_value(value: Any) -> Optional[Dict[str, Any]]:
 _STRIPPED_ATTRIBUTES = frozenset({
     "pydantic_ai.all_messages",
     "logfire.json_schema",
+    RESPAN_SPAN_TOOL_CALLS,
+    RESPAN_SPAN_TOOLS,
 })
+
+
+def _parse_structured_json_attr(value: Any) -> Any:
+    """Decode JSON-string helper attrs when instrumentors store structured data safely."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return None
+    return value
+
+
+def _parse_json_like(value: Any) -> Any:
+    """Parse JSON strings when possible, otherwise return the original value."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return value
+    return value
+
+
+def _set_nested_value(target: Dict[str, Any], dotted_path: str, value: Any) -> None:
+    """Assign a nested dict field using a dotted path."""
+    parts = dotted_path.split(".")
+    cursor = target
+    for part in parts[:-1]:
+        current = cursor.get(part)
+        if not isinstance(current, dict):
+            current = {}
+            cursor[part] = current
+        cursor = current
+    cursor[parts[-1]] = value
+
+
+def _collect_indexed_attrs(
+    attrs: Mapping[str, Any],
+    prefix: str,
+) -> Dict[int, Dict[str, Any]]:
+    """Group indexed dotted attributes by message index."""
+    buckets: Dict[int, Dict[str, Any]] = {}
+    for key, value in attrs.items():
+        if not key.startswith(prefix):
+            continue
+        rest = key[len(prefix):]
+        parts = rest.split(".", 1)
+        if not parts[0].isdigit():
+            continue
+        idx = int(parts[0])
+        field = parts[1] if len(parts) > 1 else ""
+        buckets.setdefault(idx, {})[field] = value
+    return buckets
+
+
+def _build_messages_from_indexed_attrs(
+    attrs: Mapping[str, Any],
+    prefix: str,
+) -> Optional[List[Dict[str, Any]]]:
+    """Rebuild prompt/completion messages from indexed gen_ai attributes."""
+    buckets = _collect_indexed_attrs(attrs=attrs, prefix=prefix)
+    messages: List[Dict[str, Any]] = []
+
+    for idx in sorted(buckets):
+        message: Dict[str, Any] = {}
+        for field_key, field_value in buckets[idx].items():
+            if not field_key:
+                continue
+            _set_nested_value(
+                target=message,
+                dotted_path=field_key,
+                value=_parse_json_like(field_value),
+            )
+        if message:
+            messages.append(message)
+
+    return messages or None
+
+
+def _extract_text_from_content(content: Any) -> Optional[str]:
+    """Best-effort text extraction from string or block-based message content."""
+    if content is None:
+        return None
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+
+    text_segments: List[str] = []
+    for item in content:
+        if isinstance(item, str):
+            text_segments.append(item)
+            continue
+        if not isinstance(item, Mapping):
+            continue
+        text_value = item.get("text")
+        if isinstance(text_value, str):
+            text_segments.append(text_value)
+            continue
+        content_value = item.get("content")
+        if isinstance(content_value, str):
+            text_segments.append(content_value)
+
+    if not text_segments:
+        return ""
+    return "\n".join(text_segments)
+
+
+def _extract_text_from_message(message: Any) -> Optional[str]:
+    """Return human-readable text for a single message-like dict."""
+    if not isinstance(message, Mapping):
+        return None
+    return _extract_text_from_content(message.get("content"))
+
+
+def _coerce_raw_output_to_completion_message(
+    raw_output_payload: Any,
+) -> Optional[Dict[str, Any]]:
+    """Normalize raw output payloads into an assistant message when possible."""
+    if isinstance(raw_output_payload, str):
+        return {
+            "role": "assistant",
+            "content": raw_output_payload,
+        }
+
+    if isinstance(raw_output_payload, Mapping):
+        role = raw_output_payload.get("role")
+        content = raw_output_payload.get("content")
+        tool_calls = raw_output_payload.get("tool_calls")
+        if role is not None or content is not None or tool_calls is not None:
+            return dict(raw_output_payload)
+
+    if isinstance(raw_output_payload, list):
+        candidates = [
+            candidate
+            for item in raw_output_payload
+            if (candidate := _coerce_raw_output_to_completion_message(item)) is not None
+        ]
+        if not candidates:
+            return None
+        for candidate in reversed(candidates):
+            candidate_text = _extract_text_from_message(candidate)
+            if candidate_text not in {None, ""}:
+                return candidate
+        return candidates[-1]
+
+    return None
+
+
+def _select_primary_completion_message(
+    *,
+    completion_messages: Optional[List[Dict[str, Any]]],
+    raw_output_payload: Any,
+) -> Optional[Dict[str, Any]]:
+    """Choose the assistant completion that best represents the final answer."""
+    raw_output_message = _coerce_raw_output_to_completion_message(raw_output_payload)
+
+    if not completion_messages:
+        return raw_output_message
+
+    for message in reversed(completion_messages):
+        message_text = _extract_text_from_message(message)
+        if message_text not in {None, ""}:
+            return message
+
+    raw_output_text = _extract_text_from_message(raw_output_message)
+    if raw_output_text not in {None, ""}:
+        return raw_output_message
+
+    return completion_messages[-1]
+
+
+def _select_primary_completion_from_attrs(
+    attrs: Mapping[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Choose the best completion message using traced attrs plus raw output."""
+    return _select_primary_completion_message(
+        completion_messages=_build_messages_from_indexed_attrs(
+            attrs=attrs,
+            prefix=_GEN_AI_COMPLETION_PREFIX,
+        ),
+        raw_output_payload=_parse_json_like(
+            attrs.get(SpanAttributes.TRACELOOP_ENTITY_OUTPUT)
+        ),
+    )
+
+
+def _extract_text_from_messages(messages: Sequence[Any]) -> Optional[str]:
+    """Join message texts into a single prompt/completion string."""
+    text_segments: List[str] = []
+    saw_message = False
+
+    for message in messages:
+        if not isinstance(message, Mapping):
+            continue
+        saw_message = True
+        message_text = _extract_text_from_message(message)
+        if message_text is not None:
+            text_segments.append(message_text)
+
+    if not saw_message:
+        return None
+    return "\n\n".join(text_segments)
+
+
+def _extract_system_text(
+    *,
+    raw_input_payload: Any,
+    prompt_messages: Optional[List[Dict[str, Any]]],
+) -> Optional[str]:
+    """Extract system prompt text from raw request payload or prompt messages."""
+    if isinstance(raw_input_payload, Mapping):
+        system_value = raw_input_payload.get("system")
+        system_text = _extract_text_from_content(system_value)
+        if system_text is not None:
+            return system_text
+
+    if not prompt_messages:
+        return None
+
+    system_segments: List[str] = []
+    for message in prompt_messages:
+        if not isinstance(message, Mapping):
+            continue
+        if message.get("role") != "system":
+            continue
+        message_text = _extract_text_from_message(message)
+        if message_text is not None:
+            system_segments.append(message_text)
+
+    if not system_segments:
+        return None
+    return "\n\n".join(system_segments)
+
+
+def _extract_span_workflow_name(attrs: Mapping[str, Any]) -> Optional[str]:
+    """Read the workflow name attached by tracing decorators/processors."""
+    workflow_name = attrs.get(SpanAttributes.TRACELOOP_WORKFLOW_NAME)
+    if isinstance(workflow_name, str) and workflow_name:
+        return workflow_name
+
+    existing_workflow_name = attrs.get("span_workflow_name")
+    if isinstance(existing_workflow_name, str) and existing_workflow_name:
+        return existing_workflow_name
+
+    return None
+
+
+_DIRECT_REQUEST_FIELDS = (
+    "model",
+    "max_tokens",
+    "temperature",
+    "top_p",
+    "stop",
+    "stream",
+    "tool_choice",
+    "parallel_tool_calls",
+    "response_format",
+)
+
+
+def _normalize_direct_chat_payloads(
+    attrs: Mapping[str, Any],
+) -> tuple[Any, Any, Dict[str, Any]]:
+    """Prefer normalized prompt/completion messages while preserving raw payloads."""
+    raw_input_payload = _parse_json_like(attrs.get(SpanAttributes.TRACELOOP_ENTITY_INPUT))
+    raw_output_payload = _parse_json_like(
+        attrs.get(SpanAttributes.TRACELOOP_ENTITY_OUTPUT)
+    )
+
+    prompt_messages = _build_messages_from_indexed_attrs(
+        attrs=attrs,
+        prefix=_GEN_AI_PROMPT_PREFIX,
+    )
+    completion_messages = _build_messages_from_indexed_attrs(
+        attrs=attrs,
+        prefix=_GEN_AI_COMPLETION_PREFIX,
+    )
+
+    input_payload = prompt_messages
+    if input_payload is None and isinstance(raw_input_payload, Mapping):
+        raw_messages = raw_input_payload.get("messages")
+        if isinstance(raw_messages, list):
+            input_payload = raw_messages
+    if input_payload is None:
+        input_payload = raw_input_payload
+
+    primary_completion_message = _select_primary_completion_message(
+        completion_messages=completion_messages,
+        raw_output_payload=raw_output_payload,
+    )
+
+    output_payload = primary_completion_message
+    if output_payload is None:
+        output_payload = raw_output_payload
+
+    extra_fields: Dict[str, Any] = {}
+
+    if isinstance(input_payload, list):
+        extra_fields["prompt_messages"] = input_payload
+        extra_fields["prompt_message_count"] = len(input_payload)
+        prompt_text = _extract_text_from_messages(input_payload)
+        if prompt_text is not None:
+            extra_fields["prompt_text"] = prompt_text
+
+    if completion_messages:
+        extra_fields["completion_message_count"] = len(completion_messages)
+        extra_fields["completion_message"] = primary_completion_message
+        if len(completion_messages) > 1:
+            extra_fields["completion_messages"] = completion_messages
+        completion_text = _extract_text_from_message(primary_completion_message)
+        if completion_text is not None:
+            extra_fields["completion_text"] = completion_text
+    elif isinstance(output_payload, Mapping):
+        extra_fields["completion_message"] = dict(output_payload)
+        completion_text = _extract_text_from_message(output_payload)
+        if completion_text is not None:
+            extra_fields["completion_text"] = completion_text
+        extra_fields["completion_message_count"] = 1
+
+    system_text = _extract_system_text(
+        raw_input_payload=raw_input_payload,
+        prompt_messages=prompt_messages,
+    )
+    if system_text is not None:
+        extra_fields["system_text"] = system_text
+
+    if raw_input_payload is not None and raw_input_payload != input_payload:
+        extra_fields["full_request"] = raw_input_payload
+    if raw_output_payload is not None and raw_output_payload != output_payload:
+        extra_fields["full_response"] = raw_output_payload
+
+    if isinstance(raw_input_payload, Mapping):
+        for field_name in _DIRECT_REQUEST_FIELDS:
+            field_value = raw_input_payload.get(field_name)
+            if field_value is None:
+                continue
+            extra_fields.setdefault(field_name, field_value)
+
+    return input_payload, output_payload, extra_fields
+
+
+def _ns_to_iso8601(timestamp_ns: Any) -> Optional[str]:
+    """Convert a nanosecond timestamp to ISO 8601."""
+    if not timestamp_ns:
+        return None
+    try:
+        return datetime.fromtimestamp(
+            int(timestamp_ns) / 1_000_000_000,
+            tz=timezone.utc,
+        ).isoformat()
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    """Convert integer-like values while ignoring invalid inputs."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _convert_attributes(attributes: Any) -> List[Dict[str, Any]]:
@@ -169,6 +705,154 @@ def _convert_attributes(attributes: Any) -> List[Dict[str, Any]]:
         if converted is not None:
             result.append({OTLP_ATTR_KEY: str(key), OTLP_ATTR_VALUE: converted})
     return result
+
+
+def _uses_direct_ingest(span: ReadableSpan) -> bool:
+    """Tool-bearing spans use direct ingest so top-level tools survive cleanly."""
+    attrs = span.attributes or {}
+    return isinstance(_parse_structured_json_attr(attrs.get(RESPAN_SPAN_TOOLS)), list)
+
+
+def _partition_spans_for_export(
+    spans: Sequence[ReadableSpan],
+) -> tuple[List[ReadableSpan], List[ReadableSpan]]:
+    """Split spans into direct-ingest and OTLP export paths."""
+    direct_spans: List[ReadableSpan] = []
+    otlp_spans: List[ReadableSpan] = []
+
+    for span in spans:
+        if _uses_direct_ingest(span):
+            direct_spans.append(span)
+        else:
+            otlp_spans.append(span)
+
+    return direct_spans, otlp_spans
+
+
+def _infer_direct_log_type(attrs: Mapping[str, Any]) -> str:
+    """Best-effort log type for direct-ingested spans."""
+    log_type = attrs.get(RESPAN_LOG_TYPE)
+    if isinstance(log_type, str) and log_type:
+        return log_type
+    request_type = attrs.get(LLM_REQUEST_TYPE)
+    if request_type == LLMRequestTypeValues.CHAT.value or attrs.get(GEN_AI_SYSTEM):
+        return LOG_TYPE_CHAT
+    return LOG_TYPE_TASK
+
+
+def _span_to_direct_log(span: ReadableSpan) -> Optional[Dict[str, Any]]:
+    """Convert a ReadableSpan into a direct-ingest log payload."""
+    attrs = span.attributes or {}
+    tools = _parse_structured_json_attr(attrs.get(RESPAN_SPAN_TOOLS))
+    if not isinstance(tools, list):
+        return None
+
+    tool_calls = _parse_structured_json_attr(attrs.get(RESPAN_SPAN_TOOL_CALLS))
+    log_type = _infer_direct_log_type(attrs)
+    extra_fields: Dict[str, Any] = {}
+    if log_type == LOG_TYPE_CHAT:
+        input_payload, output_payload, extra_fields = _normalize_direct_chat_payloads(
+            attrs=attrs
+        )
+    else:
+        input_payload = _parse_json_like(attrs.get(SpanAttributes.TRACELOOP_ENTITY_INPUT))
+        if input_payload is None:
+            input_payload = _build_messages_from_indexed_attrs(
+                attrs=attrs,
+                prefix=_GEN_AI_PROMPT_PREFIX,
+            )
+
+        output_payload = _parse_json_like(
+            attrs.get(SpanAttributes.TRACELOOP_ENTITY_OUTPUT)
+        )
+        if output_payload is None:
+            completion_messages = _build_messages_from_indexed_attrs(
+                attrs=attrs,
+                prefix=_GEN_AI_COMPLETION_PREFIX,
+            )
+            if completion_messages:
+                output_payload = (
+                    completion_messages[0]
+                    if len(completion_messages) == 1
+                    else completion_messages
+                )
+
+    span_ctx = span.get_span_context()
+    if span_ctx is None:
+        return None
+
+    parent_span_id = None
+    parent = getattr(span, OTEL_SPAN_PARENT_FIELD, None)
+    if parent is not None and getattr(parent, "span_id", None):
+        parent_span_id = format_span_id(parent.span_id)
+
+    prompt_tokens = _coerce_int(
+        attrs.get(LLM_USAGE_PROMPT_TOKENS) or attrs.get("prompt_tokens")
+    )
+    completion_tokens = _coerce_int(
+        attrs.get(LLM_USAGE_COMPLETION_TOKENS) or attrs.get("completion_tokens")
+    )
+    start_time = _ns_to_iso8601(span.start_time)
+    end_time = _ns_to_iso8601(span.end_time)
+    latency = None
+    if span.start_time and span.end_time:
+        latency = max((span.end_time - span.start_time) / 1_000_000_000, 0.0)
+
+    is_error = (
+        span.status is not None and span.status.status_code == StatusCode.ERROR
+    )
+    data = RespanTextLogParams(
+        trace_unique_id=format_trace_id(span_ctx.trace_id),
+        span_unique_id=format_span_id(span_ctx.span_id),
+        span_parent_id=parent_span_id,
+        span_name=span.name,
+        start_time=start_time,
+        timestamp=end_time,
+        latency=latency,
+        status_code=400 if is_error else 200,
+        error_bit=1 if is_error else 0,
+        error_message=span.status.description if is_error else None,
+        log_type=log_type,
+        input=input_payload,
+        output=output_payload,
+        model=attrs.get(LLM_REQUEST_MODEL) or attrs.get("model"),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        tools=tools,
+        tool_calls=tool_calls if isinstance(tool_calls, list) else None,
+        has_tool_calls=bool(tool_calls) if isinstance(tool_calls, list) else None,
+        span_workflow_name=_extract_span_workflow_name(attrs=attrs),
+    )
+
+    field_updates: Dict[str, Any] = {}
+    for attr_key, field_name in _DIRECT_ATTR_TO_PARAM_FIELD.items():
+        value = _parse_json_like(attrs.get(attr_key))
+        if field_name in {"metadata", "properties"} and value is not None and not isinstance(value, dict):
+            continue
+        if value is None or getattr(data, field_name, None) is not None:
+            continue
+        field_updates[field_name] = value
+
+    for field_name, value in extra_fields.items():
+        if value is None or getattr(data, field_name, None) is not None:
+            continue
+        field_updates[field_name] = value
+
+    if field_updates:
+        try:
+            data = RespanTextLogParams.model_validate({
+                **data.model_dump(mode="python", exclude_none=True),
+                **field_updates,
+            })
+        except Exception:
+            logger.debug(
+                "Falling back to raw direct-ingest field assignment for span %s",
+                span.name,
+            )
+            for field_name, value in field_updates.items():
+                setattr(data, field_name, value)
+
+    return data.model_dump(mode="json", exclude_none=True)
 
 
 def _span_to_otlp_json(span: ReadableSpan) -> Dict[str, Any]:
@@ -356,13 +1040,31 @@ def _get_enrichment_attrs(span: ReadableSpan) -> Dict[str, Any]:
     if attrs.get(GEN_AI_SYSTEM) and not attrs.get(LLM_REQUEST_TYPE):
         extra[LLM_REQUEST_TYPE] = LLMRequestTypeValues.CHAT.value
 
+    tool_calls = _parse_structured_json_attr(attrs.get(RESPAN_SPAN_TOOL_CALLS))
+    if isinstance(tool_calls, list) and tool_calls:
+        if "gen_ai.completion.0.tool_calls" not in attrs:
+            extra["gen_ai.completion.0.tool_calls"] = tool_calls
+        if "gen_ai.completion.0.role" not in attrs:
+            extra["gen_ai.completion.0.role"] = "assistant"
+        existing_completion_content = attrs.get("gen_ai.completion.0.content")
+        if existing_completion_content in {None, ""}:
+            primary_completion_message = _select_primary_completion_from_attrs(attrs)
+            completion_text = _extract_text_from_message(primary_completion_message)
+            if completion_text not in {None, ""}:
+                extra["gen_ai.completion.0.content"] = completion_text
+            elif "gen_ai.completion.0.content" not in attrs:
+                extra["gen_ai.completion.0.content"] = ""
+
     return extra
 
 
 class RespanSpanExporter:
     """
-    Custom span exporter for Respan that serializes spans as OTLP JSON
-    and POSTs them to the /v2/traces endpoint.
+    Custom span exporter for Respan.
+
+    Most spans are serialized as OTLP JSON and sent to ``/v2/traces``.
+    Tool-bearing OpenInference spans use direct trace ingest so top-level
+    ``tools`` survives without leaking raw helper attributes into metadata.
 
     Anti-recursion: Uses OpenTelemetry's suppress_instrumentation context
     to prevent auto-instrumented HTTP libraries (requests, urllib3) from
@@ -398,6 +1100,7 @@ class RespanSpanExporter:
             self._session.headers["Authorization"] = f"Bearer {api_key}"
 
         self._traces_url = f"{self.endpoint}/v2/traces"
+        self._direct_traces_url = f"{self.endpoint}/v1/traces/ingest"
         logger.debug("OTLP JSON traces endpoint: %s", self._traces_url)
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
@@ -406,6 +1109,7 @@ class RespanSpanExporter:
             return SpanExportResult.FAILURE
 
         modified_spans = _prepare_spans_for_export(spans=spans)
+        direct_spans, otlp_spans = _partition_spans_for_export(modified_spans)
 
         # Debug preview
         try:
@@ -415,31 +1119,67 @@ class RespanSpanExporter:
         except Exception:
             pass
 
-        # Build OTLP JSON payload
-        payload = _build_otlp_payload(modified_spans)
+        direct_logs = [
+            log_data
+            for span in direct_spans
+            if (log_data := _span_to_direct_log(span)) is not None
+        ]
+        payload = _build_otlp_payload(otlp_spans) if otlp_spans else None
 
         # Suppress OTel instrumentation during export to prevent recursion.
         # Without this, auto-instrumented `requests` would create spans for
         # the export POST, which would be exported, creating more spans, etc.
         token = attach(set_value(_SUPPRESS_INSTRUMENTATION_KEY, True))
         try:
-            response = self._session.post(
-                url=self._traces_url,
-                data=json.dumps(payload, default=str),
-                timeout=self.timeout,
-            )
-            if response.status_code < 400:
-                logger.debug(
-                    "Exported %d spans successfully (HTTP %d)",
-                    len(modified_spans),
-                    response.status_code,
+            direct_success = True
+            if direct_logs:
+                direct_response = self._session.post(
+                    url=self._direct_traces_url,
+                    data=json.dumps({"data": direct_logs}, default=str),
+                    timeout=self.timeout,
                 )
+                direct_success = direct_response.status_code < 400
+                if direct_success:
+                    logger.debug(
+                        "Exported %d spans successfully via direct ingest (HTTP %d)",
+                        len(direct_logs),
+                        direct_response.status_code,
+                    )
+                else:
+                    logger.warning(
+                        "Failed to export direct-ingest spans: HTTP %d — %s",
+                        direct_response.status_code,
+                        direct_response.text[:500],
+                    )
+
+            otlp_success = True
+            if payload is not None:
+                response = self._session.post(
+                    url=self._traces_url,
+                    data=json.dumps(payload, default=str),
+                    timeout=self.timeout,
+                )
+                otlp_success = response.status_code < 400
+                if otlp_success:
+                    logger.debug(
+                        "Exported %d spans successfully via OTLP (HTTP %d)",
+                        len(otlp_spans),
+                        response.status_code,
+                    )
+                else:
+                    logger.warning(
+                        "Failed to export OTLP spans: HTTP %d — %s",
+                        response.status_code,
+                        response.text[:500],
+                    )
+
+            if direct_success and otlp_success:
                 return SpanExportResult.SUCCESS
-            else:
+            if not direct_success or not otlp_success:
                 logger.warning(
-                    "Failed to export spans: HTTP %d — %s",
-                    response.status_code,
-                    response.text[:500],
+                    "Failed to export all spans: direct_success=%s otlp_success=%s",
+                    direct_success,
+                    otlp_success,
                 )
                 return SpanExportResult.FAILURE
         except Exception as e:
