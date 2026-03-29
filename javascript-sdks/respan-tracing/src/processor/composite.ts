@@ -88,6 +88,22 @@ export class RespanCompositeProcessor implements SpanProcessor {
   }
 
   onEnd(span: ReadableSpan): void {
+    // Strip OTEL/infrastructure attributes that pollute metadata on the backend.
+    const attrs = (span as any).attributes;
+    if (attrs) {
+      for (const key of Object.keys(attrs)) {
+        if (
+          key.startsWith("otel.scope.") ||
+          key.startsWith("next.") ||
+          key.startsWith("http.") ||
+          key.startsWith("net.") ||
+          key === "service.name"
+        ) {
+          delete attrs[key];
+        }
+      }
+    }
+
     const spanKind = span.attributes[SpanAttributes.TRACELOOP_SPAN_KIND];
     const entityPath = span.attributes[SpanAttributes.TRACELOOP_ENTITY_PATH];
 
@@ -108,29 +124,48 @@ export class RespanCompositeProcessor implements SpanProcessor {
       span.attributes[RespanSpanAttributes.GEN_AI_REQUEST_MODEL] !== undefined ||
       LLM_SPAN_NAME_PATTERNS.some((pattern) => span.name.includes(pattern));
 
+    // Note: traceloop.entity.name and traceloop.entity.path are kept — they may be
+    // needed by the backend (e.g. for logBatchResults, OpenAI Agents). Individual
+    // instrumentation translators (Vercel, OpenInference) strip them if not needed.
+
     // Filter: only process spans that are user-decorated, within entity context, or LLM calls
     if (spanKind) {
-      // This is a user-decorated span (withWorkflow, withTask, etc.) - make it a root span
-      console.debug(
-        `[Respan Debug] Processing user-decorated span as root: ${span.name} (kind: ${spanKind})`
-      );
+      const kindStr = String(spanKind).toLowerCase();
 
-      // Create a wrapper that makes the span appear as a root span
-      const rootSpan = Object.create(Object.getPrototypeOf(span));
-      Object.assign(rootSpan, span);
+      if (kindStr === "workflow") {
+        // Workflow spans are promoted to root (clear parentSpanId).
+        // This ensures the workflow is the top-level span in the trace.
+        console.debug(
+          `[Respan Debug] Processing workflow span as root: ${span.name}`
+        );
 
-      // Override the parentSpanId to make it a root span
-      Object.defineProperty(rootSpan, 'parentSpanId', {
-        value: undefined,
-        writable: false,
-        configurable: true,
-        enumerable: true
-      });
-
-      // Route to processors
-      this._processorManager.onEnd(rootSpan);
+        const rootSpan = Object.create(Object.getPrototypeOf(span));
+        Object.assign(rootSpan, span);
+        Object.defineProperty(rootSpan, 'parentSpanId', {
+          value: undefined,
+          writable: false,
+          configurable: true,
+          enumerable: true
+        });
+        this._processorManager.onEnd(rootSpan);
+      } else {
+        // Task, tool, agent spans keep their parent — preserving the hierarchy.
+        console.debug(
+          `[Respan Debug] Processing decorated span: ${span.name} (kind: ${spanKind})`
+        );
+        this._processorManager.onEnd(span);
+      }
     } else if (entityPath && entityPath !== "") {
-      // This span doesn't have a kind but has entityPath - it's a child span within a withEntity context
+      // This span doesn't have a kind but has entityPath - it's a child span within a withEntity context.
+      // Filter out HTTP/fetch noise (Next.js auto-instrumentation) — these are just the
+      // underlying network calls for LLM requests that are already captured by ai.* spans.
+      if (span.name.startsWith("fetch ") || span.name.startsWith("start response")) {
+        console.debug(
+          `[Respan Debug] Filtering out HTTP noise within entity context: ${span.name}`
+        );
+        return;
+      }
+
       // Keep it as a normal child span (preserve parent relationships)
       console.debug(
         `[Respan Debug] Processing child span within entity context: ${span.name} (entityPath: ${entityPath})`
