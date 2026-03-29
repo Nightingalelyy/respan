@@ -39,6 +39,14 @@ const CUSTOMER_ID = RespanSpanAttributes.RESPAN_CUSTOMER_PARAMS_ID;
 const CUSTOMER_EMAIL = RespanSpanAttributes.RESPAN_CUSTOMER_PARAMS_EMAIL;
 const CUSTOMER_NAME = RespanSpanAttributes.RESPAN_CUSTOMER_PARAMS_NAME;
 const THREAD_ID = RespanSpanAttributes.RESPAN_THREADS_ID;
+const RESPAN_SPAN_TOOLS = RespanSpanAttributes.RESPAN_SPAN_TOOLS;
+const RESPAN_METADATA_AGENT_NAME = RespanSpanAttributes.RESPAN_METADATA_AGENT_NAME;
+const RESPAN_METADATA_PREFIX = RespanSpanAttributes.RESPAN_METADATA; // "respan.metadata"
+
+/** Build a respan.metadata.<key> attribute name. */
+function metadataKey(key: string): string {
+  return `${RESPAN_METADATA_PREFIX}.${key}`;
+}
 
 // Traceloop wire-format keys
 const TL_SPAN_KIND = "traceloop.span.kind";
@@ -412,19 +420,19 @@ function enrichMetadata(attrs: Record<string, any>, spanName: string): void {
         break;
       }
       case "prompt_unit_price":
-        setDefault(attrs, "respan.metadata.prompt_unit_price", String(value));
+        setDefault(attrs, metadataKey("prompt_unit_price"), String(value));
         break;
       case "completion_unit_price":
-        setDefault(attrs, "respan.metadata.completion_unit_price", String(value));
+        setDefault(attrs, metadataKey("completion_unit_price"), String(value));
         break;
       case "userId":
         // userId is a fallback for customer_identifier (backward compat with exporter)
         setDefault(attrs, CUSTOMER_ID, String(value));
-        setDefault(attrs, `respan.metadata.${cleanKey}`, String(value ?? ""));
+        setDefault(attrs, metadataKey(cleanKey), String(value ?? ""));
         break;
       default:
         // All other metadata → respan.metadata.<key>
-        setDefault(attrs, `respan.metadata.${cleanKey}`, String(value ?? ""));
+        setDefault(attrs, metadataKey(cleanKey), String(value ?? ""));
         break;
     }
   }
@@ -459,42 +467,42 @@ function enrichTokens(attrs: Record<string, any>): void {
  */
 function enrichPerformanceMetrics(attrs: Record<string, any>, spanName: string): void {
   // Stream detection from span name
-  setDefault(attrs, "respan.metadata.stream", String(spanName.includes("doStream")));
+  setDefault(attrs, metadataKey("stream"), String(spanName.includes("doStream")));
 
   // Time to first token from ai.response.msToFinish (Vercel-specific)
   const msToFinish = attrs["ai.response.msToFinish"];
   if (msToFinish !== undefined) {
-    setDefault(attrs, "respan.metadata.time_to_first_token", String(Number(msToFinish) / 1000));
+    setDefault(attrs, metadataKey("time_to_first_token"), String(Number(msToFinish) / 1000));
   }
 
   // Cost (gen_ai.usage.cost is standard but ensure it's present)
   const cost = attrs["gen_ai.usage.cost"];
   if (cost !== undefined) {
-    setDefault(attrs, "respan.metadata.cost", String(cost));
+    setDefault(attrs, metadataKey("cost"), String(cost));
   }
 
   // TTFT (gen_ai.usage.ttft)
   const ttft = attrs["gen_ai.usage.ttft"];
   if (ttft !== undefined) {
-    setDefault(attrs, "respan.metadata.ttft", String(ttft));
+    setDefault(attrs, metadataKey("ttft"), String(ttft));
   }
 
   // Generation time
   const genTime = attrs["gen_ai.usage.generation_time"];
   if (genTime !== undefined) {
-    setDefault(attrs, "respan.metadata.generation_time", String(genTime));
+    setDefault(attrs, metadataKey("generation_time"), String(genTime));
   }
 
   // Warnings
   const warnings = attrs["gen_ai.usage.warnings"];
   if (warnings !== undefined) {
-    setDefault(attrs, "respan.metadata.warnings", String(warnings));
+    setDefault(attrs, metadataKey("warnings"), String(warnings));
   }
 
   // Response type (text/json_schema/json_object)
   const type = attrs["gen_ai.usage.type"];
   if (type !== undefined) {
-    setDefault(attrs, "respan.metadata.type", String(type));
+    setDefault(attrs, metadataKey("type"), String(type));
   }
 
 }
@@ -695,11 +703,11 @@ export class VercelAITranslator implements SpanProcessor {
 
         // Tool definitions
         const tools = parseTools(attrs);
-        if (tools) setDefault(attrs, "respan.span.tools", tools);
+        if (tools) setDefault(attrs, RESPAN_SPAN_TOOLS, tools);
 
         // Tool choice
         const toolChoice = parseToolChoice(attrs);
-        if (toolChoice) setDefault(attrs, "respan.metadata.tool_choice", toolChoice);
+        if (toolChoice) setDefault(attrs, metadataKey("tool_choice"), toolChoice);
 
         // Performance metrics (stream, TTFT, cost, etc.)
         enrichPerformanceMetrics(attrs, name);
@@ -717,7 +725,7 @@ export class VercelAITranslator implements SpanProcessor {
       // Agent spans
       if (config.logType === RespanLogType.AGENT || logType === RespanLogType.AGENT) {
         const agentName = attrs["ai.agent.name"] ?? attrs["ai.agent.id"] ?? name;
-        setDefault(attrs, RespanSpanAttributes.RESPAN_METADATA_AGENT_NAME, String(agentName));
+        setDefault(attrs, RESPAN_METADATA_AGENT_NAME, String(agentName));
       }
     } else {
       // Unknown ai.* span — set basic attributes with fallback-resolved type
