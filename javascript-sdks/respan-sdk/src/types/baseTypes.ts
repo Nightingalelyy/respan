@@ -4,7 +4,6 @@ export type RespanParams = {
     customer_email?: string;
     customer_name?: string;
     evaluation_identifier?: string | number;
-    session_identifier?: string | number;
     thread_identifier?: string | number;
     trace_group_identifier?: string | number;
     group_identifier?: string | number;

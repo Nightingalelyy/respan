@@ -111,7 +111,6 @@ RESPAN_PROMOTED_KEYS = frozenset({
     "respan.customer_params.name",
     "respan.evaluation_params.evaluation_identifier",
     "respan.threads.thread_identifier",
-    "respan.sessions.session_identifier",
     "respan.trace.trace_group_identifier",
     "respan.metadata",
     "respan.entity.log_method",
