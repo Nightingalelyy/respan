@@ -256,6 +256,9 @@ export const startTracing = async (options: RespanOptions) => {
 
   _sdk = new NodeSDK({
     resource,
+    // Disable default resource detectors (process.*, host.*, telemetry.sdk.*)
+    // to keep span metadata clean. Only service.name is needed.
+    resourceDetectors: [],
     spanProcessors: [_compositeProcessor],
     instrumentations: instrumentationsList,
     textMapPropagator: propagator,
@@ -265,6 +268,27 @@ export const startTracing = async (options: RespanOptions) => {
   try {
     console.debug("[Respan Debug] Starting OpenTelemetry SDK...");
     _sdk.start();
+
+    // Strip noisy resource attributes that NodeSDK adds automatically.
+    // These pollute span metadata on the backend with no user value.
+    try {
+      const tp = (globalThis as any)[Symbol.for("opentelemetry.js.api.1")]?.trace?.getDelegate?.() ??
+        (require("@opentelemetry/api") as any).trace.getTracerProvider();
+      const provider = (tp as any)?._delegate ?? tp;
+      if (provider?.resource?.attributes) {
+        const resAttrs = provider.resource.attributes;
+        const noise = Object.keys(resAttrs).filter(k =>
+          k.startsWith("telemetry.sdk.") ||
+          k.startsWith("process.") ||
+          k.startsWith("host.") ||
+          k === "os.type" || k === "os.version"
+        );
+        for (const k of noise) delete resAttrs[k];
+      }
+    } catch {
+      // non-critical — if stripping fails, attributes just stay
+    }
+
     _initialized = true;
 
     console.debug("[Respan Debug] SDK started successfully");
