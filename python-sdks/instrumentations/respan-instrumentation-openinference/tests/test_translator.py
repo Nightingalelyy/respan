@@ -222,6 +222,43 @@ def test_indexed_message_content_preserves_empty_blocks(translator):
     assert span._attributes["gen_ai.completion.0.content"] == "\ntool result here"
 
 
+def test_equivalent_legacy_function_call_is_deduplicated(translator):
+    span = _make_span({
+        "openinference.span.kind": "LLM",
+        "llm.input_messages.0.message.role": "assistant",
+        "llm.input_messages.0.message.tool_calls.0.tool_call.function.name": "get_weather",
+        "llm.input_messages.0.message.tool_calls.0.tool_call.function.arguments": '{"city":"NYC","unit":"F"}',
+        "llm.input_messages.0.message.function_call_name": "get_weather",
+        "llm.input_messages.0.message.function_call_arguments_json": '{"unit":"F","city":"NYC"}',
+    })
+    translator.on_end(span)
+    assert span._attributes["gen_ai.prompt.0.tool_calls.0.function.name"] == "get_weather"
+    assert span._attributes["gen_ai.prompt.0.tool_calls.0.function.arguments"] == '{"city":"NYC","unit":"F"}'
+    assert span._attributes["gen_ai.prompt.0.tool_calls"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "arguments": '{"city":"NYC","unit":"F"}',
+            },
+        }
+    ]
+    assert "gen_ai.prompt.0.function_call.name" not in span._attributes
+    assert "gen_ai.prompt.0.function_call.arguments" not in span._attributes
+
+
+def test_legacy_function_call_preserved_without_matching_tool_call(translator):
+    span = _make_span({
+        "openinference.span.kind": "LLM",
+        "llm.input_messages.0.message.role": "assistant",
+        "llm.input_messages.0.message.function_call_name": "get_weather",
+        "llm.input_messages.0.message.function_call_arguments_json": '{"city":"NYC"}',
+    })
+    translator.on_end(span)
+    assert span._attributes["gen_ai.prompt.0.function_call.name"] == "get_weather"
+    assert span._attributes["gen_ai.prompt.0.function_call.arguments"] == '{"city":"NYC"}'
+
+
 # ------------------------------------------------------------------
 # 12. invocation parameters extracted
 # ------------------------------------------------------------------

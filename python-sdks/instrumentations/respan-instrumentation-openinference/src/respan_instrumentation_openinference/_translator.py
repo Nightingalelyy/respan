@@ -288,6 +288,9 @@ def _normalize_tool_call(tool_call: Dict[str, Any]) -> Dict[str, Any]:
 def _tool_call_signature(tool_call: Dict[str, Any]) -> str:
     """Return a deterministic semantic signature for a tool call."""
     normalized = _normalize_tool_call(tool_call)
+    function = normalized.get("function")
+    if isinstance(function, dict) and "arguments" in function:
+        function["arguments"] = _parse_json(function["arguments"])
     return json.dumps(
         _canonicalize_for_signature(normalized),
         default=str,
@@ -452,6 +455,56 @@ def _extract_tools_from_indexed_attrs(
     return result or None
 
 
+def _has_equivalent_modern_tool_call(
+    raw: Dict[str, Any],
+    legacy_name: Any,
+    legacy_arguments: Any,
+) -> bool:
+    """Return True when a legacy function_call matches an existing tool_call."""
+    if legacy_name is None and legacy_arguments is None:
+        return False
+
+    legacy_tool_call: Dict[str, Any] = {
+        "type": "function",
+        "function": {},
+    }
+    if legacy_name is not None:
+        legacy_tool_call["function"]["name"] = legacy_name
+    if legacy_arguments is not None:
+        legacy_tool_call["function"]["arguments"] = legacy_arguments
+
+    legacy_tool_call = _normalize_tool_call(legacy_tool_call)
+    if not legacy_tool_call:
+        return False
+
+    legacy_signature = _tool_call_signature(legacy_tool_call)
+    modern_tool_call_buckets: Dict[int, Dict[str, Any]] = defaultdict(dict)
+    for field_key, field_val in raw.items():
+        if not field_key.startswith(_OI_MESSAGE_TOOL_CALLS_PREFIX):
+            continue
+        rest = field_key[len(_OI_MESSAGE_TOOL_CALLS_PREFIX):]
+        parts = rest.split(".", 1)
+        if not parts[0].isdigit() or len(parts) == 1:
+            continue
+        tc_idx = int(parts[0])
+        tc_field = parts[1]
+        if tc_field.startswith(_OI_TOOL_CALL_PREFIX):
+            tc_field = tc_field[len(_OI_TOOL_CALL_PREFIX):]
+        modern_tool_call_buckets[tc_idx][tc_field] = field_val
+
+    for tool_call_bucket in modern_tool_call_buckets.values():
+        tool_call: Dict[str, Any] = {}
+        for field_key, field_val in tool_call_bucket.items():
+            _set_nested_value(tool_call, field_key, field_val)
+        tool_call = _normalize_tool_call(tool_call)
+        if not tool_call:
+            continue
+        if _tool_call_signature(tool_call) == legacy_signature:
+            return True
+
+    return False
+
+
 def _oi_messages_to_openllmetry(
     attrs: Dict[str, Any],
     oi_prefix: str,
@@ -511,12 +564,13 @@ def _oi_messages_to_openllmetry(
 
         # message.function_call_name → gen_ai.prompt.N.function_call.name
         func_name = raw.get(_OI_MESSAGE_FUNCTION_CALL_NAME)
-        if func_name:
+        func_args = raw.get(_OI_MESSAGE_FUNCTION_CALL_ARGUMENTS_JSON)
+        has_matching_tool_call = _has_equivalent_modern_tool_call(raw, func_name, func_args)
+        if func_name and not has_matching_tool_call:
             attrs[f"{target}.function_call.name"] = func_name
 
         # message.function_call_arguments_json → gen_ai.prompt.N.function_call.arguments
-        func_args = raw.get(_OI_MESSAGE_FUNCTION_CALL_ARGUMENTS_JSON)
-        if func_args:
+        if func_args and not has_matching_tool_call:
             attrs[f"{target}.function_call.arguments"] = func_args
 
         # message.finish_reason → gen_ai.completion.N.finish_reason (completions only)

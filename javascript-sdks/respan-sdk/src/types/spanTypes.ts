@@ -48,6 +48,7 @@ export enum RespanSpanAttributes {
     RESPAN_METADATA_GUARDRAIL_NAME = "respan.metadata.guardrail_name",
     RESPAN_METADATA_TRIGGERED = "respan.metadata.triggered",
     RESPAN_SPAN_TOOLS = "respan.span.tools",
+    RESPAN_SPAN_TOOL_CALLS = "respan.span.tool_calls",
     RESPAN_SPAN_HANDOFFS = "respan.span.handoffs",
 
     // OpenInference attributes (used by composite processor for span detection)
