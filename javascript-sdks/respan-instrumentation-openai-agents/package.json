@@ -1,7 +1,7 @@
 {
   "name": "@respan/instrumentation-openai-agents",
   "type": "module",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Respan instrumentation plugin for OpenAI Agents SDK (OTEL pipeline)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

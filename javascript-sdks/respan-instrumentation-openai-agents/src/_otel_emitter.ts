@@ -13,7 +13,7 @@ import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
 import { RespanLogType, RespanSpanAttributes } from "@respan/respan-sdk";
 import type { Span, Trace } from "@openai/agents";
 
-const PACKAGE_VERSION = "1.0.2";
+const PACKAGE_VERSION = "1.0.3";
 
 function safeJson(obj: any): string {
   try {
