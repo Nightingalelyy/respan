@@ -115,18 +115,19 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       - name: Install and build package
-        working-directory: javascript-sdks
         run: |
           corepack enable
           corepack install
+          cd javascript-sdks
           yarn install
+          cd ../${{ matrix.path }}
           if [ "${{ matrix.has_build }}" = "true" ]; then
-            yarn workspace "${{ matrix.name }}" build
+            yarn build
           fi
 
       - name: Publish package
-        working-directory: javascript-sdks
-        run: yarn workspace "${{ matrix.name }}" npm publish --access public --provenance --tolerate-republish
+        working-directory: ${{ matrix.path }}
+        run: yarn npm publish --access public --provenance --tolerate-republish
 
   build-python:
     needs: discover

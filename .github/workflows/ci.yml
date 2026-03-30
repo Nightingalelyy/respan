@@ -63,16 +63,17 @@ jobs:
           node-version: "24"
 
       - name: Install and run package checks
-        working-directory: javascript-sdks
         run: |
           corepack enable
           corepack install
+          cd javascript-sdks
           yarn install
+          cd ../${{ matrix.path }}
           if [ "${{ matrix.has_build }}" = "true" ]; then
-            yarn workspace "${{ matrix.name }}" build
+            yarn build
           fi
           if [ "${{ matrix.has_test }}" = "true" ]; then
-            yarn workspace "${{ matrix.name }}" test
+            yarn test
           fi
 
   python:
