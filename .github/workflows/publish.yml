@@ -120,13 +120,7 @@ jobs:
           cd javascript-sdks
           yarn install
           if [ "${{ matrix.has_build }}" = "true" ]; then
-            if [ "${{ matrix.path }}" = "javascript-sdks/respan-cli" ]; then
-              cd ../${{ matrix.path }}
-              yarn build
-              cd -
-            else
-              ./node_modules/.bin/tsc -p ../${{ matrix.path }}/tsconfig.json
-            fi
+            yarn workspaces foreach -Rt --from "${{ matrix.name }}" run build
           fi
 
       - name: Publish package
