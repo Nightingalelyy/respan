@@ -13,6 +13,8 @@ import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
 import { RespanLogType, RespanSpanAttributes } from "@respan/respan-sdk";
 import type { Span, Trace } from "@openai/agents";
 
+const PACKAGE_VERSION = "1.0.2";
+
 function safeJson(obj: any): string {
   try {
     return JSON.stringify(obj, (_key, value) =>
@@ -447,7 +449,7 @@ function buildReadableSpan(opts: BuildSpanOptions): ReadableSpan {
     resource: { attributes: {} } as any,
     instrumentationLibrary: {
       name: "@respan/instrumentation-openai-agents",
-      version: "1.0.0",
+      version: PACKAGE_VERSION,
     },
     ended: true,
     droppedAttributesCount: 0,

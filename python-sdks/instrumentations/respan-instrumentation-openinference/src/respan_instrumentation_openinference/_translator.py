@@ -288,6 +288,9 @@ def _normalize_tool_call(tool_call: Dict[str, Any]) -> Dict[str, Any]:
 def _tool_call_signature(tool_call: Dict[str, Any]) -> str:
     """Return a deterministic semantic signature for a tool call."""
     normalized = _normalize_tool_call(tool_call)
+    function = normalized.get("function")
+    if isinstance(function, dict) and "arguments" in function:
+        function["arguments"] = _parse_json(function["arguments"])
     return json.dumps(
         _canonicalize_for_signature(normalized),
         default=str,

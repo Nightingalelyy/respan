@@ -234,6 +234,15 @@ def test_equivalent_legacy_function_call_is_deduplicated(translator):
     translator.on_end(span)
     assert span._attributes["gen_ai.prompt.0.tool_calls.0.function.name"] == "get_weather"
     assert span._attributes["gen_ai.prompt.0.tool_calls.0.function.arguments"] == '{"city":"NYC","unit":"F"}'
+    assert span._attributes["gen_ai.prompt.0.tool_calls"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "arguments": '{"city":"NYC","unit":"F"}',
+            },
+        }
+    ]
     assert "gen_ai.prompt.0.function_call.name" not in span._attributes
     assert "gen_ai.prompt.0.function_call.arguments" not in span._attributes
 
