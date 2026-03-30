@@ -61,14 +61,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
-          cache: yarn
-          cache-dependency-path: javascript-sdks/yarn.lock
 
       - name: Install JavaScript dependencies
         working-directory: javascript-sdks
         run: |
           corepack enable
-          yarn install
+          corepack install
+          yarn install --immutable
 
       - name: Build package
         if: ${{ matrix.has_build }}

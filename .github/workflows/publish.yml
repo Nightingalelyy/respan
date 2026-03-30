@@ -113,14 +113,13 @@ jobs:
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
-          cache: yarn
-          cache-dependency-path: javascript-sdks/yarn.lock
 
       - name: Install JavaScript dependencies
         working-directory: javascript-sdks
         run: |
           corepack enable
-          yarn install
+          corepack install
+          yarn install --immutable
 
       - name: Build package
         if: ${{ matrix.has_build }}
