@@ -22,8 +22,8 @@
     "test": "yarn build && node --test",
     "test:live": "yarn build && RESPAN_RUN_LIVE_TESTS=1 node --test",
     "quickstart": "yarn build && node examples/quickstart.js",
-    "publish": "yarn npm publish",
-    "release": "yarn build && yarn version patch && yarn publish"
+    "publish:package": "yarn npm publish",
+    "release": "yarn build && yarn version patch && yarn publish:package"
   },
   "publishConfig": {
     "access": "public"

@@ -23,8 +23,8 @@
   "scripts": {
     "build": "tsc",
     "test": "tsc && node --test tests/*.test.js",
-    "publish": "yarn npm publish",
-    "release": "yarn build && yarn version patch && yarn publish"
+    "publish:package": "yarn npm publish",
+    "release": "yarn build && yarn version patch && yarn publish:package"
   },
   "dependencies": {
     "@arizeai/openinference-semantic-conventions": "^2.1.7",

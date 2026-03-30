@@ -23,8 +23,8 @@
   "scripts": {
     "build": "tsc",
     "clean": "rm -rf dist",
-    "publish": "yarn npm publish",
-    "release": "yarn build && yarn version patch && yarn publish"
+    "publish:package": "yarn npm publish",
+    "release": "yarn build && yarn version patch && yarn publish:package"
   },
   "dependencies": {
     "@openai/agents": "^0.0.8",

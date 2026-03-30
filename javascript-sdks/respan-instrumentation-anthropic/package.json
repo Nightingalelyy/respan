@@ -22,8 +22,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "publish": "yarn npm publish",
-    "release": "yarn build && yarn version patch && yarn publish"
+    "publish:package": "yarn npm publish",
+    "release": "yarn build && yarn version patch && yarn publish:package"
   },
   "packageManager": "yarn@4.6.0",
   "dependencies": {
