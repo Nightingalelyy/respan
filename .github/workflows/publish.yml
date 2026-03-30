@@ -119,7 +119,7 @@ jobs:
         run: |
           corepack enable
           corepack install
-          yarn install --immutable
+          yarn install
 
       - name: Build package
         if: ${{ matrix.has_build }}

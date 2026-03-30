@@ -5,11 +5,6 @@
   "workspaces": [
     "respan",
     "respan-cli",
-    "respan-exporter-anthropic-agents",
-    "respan-exporter-n8n",
-    "respan-exporter-openai-agents",
-    "respan-exporter-vercel",
-    "respan-instrumentation-anthropic",
     "respan-instrumentation-openai",
     "respan-instrumentation-openai-agents",
     "respan-instrumentation-openinference",
