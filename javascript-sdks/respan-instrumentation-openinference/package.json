@@ -17,7 +17,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "yarn build && node --test tests/*.test.js",
+    "test": "tsc && node --test tests/*.test.js",
     "publish": "yarn npm publish",
     "release": "yarn build && yarn version patch && yarn publish"
   },
