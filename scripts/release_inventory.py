@@ -170,6 +170,49 @@ def workspace_paths(entries: list[dict]) -> list[str]:
     return sorted(paths)
 
 
+def js_internal_dependency_names(entries: list[dict]) -> dict[str, set[str]]:
+    js_entries = {entry["name"]: entry for entry in entries if entry["ecosystem"] == "javascript"}
+    manifests = {name: load_manifest(entry) for name, entry in js_entries.items()}
+    graph: dict[str, set[str]] = {}
+
+    for name, manifest in manifests.items():
+        internal: set[str] = set()
+        for section in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+            for dependency_name in manifest.get(section, {}):
+                if dependency_name in js_entries:
+                    internal.add(dependency_name)
+        graph[name] = internal
+
+    return graph
+
+
+def javascript_build_order(entries: list[dict], package_name: str) -> list[dict]:
+    js_entries = {entry["name"]: entry for entry in entries if entry["ecosystem"] == "javascript"}
+    if package_name not in js_entries:
+        raise KeyError(package_name)
+
+    graph = js_internal_dependency_names(entries)
+    ordered_names: list[str] = []
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in visited:
+            return
+        if name in visiting:
+            raise ValueError(f"cyclic javascript dependency detected at {name}")
+
+        visiting.add(name)
+        for dependency_name in sorted(graph.get(name, set())):
+            visit(dependency_name)
+        visiting.remove(name)
+        visited.add(name)
+        ordered_names.append(name)
+
+    visit(package_name)
+    return [js_entries[name] for name in ordered_names]
+
+
 def validate(entries: list[dict]) -> list[str]:
     errors: list[str] = []
     seen_names: set[tuple[str, str]] = set()
@@ -268,9 +311,10 @@ def main() -> int:
     parser.add_argument("--changed-from")
     parser.add_argument("--changed-to")
     parser.add_argument("--version-changed", action="store_true")
+    parser.add_argument("--build-order-for")
     parser.add_argument("--validate", action="store_true")
     parser.add_argument("--count", action="store_true")
-    parser.add_argument("--format", choices=["json", "github-matrix"], default="json")
+    parser.add_argument("--format", choices=["json", "github-matrix", "paths"], default="json")
     args = parser.parse_args()
 
     entries = load_inventory()
@@ -282,6 +326,31 @@ def main() -> int:
                 print(error, file=sys.stderr)
             return 1
         print("release metadata validation passed")
+        return 0
+
+    if args.build_order_for:
+        try:
+            selected_entries = javascript_build_order(entries, args.build_order_for)
+        except KeyError:
+            print(f"unknown javascript package: {args.build_order_for}", file=sys.stderr)
+            return 1
+        except ValueError as error:
+            print(str(error), file=sys.stderr)
+            return 1
+
+        if args.format == "paths":
+            for entry in selected_entries:
+                print(entry["path"])
+            return 0
+
+        selected = [build_record(entry, load_manifest(entry)) for entry in selected_entries]
+        if args.count:
+            print(len(selected))
+            return 0
+        if args.format == "github-matrix":
+            print(json.dumps(selected, separators=(",", ":")))
+            return 0
+        print(json.dumps(selected, indent=2))
         return 0
 
     selected = filtered_entries(

@@ -120,7 +120,12 @@ jobs:
           cd javascript-sdks
           yarn install
           if [ "${{ matrix.has_build }}" = "true" ]; then
-            yarn workspaces foreach -Rt --from "${{ matrix.name }}" run build
+            python3 ../scripts/release_inventory.py --build-order-for "${{ matrix.name }}" --format paths | while IFS= read -r package_path; do
+              [ -n "${package_path}" ] || continue
+              cd "../${package_path}"
+              yarn build
+              cd ../javascript-sdks
+            done
           fi
 
       - name: Publish package
