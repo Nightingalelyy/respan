@@ -119,9 +119,14 @@ jobs:
           corepack enable
           cd javascript-sdks
           yarn install
-          cd ../${{ matrix.path }}
           if [ "${{ matrix.has_build }}" = "true" ]; then
-            yarn build
+            if [ "${{ matrix.path }}" = "javascript-sdks/respan-cli" ]; then
+              cd ../${{ matrix.path }}
+              yarn build
+              cd -
+            else
+              ./node_modules/.bin/tsc -p ../${{ matrix.path }}/tsconfig.json
+            fi
           fi
 
       - name: Publish package
