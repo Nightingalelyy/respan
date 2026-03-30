@@ -179,7 +179,7 @@ def js_internal_dependency_names(entries: list[dict]) -> dict[str, set[str]]:
         internal: set[str] = set()
         for section in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
             for dependency_name in manifest.get(section, {}):
-                if dependency_name in js_entries:
+                if dependency_name != name and dependency_name in js_entries:
                     internal.add(dependency_name)
         graph[name] = internal
 

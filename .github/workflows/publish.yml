@@ -49,15 +49,20 @@ jobs:
 
       - id: refs
         name: Resolve comparison refs
+        env:
+          DISPATCH_BASE_REF: ${{ inputs.base_ref }}
+          DISPATCH_HEAD_REF: ${{ inputs.head_ref }}
+          WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          DEFAULT_HEAD_SHA: ${{ github.sha }}
         run: |
           if [ "${GITHUB_EVENT_NAME}" = "workflow_run" ]; then
-            HEAD_REF="${{ github.event.workflow_run.head_sha }}"
+            HEAD_REF="${WORKFLOW_RUN_HEAD_SHA}"
             BASE_REF="$(git rev-parse "${HEAD_REF}^")"
           else
-            BASE_REF="${{ inputs.base_ref }}"
-            HEAD_REF="${{ inputs.head_ref }}"
+            BASE_REF="${DISPATCH_BASE_REF}"
+            HEAD_REF="${DISPATCH_HEAD_REF}"
             if [ -z "${HEAD_REF}" ]; then
-              HEAD_REF="${{ github.sha }}"
+              HEAD_REF="${DEFAULT_HEAD_SHA}"
             fi
             if [ -z "${BASE_REF}" ]; then
               BASE_REF="$(git rev-parse "${HEAD_REF}^")"
@@ -73,23 +78,35 @@ jobs:
 
       - id: javascript_matrix
         name: Build JavaScript publish matrix
+        env:
+          BASE_REF: ${{ steps.refs.outputs.base_ref }}
+          HEAD_REF: ${{ steps.refs.outputs.head_ref }}
         run: |
-          echo "value=$(python3 scripts/release_inventory.py --ecosystem javascript --changed-from '${{ steps.refs.outputs.base_ref }}' --changed-to '${{ steps.refs.outputs.head_ref }}' --version-changed --format github-matrix)" >> "$GITHUB_OUTPUT"
+          echo "value=$(python3 scripts/release_inventory.py --ecosystem javascript --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --version-changed --format github-matrix)" >> "$GITHUB_OUTPUT"
 
       - id: javascript_count
         name: Count JavaScript publish packages
+        env:
+          BASE_REF: ${{ steps.refs.outputs.base_ref }}
+          HEAD_REF: ${{ steps.refs.outputs.head_ref }}
         run: |
-          echo "value=$(python3 scripts/release_inventory.py --ecosystem javascript --changed-from '${{ steps.refs.outputs.base_ref }}' --changed-to '${{ steps.refs.outputs.head_ref }}' --version-changed --count)" >> "$GITHUB_OUTPUT"
+          echo "value=$(python3 scripts/release_inventory.py --ecosystem javascript --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --version-changed --count)" >> "$GITHUB_OUTPUT"
 
       - id: python_matrix
         name: Build Python publish matrix
+        env:
+          BASE_REF: ${{ steps.refs.outputs.base_ref }}
+          HEAD_REF: ${{ steps.refs.outputs.head_ref }}
         run: |
-          echo "value=$(python3 scripts/release_inventory.py --ecosystem python --changed-from '${{ steps.refs.outputs.base_ref }}' --changed-to '${{ steps.refs.outputs.head_ref }}' --version-changed --format github-matrix)" >> "$GITHUB_OUTPUT"
+          echo "value=$(python3 scripts/release_inventory.py --ecosystem python --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --version-changed --format github-matrix)" >> "$GITHUB_OUTPUT"
 
       - id: python_count
         name: Count Python publish packages
+        env:
+          BASE_REF: ${{ steps.refs.outputs.base_ref }}
+          HEAD_REF: ${{ steps.refs.outputs.head_ref }}
         run: |
-          echo "value=$(python3 scripts/release_inventory.py --ecosystem python --changed-from '${{ steps.refs.outputs.base_ref }}' --changed-to '${{ steps.refs.outputs.head_ref }}' --version-changed --count)" >> "$GITHUB_OUTPUT"
+          echo "value=$(python3 scripts/release_inventory.py --ecosystem python --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --version-changed --count)" >> "$GITHUB_OUTPUT"
 
   publish-javascript:
     needs: discover

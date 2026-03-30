@@ -9,6 +9,7 @@
     "respan-instrumentation-openai-agents",
     "respan-instrumentation-openinference",
     "respan-instrumentation-vercel",
+    "respan-exporter-anthropic-agents",
     "respan-sdk",
     "respan-tracing"
   ],
