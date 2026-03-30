@@ -314,7 +314,7 @@ def main() -> int:
     parser.add_argument("--build-order-for")
     parser.add_argument("--validate", action="store_true")
     parser.add_argument("--count", action="store_true")
-    parser.add_argument("--format", choices=["json", "github-matrix", "paths"], default="json")
+    parser.add_argument("--format", choices=["json", "github-matrix", "paths", "names"], default="json")
     args = parser.parse_args()
 
     entries = load_inventory()
@@ -341,6 +341,10 @@ def main() -> int:
         if args.format == "paths":
             for entry in selected_entries:
                 print(entry["path"])
+            return 0
+        if args.format == "names":
+            for entry in selected_entries:
+                print(entry["name"])
             return 0
 
         selected = [build_record(entry, load_manifest(entry)) for entry in selected_entries]
