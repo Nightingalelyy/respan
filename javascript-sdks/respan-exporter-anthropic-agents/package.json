@@ -24,8 +24,8 @@
     "build": "tsc",
     "clean": "rm -rf dist",
     "test": "tsx --test tests/**/*.test.ts",
-    "publish": "yarn npm publish",
-    "release": "yarn build && yarn version patch && yarn publish"
+    "publish:package": "yarn npm publish",
+    "release": "yarn build && yarn version patch && yarn publish:package"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": ">=0.2.0",
