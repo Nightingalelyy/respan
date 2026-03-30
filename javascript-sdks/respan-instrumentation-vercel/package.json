@@ -1,0 +1,33 @@
+{
+  "name": "@respan/instrumentation-vercel",
+  "type": "module",
+  "version": "1.0.1",
+  "description": "Respan instrumentation plugin for Vercel AI SDK",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "author": "Respan <team@respan.ai>",
+  "license": "Apache-2.0",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "publish": "yarn npm publish",
+    "release": "yarn build && yarn version patch && yarn publish"
+  },
+  "packageManager": "yarn@4.6.0",
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/sdk-trace-base": "^1.29.0",
+    "@respan/respan-sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.29",
+    "typescript": "^5.7.3"
+  }
+}

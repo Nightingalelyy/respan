@@ -25,28 +25,23 @@ from .respan_types.filter_types import (
 )
 from .respan_types.mixin_types.filter_mixin import MetricFilterValueType
 
-from .utils.pre_processing import (
-    validate_and_separate_params,
-    validate_and_separate_log_and_llm_params,
-)
-
-__version__ = "2.5.0"
+__version__ = "2.6.20"
 
 __all__ = [
     # Public types (recommended)
     "RespanLogParams",
     "RespanFullLogParams",
     "RespanTextLogParams",
-    
+
     # Internal types (backward compatibility)
     "RespanParams",
-    
+
     # Parameter types
-    "EvaluationParams", 
+    "EvaluationParams",
     "RetryParams",
     "Message",
     "Usage",
-    
+
     # Filter types
     "MetricFilterParam",
     "FilterBundle",
@@ -55,8 +50,4 @@ __all__ = [
     "MetricFilterParamPydantic",
     "FilterBundlePydantic",
     "FilterParamDictPydantic",
-
-    # Utility functions
-    "validate_and_separate_params",
-    "validate_and_separate_log_and_llm_params",
 ]
