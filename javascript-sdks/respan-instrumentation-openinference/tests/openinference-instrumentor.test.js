@@ -6,6 +6,7 @@ import { trace } from "@opentelemetry/api";
 import {
   OpenInferenceInstrumentor,
   OpenInferenceTranslator,
+  prepareOpenInferenceSpanForExport,
 } from "../dist/index.js";
 
 const OI_SPAN_KIND = "openinference.span.kind";
@@ -70,7 +71,7 @@ class FakeInstrumentor {
   }
 }
 
-test("translator promotes Claude Agent SDK token fields and cleans redundant attributes", () => {
+test("translator promotes Claude Agent SDK token fields without mutating original OI attrs", () => {
   const translator = new OpenInferenceTranslator();
   const span = makeSpan({
     name: "ClaudeAgent.query",
@@ -104,14 +105,23 @@ test("translator promotes Claude Agent SDK token fields and cleans redundant att
   assert.equal(span.attributes.total_request_tokens, 100);
   assert.equal(span.attributes["traceloop.entity.input"], "Explain tracing");
   assert.equal(span.attributes["traceloop.entity.output"], "Tracing adds spans");
-  assert.equal(span.attributes[OI_SPAN_KIND], undefined);
-  assert.equal(span.attributes["llm.token_count.prompt"], undefined);
-  assert.equal(span.attributes["input.mime_type"], undefined);
-  assert.equal(span.attributes["process.pid"], undefined);
-  assert.strictEqual(span._attributes, span.attributes);
+  assert.equal(span.attributes[OI_SPAN_KIND], "AGENT");
+  assert.equal(span.attributes["llm.token_count.prompt"], 3);
+  assert.equal(span.attributes["input.mime_type"], "text/plain");
+  assert.equal(span.attributes["process.pid"], 1234);
+  assert.notStrictEqual(span._attributes, span.attributes);
+
+  const exportedSpan = prepareOpenInferenceSpanForExport(span);
+  assert.notStrictEqual(exportedSpan, span);
+  assert.equal(exportedSpan.attributes[OI_SPAN_KIND], undefined);
+  assert.equal(exportedSpan.attributes["llm.token_count.prompt"], undefined);
+  assert.equal(exportedSpan.attributes["input.mime_type"], undefined);
+  assert.equal(exportedSpan.attributes["process.pid"], undefined);
+  assert.strictEqual(exportedSpan._attributes, exportedSpan.attributes);
+  assert.equal(span.attributes[OI_SPAN_KIND], "AGENT");
 });
 
-test("translator rebuilds message content from text blocks", () => {
+test("translator rebuilds LLM message content from text blocks and export cleanup removes duplicated OI message attrs", () => {
   const translator = new OpenInferenceTranslator();
   const span = makeSpan({
     attributes: {
@@ -130,6 +140,20 @@ test("translator rebuilds message content from text blocks", () => {
   assert.equal(span.attributes["gen_ai.prompt.0.content"], "Hello\nworld");
   assert.equal(span.attributes["gen_ai.completion.0.role"], "assistant");
   assert.equal(span.attributes["gen_ai.completion.0.content"], "Hi there");
+  assert.equal(
+    span.attributes["llm.input_messages.0.message.role"],
+    "user",
+  );
+
+  const exportedSpan = prepareOpenInferenceSpanForExport(span);
+  assert.equal(
+    exportedSpan.attributes["llm.input_messages.0.message.role"],
+    undefined,
+  );
+  assert.equal(
+    exportedSpan.attributes["llm.output_messages.0.message.role"],
+    undefined,
+  );
 });
 
 test("translator falls back to JSON when content blocks are not plain text", () => {
@@ -149,18 +173,62 @@ test("translator falls back to JSON when content blocks are not plain text", () 
   );
 });
 
-test("instrumentor hook sanitizes exported OpenInference spans and restores passthrough after deactivate", () => {
-  const capturedSpans = [];
-  const processor = {
+test("export cleanup preserves untranslated OI message and tool attrs on non-LLM spans", () => {
+  const translator = new OpenInferenceTranslator();
+  const span = makeSpan({
+    attributes: {
+      [OI_SPAN_KIND]: "AGENT",
+      "llm.input_messages.0.message.role": "user",
+      "llm.input_messages.0.message.content": "keep me",
+      "llm.tools": JSON.stringify([{ name: "weather" }]),
+      "llm.invocation_parameters": JSON.stringify({ temperature: 0.1 }),
+    },
+  });
+
+  translator.onEnd(span);
+  const exportedSpan = prepareOpenInferenceSpanForExport(span);
+
+  assert.equal(
+    exportedSpan.attributes["llm.input_messages.0.message.role"],
+    "user",
+  );
+  assert.equal(
+    exportedSpan.attributes["llm.input_messages.0.message.content"],
+    "keep me",
+  );
+  assert.equal(
+    exportedSpan.attributes["llm.tools"],
+    JSON.stringify([{ name: "weather" }]),
+  );
+  assert.equal(
+    exportedSpan.attributes["llm.invocation_parameters"],
+    JSON.stringify({ temperature: 0.1 }),
+  );
+});
+
+test("instrumentor hook preserves processor-visible span state and sanitizes export clone", () => {
+  const processorSeen = [];
+  const exportedSpans = [];
+  const manager = {
     onEnd(span) {
-      capturedSpans.push(span);
+      exportedSpans.push(span);
+    },
+  };
+  const processor = {
+    getProcessorManager() {
+      return manager;
+    },
+    onEnd(span) {
+      processorSeen.push(span);
+      manager.onEnd(span);
     },
   };
   const provider = createFakeTracerProvider(processor);
   resetTracerProvider(provider);
 
+  let instrumentor;
   try {
-    const instrumentor = new OpenInferenceInstrumentor(FakeInstrumentor);
+    instrumentor = new OpenInferenceInstrumentor(FakeInstrumentor);
     instrumentor.activate();
 
     const oiSpan = makeSpan({
@@ -183,14 +251,21 @@ test("instrumentor hook sanitizes exported OpenInference spans and restores pass
 
     processor.onEnd(oiSpan);
 
-    assert.equal(capturedSpans.length, 1);
-    assert.notStrictEqual(capturedSpans[0], oiSpan);
-    assert.deepEqual(capturedSpans[0].resource.attributes, {
+    assert.equal(processorSeen.length, 1);
+    assert.strictEqual(processorSeen[0], oiSpan);
+    assert.equal(processorSeen[0].attributes[OI_SPAN_KIND], "AGENT");
+    assert.equal(processorSeen[0].attributes["llm.token_count.prompt"], 3);
+
+    assert.equal(exportedSpans.length, 1);
+    assert.notStrictEqual(exportedSpans[0], oiSpan);
+    assert.equal(exportedSpans[0].attributes[OI_SPAN_KIND], undefined);
+    assert.equal(exportedSpans[0].attributes["llm.token_count.prompt"], undefined);
+    assert.deepEqual(exportedSpans[0].resource.attributes, {
       "service.name": "respan-test",
       "custom.attr": "kept",
     });
-    assert.equal(capturedSpans[0].instrumentationScope.name, "");
-    assert.equal(capturedSpans[0].instrumentationLibrary.name, "");
+    assert.equal(exportedSpans[0].instrumentationScope.name, "");
+    assert.equal(exportedSpans[0].instrumentationLibrary.name, "");
     assert.equal(oiSpan.resource.attributes["process.pid"], 42);
     assert.equal(
       oiSpan.instrumentationScope.name,
@@ -211,9 +286,14 @@ test("instrumentor hook sanitizes exported OpenInference spans and restores pass
 
     processor.onEnd(rawSpan);
 
-    assert.equal(capturedSpans.length, 2);
-    assert.strictEqual(capturedSpans[1], rawSpan);
+    assert.equal(processorSeen.length, 2);
+    assert.strictEqual(processorSeen[1], rawSpan);
+    assert.equal(exportedSpans.length, 2);
+    assert.strictEqual(exportedSpans[1], rawSpan);
   } finally {
+    try {
+      instrumentor?.deactivate();
+    } catch {}
     resetTracerProvider();
   }
 });
@@ -228,8 +308,9 @@ test("instrumentor hook leaves non-openinference spans unsanitized while active"
   const provider = createFakeTracerProvider(processor);
   resetTracerProvider(provider);
 
+  let instrumentor;
   try {
-    const instrumentor = new OpenInferenceInstrumentor(FakeInstrumentor);
+    instrumentor = new OpenInferenceInstrumentor(FakeInstrumentor);
     instrumentor.activate();
 
     const nonOiSpan = makeSpan({
@@ -246,9 +327,10 @@ test("instrumentor hook leaves non-openinference spans unsanitized while active"
 
     assert.equal(capturedSpans.length, 1);
     assert.strictEqual(capturedSpans[0], nonOiSpan);
-
-    instrumentor.deactivate();
   } finally {
+    try {
+      instrumentor?.deactivate();
+    } catch {}
     resetTracerProvider();
   }
 });

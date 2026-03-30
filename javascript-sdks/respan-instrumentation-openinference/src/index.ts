@@ -1,69 +1,17 @@
 import { trace } from "@opentelemetry/api";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
-import { OpenInferenceTranslator } from "./_translator.js";
+import {
+  isOpenInferenceSpan,
+  prepareOpenInferenceSpanForExport,
+  translateOpenInferenceSpan,
+} from "./_translator.js";
 
-export { OpenInferenceTranslator } from "./_translator.js";
-
-const OI_SPAN_KIND_ATTR = "openinference.span.kind";
-const EMPTY_SCOPE_NAME = "";
-const OTEL_RESOURCE_NOISE_PREFIXES = [
-  "process.",
-  "host.",
-  "telemetry.sdk.",
-];
-
-function filterResourceAttributes(
-  attrs: Record<string, any> | undefined,
-): Record<string, any> | undefined {
-  if (!attrs) return attrs;
-
-  return Object.fromEntries(
-    Object.entries(attrs).filter(
-      ([key]) =>
-        !OTEL_RESOURCE_NOISE_PREFIXES.some((prefix) => key.startsWith(prefix)),
-    ),
-  );
-}
-
-function sanitizeTranslatedSpanForExport(span: ReadableSpan): ReadableSpan {
-  const clonedSpan = Object.assign(
-    Object.create(Object.getPrototypeOf(span)),
-    span,
-  ) as ReadableSpan & {
-    resource?: { attributes?: Record<string, any> };
-    instrumentationLibrary?: { name?: string; version?: string };
-    instrumentationScope?: { name?: string; version?: string };
-  };
-
-  const resource = (span as any).resource;
-  const filteredResourceAttrs = filterResourceAttributes(resource?.attributes);
-  if (resource && filteredResourceAttrs) {
-    clonedSpan.resource = {
-      ...resource,
-      attributes: filteredResourceAttrs,
-    };
-  }
-
-  const instrumentationLibrary = (span as any).instrumentationLibrary;
-  if (instrumentationLibrary) {
-    clonedSpan.instrumentationLibrary = {
-      ...instrumentationLibrary,
-      name: EMPTY_SCOPE_NAME,
-      version: EMPTY_SCOPE_NAME,
-    };
-  }
-
-  const instrumentationScope = (span as any).instrumentationScope;
-  if (instrumentationScope) {
-    clonedSpan.instrumentationScope = {
-      ...instrumentationScope,
-      name: EMPTY_SCOPE_NAME,
-      version: EMPTY_SCOPE_NAME,
-    };
-  }
-
-  return clonedSpan;
-}
+export {
+  OpenInferenceTranslator,
+  isOpenInferenceSpan,
+  prepareOpenInferenceSpanForExport,
+  translateOpenInferenceSpan,
+} from "./_translator.js";
 
 /**
  * Generic Respan instrumentation wrapper for any OpenInference instrumentor.
@@ -75,10 +23,9 @@ function sanitizeTranslatedSpanForExport(span: ReadableSpan): ReadableSpan {
  *
  * This wrapper detects the interface and handles both patterns.
  *
- * Automatically ensures the {@link OpenInferenceTranslator} runs before the
- * active Respan processor exports the span. This keeps the translation logic
- * in the OpenInference package while still allowing the core Respan pipeline
- * to see the translated attributes.
+ * Translation is additive on the live span so Respan callbacks and routing
+ * still see the original OpenInference attributes. Export-only cleanup is
+ * applied later at the processor-manager boundary using a cloned span.
  *
  * ```typescript
  * import { Respan } from "@respan/respan";
@@ -99,11 +46,13 @@ export class OpenInferenceInstrumentor {
   private _isSpanProcessor = false;
   private _ownsTranslatorHook = false;
 
-  private static _translator = new OpenInferenceTranslator();
   private static _translatorHookRefCount = 0;
   private static _patchedProcessor: any = null;
-  private static _originalOnEnd: ((span: ReadableSpan) => void) | null = null;
-  private static _wrappedOnEnd: ((span: ReadableSpan) => void) | null = null;
+  private static _originalProcessorOnEnd: ((span: ReadableSpan) => void) | null = null;
+  private static _wrappedProcessorOnEnd: ((span: ReadableSpan) => void) | null = null;
+  private static _patchedProcessorManager: any = null;
+  private static _originalManagerOnEnd: ((span: ReadableSpan) => void) | null = null;
+  private static _wrappedManagerOnEnd: ((span: ReadableSpan) => void) | null = null;
 
   private _sdkModule: any;
 
@@ -128,68 +77,133 @@ export class OpenInferenceInstrumentor {
     );
   }
 
+  private static _getProcessorManager(processor: any): any {
+    if (!processor || typeof processor.getProcessorManager !== "function") {
+      return null;
+    }
+
+    try {
+      return processor.getProcessorManager();
+    } catch {
+      return null;
+    }
+  }
+
+  private static _restoreHook(
+    target: any,
+    originalOnEnd: ((span: ReadableSpan) => void) | null,
+    wrappedOnEnd: ((span: ReadableSpan) => void) | null,
+    label: string,
+  ): boolean {
+    if (!target || !originalOnEnd) {
+      return true;
+    }
+
+    if (wrappedOnEnd && target.onEnd !== wrappedOnEnd) {
+      console.warn(
+        `[respan] OpenInferenceInstrumentor: ${label}.onEnd was modified externally; original handler could not be restored.`
+      );
+      return false;
+    }
+
+    target.onEnd = originalOnEnd;
+    return true;
+  }
+
+  private static _restorePatchedProcessor(): void {
+    if (
+      OpenInferenceInstrumentor._restoreHook(
+        OpenInferenceInstrumentor._patchedProcessor,
+        OpenInferenceInstrumentor._originalProcessorOnEnd,
+        OpenInferenceInstrumentor._wrappedProcessorOnEnd,
+        "active span processor",
+      )
+    ) {
+      OpenInferenceInstrumentor._patchedProcessor = null;
+      OpenInferenceInstrumentor._originalProcessorOnEnd = null;
+      OpenInferenceInstrumentor._wrappedProcessorOnEnd = null;
+    }
+  }
+
+  private static _restorePatchedManager(): void {
+    if (
+      OpenInferenceInstrumentor._restoreHook(
+        OpenInferenceInstrumentor._patchedProcessorManager,
+        OpenInferenceInstrumentor._originalManagerOnEnd,
+        OpenInferenceInstrumentor._wrappedManagerOnEnd,
+        "processor manager",
+      )
+    ) {
+      OpenInferenceInstrumentor._patchedProcessorManager = null;
+      OpenInferenceInstrumentor._originalManagerOnEnd = null;
+      OpenInferenceInstrumentor._wrappedManagerOnEnd = null;
+    }
+  }
+
   private static _installTranslatorHook(): void {
     const processor = OpenInferenceInstrumentor._getActiveSpanProcessor();
     if (!processor || typeof processor.onEnd !== "function") {
       return;
     }
 
-    if (OpenInferenceInstrumentor._patchedProcessor === processor) {
+    if (OpenInferenceInstrumentor._patchedProcessor !== processor) {
+      if (OpenInferenceInstrumentor._patchedProcessor) {
+        OpenInferenceInstrumentor._restorePatchedProcessor();
+      }
+
+      const originalProcessorOnEnd = processor.onEnd.bind(processor);
+      const hasProcessorManager =
+        OpenInferenceInstrumentor._getProcessorManager(processor) !== null;
+      const wrappedProcessorOnEnd = (span: ReadableSpan) => {
+        if (isOpenInferenceSpan(span)) {
+          try {
+            translateOpenInferenceSpan(span);
+          } catch {
+            // Never block export if translation hits an unexpected span shape.
+          }
+        }
+
+        return originalProcessorOnEnd(
+          hasProcessorManager || !isOpenInferenceSpan(span)
+            ? span
+            : prepareOpenInferenceSpanForExport(span),
+        );
+      };
+      processor.onEnd = wrappedProcessorOnEnd;
+
+      OpenInferenceInstrumentor._patchedProcessor = processor;
+      OpenInferenceInstrumentor._originalProcessorOnEnd = originalProcessorOnEnd;
+      OpenInferenceInstrumentor._wrappedProcessorOnEnd = wrappedProcessorOnEnd;
+    }
+
+    const manager = OpenInferenceInstrumentor._getProcessorManager(processor);
+    if (!manager || typeof manager.onEnd !== "function") {
       return;
     }
 
-    if (
-      OpenInferenceInstrumentor._patchedProcessor &&
-      OpenInferenceInstrumentor._originalOnEnd
-    ) {
-      if (
-        !OpenInferenceInstrumentor._wrappedOnEnd ||
-        OpenInferenceInstrumentor._patchedProcessor.onEnd ===
-          OpenInferenceInstrumentor._wrappedOnEnd
-      ) {
-        OpenInferenceInstrumentor._patchedProcessor.onEnd =
-          OpenInferenceInstrumentor._originalOnEnd;
+    if (OpenInferenceInstrumentor._patchedProcessorManager !== manager) {
+      if (OpenInferenceInstrumentor._patchedProcessorManager) {
+        OpenInferenceInstrumentor._restorePatchedManager();
       }
+
+      const originalManagerOnEnd = manager.onEnd.bind(manager);
+      const wrappedManagerOnEnd = (span: ReadableSpan) =>
+        originalManagerOnEnd(
+          isOpenInferenceSpan(span)
+            ? prepareOpenInferenceSpanForExport(span)
+            : span,
+        );
+      manager.onEnd = wrappedManagerOnEnd;
+
+      OpenInferenceInstrumentor._patchedProcessorManager = manager;
+      OpenInferenceInstrumentor._originalManagerOnEnd = originalManagerOnEnd;
+      OpenInferenceInstrumentor._wrappedManagerOnEnd = wrappedManagerOnEnd;
     }
-
-    const originalOnEnd = processor.onEnd.bind(processor);
-    const wrappedOnEnd = (span: ReadableSpan) => {
-      const isOpenInferenceSpan =
-        (span as any).attributes?.[OI_SPAN_KIND_ATTR] !== undefined;
-
-      try {
-        OpenInferenceInstrumentor._translator.onEnd(span);
-      } catch {
-        // Never block export if translation hits an unexpected span shape.
-      }
-
-      return originalOnEnd(
-        isOpenInferenceSpan ? sanitizeTranslatedSpanForExport(span) : span,
-      );
-    };
-    processor.onEnd = wrappedOnEnd;
-
-    OpenInferenceInstrumentor._patchedProcessor = processor;
-    OpenInferenceInstrumentor._originalOnEnd = originalOnEnd;
-    OpenInferenceInstrumentor._wrappedOnEnd = wrappedOnEnd;
   }
 
   private static _removeTranslatorHook(): void {
-    if (
-      OpenInferenceInstrumentor._patchedProcessor &&
-      OpenInferenceInstrumentor._originalOnEnd &&
-      (
-        !OpenInferenceInstrumentor._wrappedOnEnd ||
-        OpenInferenceInstrumentor._patchedProcessor.onEnd ===
-          OpenInferenceInstrumentor._wrappedOnEnd
-      )
-    ) {
-      OpenInferenceInstrumentor._patchedProcessor.onEnd =
-        OpenInferenceInstrumentor._originalOnEnd;
-    }
-    OpenInferenceInstrumentor._patchedProcessor = null;
-    OpenInferenceInstrumentor._originalOnEnd = null;
-    OpenInferenceInstrumentor._wrappedOnEnd = null;
+    OpenInferenceInstrumentor._restorePatchedManager();
+    OpenInferenceInstrumentor._restorePatchedProcessor();
   }
 
   activate(): void {
