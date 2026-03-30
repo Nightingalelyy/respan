@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    tomllib = None
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+INVENTORY_PATH = REPO_ROOT / ".github" / "release-packages.json"
+JS_WORKSPACE_ROOT = REPO_ROOT / "javascript-sdks"
+
+
+def load_inventory() -> list[dict]:
+    data = json.loads(INVENTORY_PATH.read_text())
+    return data["packages"]
+
+
+def read_json(path: Path) -> dict:
+    return json.loads(path.read_text())
+
+
+def read_toml(path: Path) -> dict:
+    text = path.read_text()
+    return parse_toml_text(text)
+
+
+def parse_toml_text(text: str) -> dict:
+    if tomllib is not None:
+        return tomllib.loads(text)
+    return parse_minimal_toml(text)
+
+
+def parse_minimal_toml(text: str) -> dict:
+    data: dict = {}
+    section: list[str] = []
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].split(".")
+            target = data
+            for part in section:
+                target = target.setdefault(part, {})
+            continue
+        if "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+
+        string_match = re.fullmatch(r'"(.*)"', value)
+        if not string_match:
+            continue
+
+        target = data
+        for part in section:
+            target = target.setdefault(part, {})
+        target[key] = string_match.group(1)
+
+    return data
+
+
+def manifest_path(entry: dict) -> Path:
+    filename = "package.json" if entry["ecosystem"] == "javascript" else "pyproject.toml"
+    return REPO_ROOT / entry["path"] / filename
+
+
+def load_manifest(entry: dict) -> dict:
+    path = manifest_path(entry)
+    if entry["ecosystem"] == "javascript":
+        return read_json(path)
+    return read_toml(path)
+
+
+def manifest_name(entry: dict, manifest: dict) -> str:
+    if entry["ecosystem"] == "javascript":
+        return manifest["name"]
+    return manifest["tool"]["poetry"]["name"]
+
+
+def manifest_version(entry: dict, manifest: dict) -> str:
+    if entry["ecosystem"] == "javascript":
+        return manifest["version"]
+    return manifest["tool"]["poetry"]["version"]
+
+
+def has_js_script(manifest: dict, script_name: str) -> bool:
+    return script_name in manifest.get("scripts", {})
+
+
+def slug_for(entry: dict) -> str:
+    return entry["path"].split("/")[-1].replace(".", "-")
+
+
+def git_stdout(*args: str) -> str:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout
+
+
+def git_stdout_or_none(*args: str) -> str | None:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return None
+    return completed.stdout
+
+
+def changed_files(base: str, head: str) -> set[str]:
+    if not base or set(base) == {"0"}:
+        return {
+            str(path.relative_to(REPO_ROOT))
+            for path in REPO_ROOT.rglob("*")
+            if path.is_file() and ".git" not in path.parts
+        }
+    output = git_stdout_or_none("diff", "--name-only", base, head)
+    if output is None:
+        return set()
+    return {line.strip() for line in output.splitlines() if line.strip()}
+
+
+def package_changed(entry: dict, files: set[str]) -> bool:
+    prefix = f"{entry['path']}/"
+    return any(path == entry["path"] or path.startswith(prefix) for path in files)
+
+
+def version_from_git_ref(entry: dict, ref: str) -> str | None:
+    if not ref:
+        return None
+    repo_path = f"{entry['path']}/{'package.json' if entry['ecosystem'] == 'javascript' else 'pyproject.toml'}"
+    content = git_stdout_or_none("show", f"{ref}:{repo_path}")
+    if content is None:
+        return None
+    if entry["ecosystem"] == "javascript":
+        manifest = json.loads(content)
+        return manifest["version"]
+    manifest = parse_toml_text(content)
+    return manifest["tool"]["poetry"]["version"]
+
+
+def workspace_paths(entries: list[dict]) -> list[str]:
+    paths = []
+    for entry in entries:
+        if entry["ecosystem"] != "javascript":
+            continue
+        paths.append(entry["path"].split("/", 1)[1])
+    return sorted(paths)
+
+
+def validate(entries: list[dict]) -> list[str]:
+    errors: list[str] = []
+    seen_names: set[tuple[str, str]] = set()
+
+    js_root_manifest = read_json(JS_WORKSPACE_ROOT / "package.json")
+    actual_workspaces = set(js_root_manifest.get("workspaces", []))
+    expected_workspaces = set(workspace_paths(entries))
+    missing_workspaces = sorted(expected_workspaces - actual_workspaces)
+    if missing_workspaces:
+        errors.append(
+            "javascript workspace list is missing release inventory packages: "
+            f"{missing_workspaces}"
+        )
+
+    for entry in entries:
+        key = (entry["ecosystem"], entry["name"])
+        if key in seen_names:
+            errors.append(f"duplicate inventory entry for {entry['ecosystem']} package {entry['name']}")
+            continue
+        seen_names.add(key)
+
+        path = manifest_path(entry)
+        if not path.exists():
+            errors.append(f"missing manifest for {entry['name']} at {path.relative_to(REPO_ROOT)}")
+            continue
+
+        manifest = load_manifest(entry)
+        if manifest_name(entry, manifest) != entry["name"]:
+            errors.append(
+                f"inventory name mismatch for {entry['path']}: "
+                f"expected {entry['name']}, got {manifest_name(entry, manifest)}"
+            )
+
+        if entry["ecosystem"] == "javascript":
+            if manifest.get("private"):
+                errors.append(f"{entry['name']} is marked private but included in release inventory")
+            publish_access = manifest.get("publishConfig", {}).get("access")
+            if entry["registry"] == "npm" and publish_access != "public":
+                errors.append(f"{entry['name']} is missing publishConfig.access=public")
+        else:
+            project_version = manifest.get("project", {}).get("version")
+            poetry_version = manifest["tool"]["poetry"]["version"]
+            if project_version and project_version != poetry_version:
+                errors.append(
+                    f"{entry['name']} has conflicting [project] and [tool.poetry] versions: "
+                    f"{project_version} != {poetry_version}"
+                )
+
+    return errors
+
+
+def build_record(entry: dict, manifest: dict) -> dict:
+    record = {
+        "ecosystem": entry["ecosystem"],
+        "name": entry["name"],
+        "path": entry["path"],
+        "registry": entry["registry"],
+        "slug": slug_for(entry),
+        "version": manifest_version(entry, manifest),
+    }
+    if entry["ecosystem"] == "javascript":
+        record["has_build"] = has_js_script(manifest, "build")
+        record["has_test"] = has_js_script(manifest, "test")
+    return record
+
+
+def filtered_entries(
+    entries: list[dict],
+    ecosystem: str,
+    base: str | None,
+    head: str | None,
+    require_version_change: bool,
+) -> list[dict]:
+    selected = [entry for entry in entries if ecosystem == "all" or entry["ecosystem"] == ecosystem]
+    manifests = {entry["name"]: load_manifest(entry) for entry in selected}
+
+    if base and head:
+        files = changed_files(base, head)
+        selected = [entry for entry in selected if package_changed(entry, files)]
+
+    if require_version_change:
+        filtered: list[dict] = []
+        for entry in selected:
+            current_version = manifest_version(entry, manifests[entry["name"]])
+            previous_version = version_from_git_ref(entry, base or "")
+            if previous_version != current_version:
+                filtered.append(entry)
+        selected = filtered
+
+    return [build_record(entry, manifests[entry["name"]]) for entry in selected]
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ecosystem", choices=["all", "javascript", "python"], default="all")
+    parser.add_argument("--changed-from")
+    parser.add_argument("--changed-to")
+    parser.add_argument("--version-changed", action="store_true")
+    parser.add_argument("--validate", action="store_true")
+    parser.add_argument("--count", action="store_true")
+    parser.add_argument("--format", choices=["json", "github-matrix"], default="json")
+    args = parser.parse_args()
+
+    entries = load_inventory()
+
+    if args.validate:
+        errors = validate(entries)
+        if errors:
+            for error in errors:
+                print(error, file=sys.stderr)
+            return 1
+        print("release metadata validation passed")
+        return 0
+
+    selected = filtered_entries(
+        entries,
+        ecosystem=args.ecosystem,
+        base=args.changed_from,
+        head=args.changed_to,
+        require_version_change=args.version_changed,
+    )
+
+    if args.count:
+        print(len(selected))
+        return 0
+
+    if args.format == "github-matrix":
+        print(json.dumps(selected, separators=(",", ":")))
+        return 0
+
+    print(json.dumps(selected, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

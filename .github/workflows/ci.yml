@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      javascript_matrix: ${{ steps.javascript_matrix.outputs.value }}
+      javascript_count: ${{ steps.javascript_count.outputs.value }}
+      python_matrix: ${{ steps.python_matrix.outputs.value }}
+      python_count: ${{ steps.python_count.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate release metadata
+        run: python3 scripts/release_inventory.py --validate
+
+      - id: javascript_matrix
+        name: Build JavaScript matrix
+        run: echo "value=$(python3 scripts/release_inventory.py --ecosystem javascript --format github-matrix)" >> "$GITHUB_OUTPUT"
+
+      - id: javascript_count
+        name: Count JavaScript packages
+        run: echo "value=$(python3 scripts/release_inventory.py --ecosystem javascript --count)" >> "$GITHUB_OUTPUT"
+
+      - id: python_matrix
+        name: Build Python matrix
+        run: echo "value=$(python3 scripts/release_inventory.py --ecosystem python --format github-matrix)" >> "$GITHUB_OUTPUT"
+
+      - id: python_count
+        name: Count Python packages
+        run: echo "value=$(python3 scripts/release_inventory.py --ecosystem python --count)" >> "$GITHUB_OUTPUT"
+
+  javascript:
+    needs: discover
+    if: ${{ needs.discover.outputs.javascript_count != '0' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.javascript_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: yarn
+          cache-dependency-path: javascript-sdks/yarn.lock
+
+      - name: Install JavaScript dependencies
+        working-directory: javascript-sdks
+        run: |
+          corepack enable
+          yarn install
+
+      - name: Build package
+        if: ${{ matrix.has_build }}
+        working-directory: javascript-sdks
+        run: yarn workspace "${{ matrix.name }}" build
+
+      - name: Test package
+        if: ${{ matrix.has_test }}
+        working-directory: javascript-sdks
+        run: yarn workspace "${{ matrix.name }}" test
+
+  python:
+    needs: discover
+    if: ${{ needs.discover.outputs.python_count != '0' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.python_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python build tooling
+        run: python3 -m pip install --upgrade build pip
+
+      - name: Build distribution
+        working-directory: ${{ matrix.path }}
+        run: python3 -m build

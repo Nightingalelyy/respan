@@ -17,7 +17,6 @@
   },
   "scripts": {
     "build": "tsc",
-    "version": "1.0.0",
     "publish": "yarn npm publish",
     "release": "yarn build &&yarn version patch && yarn publish"
   },
