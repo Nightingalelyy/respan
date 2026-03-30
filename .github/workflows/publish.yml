@@ -114,17 +114,15 @@ jobs:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
-      - name: Install JavaScript dependencies
+      - name: Install and build package
         working-directory: javascript-sdks
         run: |
           corepack enable
           corepack install
           yarn install
-
-      - name: Build package
-        if: ${{ matrix.has_build }}
-        working-directory: javascript-sdks
-        run: yarn workspace "${{ matrix.name }}" build
+          if [ "${{ matrix.has_build }}" = "true" ]; then
+            yarn workspace "${{ matrix.name }}" build
+          fi
 
       - name: Publish package
         working-directory: javascript-sdks
