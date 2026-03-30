@@ -53,5 +53,8 @@
     "bin",
     "dist",
     "oclif.manifest.json"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }

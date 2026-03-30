@@ -1,0 +1,208 @@
+name: Publish
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: Optional git ref or SHA to compare from
+        required: false
+      head_ref:
+        description: Optional git ref or SHA to compare to
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    outputs:
+      base_ref: ${{ steps.refs.outputs.base_ref }}
+      head_ref: ${{ steps.refs.outputs.head_ref }}
+      javascript_matrix: ${{ steps.javascript_matrix.outputs.value }}
+      javascript_count: ${{ steps.javascript_count.outputs.value }}
+      python_matrix: ${{ steps.python_matrix.outputs.value }}
+      python_count: ${{ steps.python_count.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate release metadata
+        run: python3 scripts/release_inventory.py --validate
+
+      - id: refs
+        name: Resolve comparison refs
+        env:
+          DISPATCH_BASE_REF: ${{ inputs.base_ref }}
+          DISPATCH_HEAD_REF: ${{ inputs.head_ref }}
+          WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          DEFAULT_HEAD_SHA: ${{ github.sha }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_run" ]; then
+            HEAD_REF="${WORKFLOW_RUN_HEAD_SHA}"
+            BASE_REF="$(git rev-parse "${HEAD_REF}^")"
+          else
+            BASE_REF="${DISPATCH_BASE_REF}"
+            HEAD_REF="${DISPATCH_HEAD_REF}"
+            if [ -z "${HEAD_REF}" ]; then
+              HEAD_REF="${DEFAULT_HEAD_SHA}"
+            fi
+            if [ -z "${BASE_REF}" ]; then
+              BASE_REF="$(git rev-parse "${HEAD_REF}^")"
+            fi
+          fi
+
+          if [ -z "${BASE_REF}" ] || [ "${BASE_REF}" = "0000000000000000000000000000000000000000" ]; then
+            BASE_REF="$(git rev-parse "${HEAD_REF}^")"
+          fi
+
+          echo "base_ref=${BASE_REF}" >> "$GITHUB_OUTPUT"
+          echo "head_ref=${HEAD_REF}" >> "$GITHUB_OUTPUT"
+
+      - id: javascript_matrix
+        name: Build JavaScript publish matrix
+        env:
+          BASE_REF: ${{ steps.refs.outputs.base_ref }}
+          HEAD_REF: ${{ steps.refs.outputs.head_ref }}
+        run: |
+          echo "value=$(python3 scripts/release_inventory.py --ecosystem javascript --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --version-changed --format github-matrix)" >> "$GITHUB_OUTPUT"
+
+      - id: javascript_count
+        name: Count JavaScript publish packages
+        env:
+          BASE_REF: ${{ steps.refs.outputs.base_ref }}
+          HEAD_REF: ${{ steps.refs.outputs.head_ref }}
+        run: |
+          echo "value=$(python3 scripts/release_inventory.py --ecosystem javascript --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --version-changed --count)" >> "$GITHUB_OUTPUT"
+
+      - id: python_matrix
+        name: Build Python publish matrix
+        env:
+          BASE_REF: ${{ steps.refs.outputs.base_ref }}
+          HEAD_REF: ${{ steps.refs.outputs.head_ref }}
+        run: |
+          echo "value=$(python3 scripts/release_inventory.py --ecosystem python --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --version-changed --format github-matrix)" >> "$GITHUB_OUTPUT"
+
+      - id: python_count
+        name: Count Python publish packages
+        env:
+          BASE_REF: ${{ steps.refs.outputs.base_ref }}
+          HEAD_REF: ${{ steps.refs.outputs.head_ref }}
+        run: |
+          echo "value=$(python3 scripts/release_inventory.py --ecosystem python --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --version-changed --count)" >> "$GITHUB_OUTPUT"
+
+  publish-javascript:
+    needs: discover
+    if: ${{ needs.discover.outputs.javascript_count != '0' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: npm
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.javascript_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.discover.outputs.head_ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install and build package
+        run: |
+          corepack enable
+          cd javascript-sdks
+          yarn install
+          if [ "${{ matrix.has_build }}" = "true" ]; then
+            python3 ../scripts/release_inventory.py --build-order-for "${{ matrix.name }}" --format paths | while IFS= read -r package_path; do
+              [ -n "${package_path}" ] || continue
+              if [ "${package_path}" = "javascript-sdks/respan-cli" ]; then
+                yarn workspace "@respan/cli" run build
+              else
+                ./node_modules/.bin/tsc -p "../${package_path}/tsconfig.json"
+              fi
+            done
+          fi
+
+      - name: Publish package
+        working-directory: ${{ matrix.path }}
+        run: yarn npm publish --access public --provenance --tolerate-republish
+
+  build-python:
+    needs: discover
+    if: ${{ needs.discover.outputs.python_count != '0' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.python_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.discover.outputs.head_ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python build tooling
+        run: python3 -m pip install --upgrade build pip
+
+      - name: Build distribution
+        working-directory: ${{ matrix.path }}
+        run: python3 -m build
+
+      - name: Upload distribution artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-${{ matrix.slug }}
+          path: ${{ matrix.path }}/dist/*
+          if-no-files-found: error
+
+  publish-python:
+    needs:
+      - discover
+      - build-python
+    if: ${{ needs.discover.outputs.python_count != '0' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: pypi
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.python_matrix) }}
+    steps:
+      - name: Download distribution artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: python-${{ matrix.slug }}
+          path: dist
+
+      - name: Publish package
+        uses: pypa/gh-action-pypi-publish@release/v1
