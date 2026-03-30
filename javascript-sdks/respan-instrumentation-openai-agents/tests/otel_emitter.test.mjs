@@ -40,6 +40,13 @@ function emitAndCapture(item) {
   return captureState.spans[0].attributes;
 }
 
+function emitAndCaptureSpan(item) {
+  captureState.spans = [];
+  emitSdkItem(item);
+  assert.equal(captureState.spans.length, 1);
+  return captureState.spans[0];
+}
+
 function makeBaseSpanData(spanData) {
   return {
     traceId: "trace_test_123",
@@ -287,4 +294,28 @@ test("emit response preserves chat completions tool call messages", () => {
   assert.equal(attrs["traceloop.entity.output"], "Done");
   assert.equal(attrs[RespanSpanAttributes.RESPAN_SPAN_TOOL_CALLS], undefined);
   assert.equal(attrs["traceloop.span.kind"], undefined);
+});
+
+test("emit span without ended_at defaults end time to start time", () => {
+  const span = emitAndCaptureSpan({
+    traceId: "trace_test_123",
+    spanId: "span_test_456",
+    parentId: "parent_test_789",
+    started_at: "2026-03-30T00:00:00.000Z",
+    error: null,
+    spanData: {
+      type: "generation",
+      model: "gpt-4o",
+      input: "hello",
+      output: "world",
+      usage: {
+        prompt_tokens: 1,
+        completion_tokens: 1,
+      },
+    },
+  });
+
+  assert.deepEqual(span.startTime, [1774828800, 0]);
+  assert.deepEqual(span.endTime, [1774828800, 0]);
+  assert.deepEqual(span.duration, [0, 0]);
 });

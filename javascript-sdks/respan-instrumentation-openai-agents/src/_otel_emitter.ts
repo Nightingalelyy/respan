@@ -416,7 +416,7 @@ interface BuildSpanOptions {
 
 function buildReadableSpan(opts: BuildSpanOptions): ReadableSpan {
   const startTime = opts.startTimeHr ?? hrTime();
-  const endTime = opts.endTimeHr ?? hrTime();
+  const endTime = opts.endTimeHr ?? startTime;
 
   const traceId = ensureTraceId(opts.traceId);
   const spanId = ensureSpanId(opts.spanId);
