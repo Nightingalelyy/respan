@@ -10,7 +10,11 @@ from types import SimpleNamespace
 import pytest
 from opentelemetry.attributes import BoundedAttributes
 
-from respan_instrumentation_openinference._translator import OpenInferenceTranslator
+from respan_instrumentation_openinference._translator import (
+    OI_AGENT_NAME,
+    OI_LLM_TOKEN_COUNT_CACHE_READ,
+    OpenInferenceTranslator,
+)
 from respan_sdk.constants.span_attributes import (
     RESPAN_SPAN_TOOL_CALLS,
     RESPAN_SPAN_TOOLS,
@@ -28,6 +32,11 @@ def _make_span(attrs: dict, name: str = "test-span"):
 @pytest.fixture
 def translator():
     return OpenInferenceTranslator()
+
+
+def test_openinference_floor_version_attrs_resolve_to_stable_keys():
+    assert OI_AGENT_NAME == "agent.name"
+    assert OI_LLM_TOKEN_COUNT_CACHE_READ == "llm.token_count.prompt_details.cache_read"
 
 
 # ------------------------------------------------------------------
@@ -209,6 +218,19 @@ def test_indexed_message_content_translated(translator):
     assert span._attributes["gen_ai.completion.1.content"] == "Final answer"
 
 
+def test_indexed_message_content_preserves_empty_blocks(translator):
+    span = _make_span({
+        "openinference.span.kind": "LLM",
+        "llm.output_messages.0.message.role": "assistant",
+        "llm.output_messages.0.message.content.0": "",
+        "llm.output_messages.0.message.content.1": "tool result here",
+    })
+
+    translator.on_end(span)
+
+    assert span._attributes["gen_ai.completion.0.content"] == "\ntool result here"
+
+
 # ------------------------------------------------------------------
 # 12. invocation parameters extracted
 # ------------------------------------------------------------------
@@ -385,3 +407,29 @@ def test_legacy_function_call_fields_promoted_as_tool_calls(translator):
     assert json.loads(span._attributes[RESPAN_SPAN_TOOL_CALLS]) == expected_tool_calls
     assert span._attributes["gen_ai.completion.0.tool_calls"] == expected_tool_calls
     assert "tool_calls" not in span._attributes
+
+
+def test_input_history_tool_calls_do_not_become_top_level_tool_calls(translator):
+    span = _make_span({
+        "openinference.span.kind": "LLM",
+        "llm.input_messages.0.message.role": "assistant",
+        "llm.input_messages.0.message.tool_calls.0.tool_call.id": "call_history",
+        "llm.input_messages.0.message.tool_calls.0.tool_call.function.name": "lookup_weather",
+        "llm.input_messages.0.message.tool_calls.0.tool_call.function.arguments": '{"city":"Tokyo"}',
+        "llm.output_messages.0.message.role": "assistant",
+        "llm.output_messages.0.message.content": "No tool call in this turn",
+    })
+
+    translator.on_end(span)
+
+    assert RESPAN_SPAN_TOOL_CALLS not in span._attributes
+    assert span._attributes["gen_ai.prompt.0.tool_calls"] == [
+        {
+            "id": "call_history",
+            "function": {
+                "name": "lookup_weather",
+                "arguments": '{"city":"Tokyo"}',
+            },
+            "type": "function",
+        }
+    ]

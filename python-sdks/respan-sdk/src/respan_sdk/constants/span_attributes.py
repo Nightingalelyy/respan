@@ -145,9 +145,20 @@ RESPAN_SPAN_HANDOFFS = "respan.span.handoffs"
 # ---------------------------------------------------------------------------
 LLM_REQUEST_TYPE = "llm.request.type"
 LLM_REQUEST_MODEL = "gen_ai.request.model"
+LLM_REQUEST_TEMPERATURE = "gen_ai.request.temperature"
+LLM_REQUEST_TOP_P = "gen_ai.request.top_p"
+LLM_REQUEST_MAX_TOKENS = "gen_ai.request.max_tokens"
+LLM_REQUEST_FUNCTIONS = "llm.request.functions"
+LLM_REQUEST_REPETITION_PENALTY = "llm.request.repetition_penalty"
 LLM_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"
 LLM_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"
+LLM_USAGE_TOTAL_TOKENS = "llm.usage.total_tokens"
+LLM_USAGE_CACHE_READ_INPUT_TOKENS = "llm.usage.cache_read_input_tokens"
 LLM_REQUEST_REASONING_EFFORT = "llm.request.reasoning_effort"
+LLM_TOP_K = "llm.top_k"
+LLM_CHAT_STOP_SEQUENCES = "llm.chat.stop_sequences"
+LLM_FREQUENCY_PENALTY = "llm.frequency_penalty"
+LLM_PRESENCE_PENALTY = "llm.presence_penalty"
 
 # ---------------------------------------------------------------------------
 # OTEL incubating GenAI attributes
@@ -155,6 +166,9 @@ LLM_REQUEST_REASONING_EFFORT = "llm.request.reasoning_effort"
 # locally until the upstream package includes them.
 # ---------------------------------------------------------------------------
 GEN_AI_SYSTEM = "gen_ai.system"
+GEN_AI_PROVIDER_NAME = "gen_ai.provider.name"
+GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
+GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
 GEN_AI_OPERATION_NAME = "gen_ai.operation.name"
 GEN_AI_AGENT_NAME = "gen_ai.agent.name"
 GEN_AI_TOOL_NAME = "gen_ai.tool.name"
@@ -172,6 +186,26 @@ PYDANTIC_AI_TOOL_RESPONSE = "tool_response"
 # OpenInference vendor attributes
 # Only OPENINFERENCE_SPAN_KIND is here because respan-tracing uses it
 # for span filtering without depending on the openinference package.
-# All other OI attributes should be imported from openinference.semconv.trace.
+# Missing/floor-mismatched OI attributes are defined here as string fallbacks.
 # ---------------------------------------------------------------------------
 OPENINFERENCE_SPAN_KIND = "openinference.span.kind"
+OPENINFERENCE_INPUT_MIME_TYPE = "input.mime_type"
+OPENINFERENCE_OUTPUT_MIME_TYPE = "output.mime_type"
+OPENINFERENCE_AGENT_NAME = "agent.name"
+OPENINFERENCE_LLM_TOKEN_COUNT_PROMPT_DETAILS_CACHE_READ = (
+    "llm.token_count.prompt_details.cache_read"
+)
+OPENINFERENCE_INPUT_MESSAGES_PREFIX = "llm.input_messages."
+OPENINFERENCE_OUTPUT_MESSAGES_PREFIX = "llm.output_messages."
+OPENINFERENCE_TOKEN_COUNT_PREFIX = "llm.token_count."
+OPENINFERENCE_TOOLS_PREFIX = "llm.tools."
+OPENINFERENCE_MESSAGE_ROLE = "message.role"
+OPENINFERENCE_MESSAGE_CONTENT = "message.content"
+OPENINFERENCE_MESSAGE_CONTENT_PREFIX = "message.content."
+OPENINFERENCE_MESSAGE_TOOL_CALLS_PREFIX = "message.tool_calls."
+OPENINFERENCE_MESSAGE_FUNCTION_CALL_NAME = "message.function_call_name"
+OPENINFERENCE_MESSAGE_FUNCTION_CALL_ARGUMENTS_JSON = "message.function_call_arguments_json"
+OPENINFERENCE_MESSAGE_FINISH_REASON = "message.finish_reason"
+OPENINFERENCE_TOOL_PREFIX = "tool."
+OPENINFERENCE_TOOL_JSON_SCHEMA = "tool.json_schema"
+OPENINFERENCE_TOOL_CALL_PREFIX = "tool_call."
