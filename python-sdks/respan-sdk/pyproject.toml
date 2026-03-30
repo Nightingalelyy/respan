@@ -1,8 +1,3 @@
-[project]
-name = "respan-sdk"
-version = "2.6.20"
-description = "Respan SDK allows you to interact with the Respan API smoothly"
-
 [tool.poetry]
 name = "respan-sdk"
 version = "2.6.21"
@@ -36,7 +31,7 @@ build-backend = "poetry.core.masonry.api"
 [tool.poetry.extras]
 dev = ["pytest", "python-dotenv"]
 
-[project.urls]
+[tool.poetry.urls]
 Homepage = "https://respan.ai"
 Repository = "https://github.com/respan-ai/respan-sdks.git"
 Documentation = "https://docs.respan.ai"
