@@ -2,20 +2,35 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { trace } from "@opentelemetry/api";
+import { RespanSpanAttributes } from "@respan/respan-sdk";
 
 import { emitSdkItem } from "../dist/_otel_emitter.js";
 
 const captureState = { spans: [] };
+const originalGetTracerProvider = trace.getTracerProvider.bind(trace);
 
-trace.setGlobalTracerProvider({
-  getTracer() {
-    return {};
-  },
-  activeSpanProcessor: {
-    onEnd(span) {
-      captureState.spans.push(span);
+test.before(() => {
+  Object.defineProperty(trace, "getTracerProvider", {
+    configurable: true,
+    writable: true,
+    value() {
+      return {
+        activeSpanProcessor: {
+          onEnd(span) {
+            captureState.spans.push(span);
+          },
+        },
+      };
     },
-  },
+  });
+});
+
+test.after(() => {
+  Object.defineProperty(trace, "getTracerProvider", {
+    configurable: true,
+    writable: true,
+    value: originalGetTracerProvider,
+  });
 });
 
 function emitAndCapture(item) {
@@ -37,7 +52,7 @@ function makeBaseSpanData(spanData) {
   };
 }
 
-test("emit response preserves chat history and carries tool calls in output", () => {
+test("emit response stores plain-text output and namespaced tool attrs", () => {
   const attrs = emitAndCapture(
     makeBaseSpanData({
       type: "response",
@@ -90,8 +105,7 @@ test("emit response preserves chat history and carries tool calls in output", ()
     }),
   );
 
-  const inputMessages = JSON.parse(attrs["traceloop.entity.input"]);
-  assert.deepEqual(inputMessages, [
+  assert.deepEqual(JSON.parse(attrs["traceloop.entity.input"]), [
     { role: "user", content: "Tell me everything about Tokyo" },
     {
       role: "assistant",
@@ -113,23 +127,18 @@ test("emit response preserves chat history and carries tool calls in output", ()
       tool_call_id: "call_weather",
     },
   ]);
-  assert.deepEqual(JSON.parse(attrs["traceloop.entity.output"]), [
+  assert.equal(attrs["traceloop.entity.output"], "Here is Tokyo info");
+  assert.deepEqual(JSON.parse(attrs[RespanSpanAttributes.RESPAN_SPAN_TOOL_CALLS]), [
     {
-      role: "assistant",
-      content: "Here is Tokyo info",
-      tool_calls: [
-        {
-          id: "call_stats",
-          type: "function",
-          function: {
-            name: "get_city_stats",
-            arguments: "{\"city\":\"Tokyo\"}",
-          },
-        },
-      ],
+      id: "call_stats",
+      type: "function",
+      function: {
+        name: "get_city_stats",
+        arguments: "{\"city\":\"Tokyo\"}",
+      },
     },
   ]);
-  assert.deepEqual(attrs.tools, [
+  assert.deepEqual(JSON.parse(attrs[RespanSpanAttributes.RESPAN_SPAN_TOOLS]), [
     {
       type: "function",
       function: {
@@ -140,11 +149,12 @@ test("emit response preserves chat history and carries tool calls in output", ()
     },
   ]);
   assert.ok(!attrs["traceloop.entity.input"].includes("[object Object]"));
-  assert.equal(attrs["respan.span.tools"], undefined);
+  assert.equal(attrs.tools, undefined);
+  assert.equal(attrs.tool_calls, undefined);
   assert.equal(attrs["traceloop.span.kind"], undefined);
 });
 
-test("emit generation extracts tool calls without object stringification", () => {
+test("emit generation extracts namespaced tool calls", () => {
   const attrs = emitAndCapture(
     makeBaseSpanData({
       type: "generation",
@@ -174,23 +184,19 @@ test("emit generation extracts tool calls without object stringification", () =>
   assert.deepEqual(JSON.parse(attrs["traceloop.entity.input"]), [
     { role: "user", content: "Use the tool" },
   ]);
-  assert.deepEqual(JSON.parse(attrs["traceloop.entity.output"]), [
+  assert.equal(attrs["traceloop.entity.output"], "");
+  assert.deepEqual(JSON.parse(attrs[RespanSpanAttributes.RESPAN_SPAN_TOOL_CALLS]), [
     {
-      role: "assistant",
-      content: "",
-      tool_calls: [
-        {
-          id: "call_docs",
-          type: "function",
-          function: {
-            name: "search_docs",
-            arguments: "{\"query\":\"otel\"}",
-          },
-        },
-      ],
+      id: "call_docs",
+      type: "function",
+      function: {
+        name: "search_docs",
+        arguments: "{\"query\":\"otel\"}",
+      },
     },
   ]);
   assert.ok(!attrs["traceloop.entity.input"].includes("[object Object]"));
+  assert.equal(attrs.tool_calls, undefined);
   assert.equal(attrs["traceloop.span.kind"], undefined);
 });
 
@@ -229,7 +235,7 @@ test("emit generation preserves boolean false output", () => {
   assert.equal(attrs["traceloop.span.kind"], undefined);
 });
 
-test("emit response preserves Chat Completions tool_calls messages", () => {
+test("emit response preserves chat completions tool call messages", () => {
   const attrs = emitAndCapture(
     makeBaseSpanData({
       type: "response",
@@ -278,5 +284,7 @@ test("emit response preserves Chat Completions tool_calls messages", () => {
       ],
     },
   ]);
+  assert.equal(attrs["traceloop.entity.output"], "Done");
+  assert.equal(attrs[RespanSpanAttributes.RESPAN_SPAN_TOOL_CALLS], undefined);
   assert.equal(attrs["traceloop.span.kind"], undefined);
 });

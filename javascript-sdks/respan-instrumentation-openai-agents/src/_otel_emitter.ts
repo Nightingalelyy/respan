@@ -7,18 +7,16 @@
  */
 
 import { trace, SpanKind, SpanStatusCode } from "@opentelemetry/api";
-import { ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import { hrTime, hrTimeDuration } from "@opentelemetry/core";
+import { ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
-import { RespanSpanAttributes, RespanLogType } from "@respan/respan-sdk";
-import type { Trace, Span } from "@openai/agents";
-
-// ── Helpers ────────────────────────────────────────────────────────────────
+import { RespanLogType, RespanSpanAttributes } from "@respan/respan-sdk";
+import type { Span, Trace } from "@openai/agents";
 
 function safeJson(obj: any): string {
   try {
     return JSON.stringify(obj, (_key, value) =>
-      typeof value === "bigint" ? value.toString() : value
+      typeof value === "bigint" ? value.toString() : value,
     );
   } catch {
     return String(obj);
@@ -80,6 +78,61 @@ function stringifyStructured(value: any): string {
   return safeJson(serialized);
 }
 
+function contentBlocksToText(contentBlocks: any): string {
+  const serialized = toSerializableValue(contentBlocks);
+  if (serialized === undefined || serialized === null) {
+    return "";
+  }
+  if (typeof serialized === "string") {
+    return serialized;
+  }
+  if (!Array.isArray(serialized)) {
+    return stringifyStructured(serialized);
+  }
+
+  const textParts: string[] = [];
+  for (const block of serialized) {
+    if (typeof block === "string") {
+      textParts.push(block);
+      continue;
+    }
+    if (!block || typeof block !== "object" || Array.isArray(block)) {
+      textParts.push(String(block ?? ""));
+      continue;
+    }
+
+    const blockType = (block as any).type ?? "";
+    if (blockType === "input_image") {
+      textParts.push("[image]");
+      continue;
+    }
+    if (blockType === "input_file") {
+      textParts.push("[file]");
+      continue;
+    }
+    if (typeof (block as any).text === "string") {
+      textParts.push((block as any).text);
+      continue;
+    }
+    textParts.push(stringifyStructured(block));
+  }
+
+  return textParts.join("\n");
+}
+
+function normalizeMessageContent(content: any): string {
+  if (content === undefined || content === null) {
+    return "";
+  }
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return contentBlocksToText(content);
+  }
+  return stringifyStructured(content);
+}
+
 function stringifyToolResult(value: any): string {
   const serialized = toSerializableValue(value);
   if (serialized === undefined || serialized === null) {
@@ -119,62 +172,9 @@ function setJsonStructuredAttr(
   value: any,
 ): void {
   if (value === undefined || value === null) return;
-  if (Array.isArray(value) && value.length === 0) return;
   if (value === "") return;
+  if (Array.isArray(value) && value.length === 0) return;
   attrs[key] = safeJson(value);
-}
-
-function contentBlocksToText(contentBlocks: any): string {
-  const serialized = toSerializableValue(contentBlocks);
-  if (serialized === undefined || serialized === null) {
-    return "";
-  }
-  if (typeof serialized === "string") {
-    return serialized;
-  }
-  if (!Array.isArray(serialized)) {
-    return stringifyStructured(serialized);
-  }
-
-  const textParts: string[] = [];
-  for (const block of serialized) {
-    if (typeof block === "string") {
-      textParts.push(block);
-      continue;
-    }
-    if (!block || typeof block !== "object" || Array.isArray(block)) {
-      textParts.push(String(block ?? ""));
-      continue;
-    }
-    const blockType = (block as any).type ?? "";
-    if (blockType === "input_image") {
-      textParts.push("[image]");
-      continue;
-    }
-    if (blockType === "input_file") {
-      textParts.push("[file]");
-      continue;
-    }
-    if (typeof (block as any).text === "string") {
-      textParts.push((block as any).text);
-      continue;
-    }
-    textParts.push(stringifyStructured(block));
-  }
-  return textParts.join("\n");
-}
-
-function normalizeMessageContent(content: any): string {
-  if (content === undefined || content === null) {
-    return "";
-  }
-  if (typeof content === "string") {
-    return content;
-  }
-  if (Array.isArray(content)) {
-    return contentBlocksToText(content);
-  }
-  return stringifyStructured(content);
 }
 
 function normalizeToolCall(rawToolCall: any): Record<string, any> | null {
@@ -250,13 +250,11 @@ function extractTools(tools: any): Record<string, any>[] {
     if (!tool || typeof tool !== "object" || Array.isArray(tool)) {
       continue;
     }
+
     const toolType = (tool as any).type ?? "";
     if (toolType === "function") {
       const func: Record<string, any> = {
-        name:
-          (tool as any).name ??
-          (tool as any).function?.name ??
-          "",
+        name: (tool as any).name ?? (tool as any).function?.name ?? "",
       };
       const description =
         (tool as any).description ??
@@ -271,8 +269,10 @@ function extractTools(tools: any): Record<string, any>[] {
       result.push({ type: "function", function: func });
       continue;
     }
+
     result.push(tool as Record<string, any>);
   }
+
   return result;
 }
 
@@ -302,9 +302,7 @@ function normalizeChatMessage(rawMessage: any): Record<string, any> {
   return normalized;
 }
 
-function responsesApiItemToMessage(
-  rawItem: any,
-): Record<string, any> | null {
+function responsesApiItemToMessage(rawItem: any): Record<string, any> | null {
   const item = toSerializableValue(rawItem);
   if (!item || typeof item !== "object" || Array.isArray(item)) {
     return null;
@@ -351,20 +349,12 @@ function responsesApiItemToMessage(
 
 function parseISOToHrTime(iso: string | undefined): [number, number] | null {
   if (!iso) return null;
-  try {
-    const ms = new Date(iso).getTime();
-    const secs = Math.floor(ms / 1000);
-    const nanos = (ms % 1000) * 1_000_000;
-    return [secs, nanos];
-  } catch {
-    return null;
-  }
-}
+  const ms = new Date(iso).getTime();
+  if (!Number.isFinite(ms)) return null;
 
-function generateHexId(length: number): string {
-  return Array.from({ length }, () =>
-    Math.floor(Math.random() * 16).toString(16)
-  ).join("");
+  const secs = Math.floor(ms / 1000);
+  const nanos = (ms % 1000) * 1_000_000;
+  return [secs, nanos];
 }
 
 function hashStringToHexId(s: string, length: number): string {
@@ -372,25 +362,30 @@ function hashStringToHexId(s: string, length: number): string {
   for (let i = 0; i < s.length; i++) {
     hash = ((hash << 5) - hash + s.charCodeAt(i)) | 0;
   }
-  // Pad the hash into a hex string of the target length
   const hex = Math.abs(hash).toString(16).padStart(8, "0");
-  // Repeat/slice to desired length
   return (hex + hex + hex + hex).slice(0, length);
 }
 
 function ensureTraceId(id: string): string {
-  // OTEL trace IDs are 32 hex chars
   if (/^[0-9a-f]{32}$/i.test(id)) return id.toLowerCase();
   return hashStringToHexId(id, 32);
 }
 
 function ensureSpanId(id: string): string {
-  // OTEL span IDs are 16 hex chars
   if (/^[0-9a-f]{16}$/i.test(id)) return id.toLowerCase();
   return hashStringToHexId(id, 16);
 }
 
-// ── Base attribute builder ─────────────────────────────────────────────────
+function resolveSpanTimes(item: Span<any>): {
+  startTimeHr: [number, number] | null;
+  endTimeHr: [number, number] | null;
+} {
+  const serialized = toSerializableValue(item) as Record<string, any> | undefined;
+  return {
+    startTimeHr: parseISOToHrTime(serialized?.started_at),
+    endTimeHr: parseISOToHrTime(serialized?.ended_at),
+  };
+}
 
 function baseAttrs(
   entityName: string,
@@ -399,15 +394,13 @@ function baseAttrs(
 ): Record<string, any> {
   return {
     // Leave traceloop.span.kind unset for injected OpenAI Agents spans.
-    // The composite processor treats that attribute as a user-decorated root
-    // marker and would otherwise flatten the parent/child tree.
+    // In the JS tracing pipeline, that attribute is treated as a root-span
+    // marker and would flatten the parent/child tree.
     [SpanAttributes.TRACELOOP_ENTITY_NAME]: entityName,
     [SpanAttributes.TRACELOOP_ENTITY_PATH]: entityPath,
     [RespanSpanAttributes.RESPAN_LOG_TYPE]: logType,
   };
 }
-
-// ── ReadableSpan builder ───────────────────────────────────────────────────
 
 interface BuildSpanOptions {
   name: string;
@@ -434,7 +427,6 @@ function buildReadableSpan(opts: BuildSpanOptions): ReadableSpan {
       ? { code: SpanStatusCode.ERROR, message: opts.errorMessage ?? "" }
       : { code: SpanStatusCode.OK, message: "" };
 
-  // Build a ReadableSpan-compatible object
   return {
     name: opts.name,
     kind: SpanKind.INTERNAL,
@@ -464,12 +456,8 @@ function buildReadableSpan(opts: BuildSpanOptions): ReadableSpan {
   } as unknown as ReadableSpan;
 }
 
-// ── Inject into OTEL pipeline ──────────────────────────────────────────────
-
 function injectSpan(span: ReadableSpan): void {
   const tp = trace.getTracerProvider() as any;
-  // Walk the provider chain to find activeSpanProcessor:
-  // ProxyTracerProvider._delegate (NodeTracerProvider) has activeSpanProcessor
   const processor =
     tp?.activeSpanProcessor ??
     tp?._delegate?.activeSpanProcessor ??
@@ -478,8 +466,6 @@ function injectSpan(span: ReadableSpan): void {
     processor.onEnd(span);
   }
 }
-
-// ── Input/output formatting helpers ────────────────────────────────────────
 
 function formatInputMessages(input: any): any[] | null {
   const serialized = toSerializableValue(input);
@@ -564,10 +550,18 @@ function formatOutput(output: any): string {
       }
 
       const itemType = (item as any).type ?? "";
-      if (itemType === "function_call" || itemType === "function_call_output" || itemType === "function_call_result") {
+      if (
+        itemType === "function_call" ||
+        itemType === "function_call_output" ||
+        itemType === "function_call_result"
+      ) {
         continue;
       }
-      if (itemType === "output_text" || itemType === "text" || itemType === "input_text") {
+      if (
+        itemType === "output_text" ||
+        itemType === "text" ||
+        itemType === "input_text"
+      ) {
         textParts.push((item as any).text ?? "");
         continue;
       }
@@ -587,23 +581,6 @@ function formatOutput(output: any): string {
   return stringifyStructured(serialized);
 }
 
-function formatOutputMessage(output: any): string {
-  const content = formatOutput(output);
-  const toolCalls = extractToolCalls(output);
-  if (!toolCalls.length) {
-    return content;
-  }
-  return safeJson([
-    {
-      role: "assistant",
-      content,
-      tool_calls: toolCalls,
-    },
-  ]);
-}
-
-// ── Per-type emitters ──────────────────────────────────────────────────────
-
 function isTrace(item: any): item is Trace {
   return "traceId" in item && "name" in item && !("spanId" in item);
 }
@@ -613,17 +590,14 @@ function isSpan(item: any): item is Span<any> {
 }
 
 function emitTrace(traceObj: Trace): void {
-  const attrs = baseAttrs(
-    traceObj.name || "trace",
-    "",
-    RespanLogType.WORKFLOW,
-  );
-  attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] = traceObj.name || "trace";
+  const traceName = traceObj.name || "trace";
+  const attrs = baseAttrs(traceName, "", RespanLogType.WORKFLOW);
+  attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] = traceName;
 
   const span = buildReadableSpan({
-    name: `${traceObj.name}.workflow`,
+    name: `${traceName}.workflow`,
     traceId: traceObj.traceId,
-    spanId: traceObj.traceId, // root span uses trace_id as span_id
+    spanId: traceObj.traceId,
     attributes: attrs,
   });
   injectSpan(span);
@@ -631,18 +605,17 @@ function emitTrace(traceObj: Trace): void {
 
 function emitAgent(item: Span<any>): void {
   const data = item.spanData as any;
+  const { startTimeHr, endTimeHr } = resolveSpanTimes(item);
   const name = data.name || "agent";
-  const json = JSON.parse(JSON.stringify(item));
-  const startHr = parseISOToHrTime(json.started_at);
-  const endHr = parseISOToHrTime(json.ended_at);
 
   const attrs = baseAttrs(name, name, RespanLogType.AGENT);
   attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] = name;
   attrs[RespanSpanAttributes.RESPAN_METADATA_AGENT_NAME] = name;
-  const tools = extractTools(data.tools);
-  if (tools.length) {
-    attrs.tools = tools;
-  }
+  setJsonStructuredAttr(
+    attrs,
+    RespanSpanAttributes.RESPAN_SPAN_TOOLS,
+    extractTools(data.tools),
+  );
   setJsonStructuredAttr(
     attrs,
     RespanSpanAttributes.RESPAN_SPAN_HANDOFFS,
@@ -654,8 +627,8 @@ function emitAgent(item: Span<any>): void {
     traceId: item.traceId,
     spanId: item.spanId,
     parentId: item.parentId || item.traceId,
-    startTimeHr: startHr,
-    endTimeHr: endHr,
+    startTimeHr,
+    endTimeHr,
     attributes: attrs,
     statusCode: item.error ? 400 : 200,
     errorMessage: item.error ? String(item.error) : undefined,
@@ -665,38 +638,38 @@ function emitAgent(item: Span<any>): void {
 
 function emitResponse(item: Span<any>): void {
   const data = item.spanData as any;
-  const json = JSON.parse(JSON.stringify(item));
-  const startHr = parseISOToHrTime(json.started_at);
-  const endHr = parseISOToHrTime(json.ended_at);
+  const { startTimeHr, endTimeHr } = resolveSpanTimes(item);
 
   const attrs = baseAttrs("response", "response", RespanLogType.RESPONSE);
   attrs[RespanSpanAttributes.LLM_REQUEST_TYPE] = RespanLogType.CHAT;
   attrs[RespanSpanAttributes.LLM_SYSTEM] = "openai";
 
-  // Input
   const inputMsgs = formatInputMessages(data._input);
   if (inputMsgs) {
     attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson(inputMsgs);
   }
 
-  // Response data
   const resp = toSerializableValue(data._response);
   if (resp && typeof resp === "object" && !Array.isArray(resp)) {
     if ((resp as any).model) {
       attrs[RespanSpanAttributes.GEN_AI_REQUEST_MODEL] = (resp as any).model;
     }
 
-    if ((resp as any).output) {
-      attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = formatOutputMessage(
-        (resp as any).output,
+    if ("output" in resp) {
+      attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = formatOutput((resp as any).output);
+      setJsonStructuredAttr(
+        attrs,
+        RespanSpanAttributes.RESPAN_SPAN_TOOL_CALLS,
+        extractToolCalls((resp as any).output),
       );
     }
 
-    if ((resp as any).tools) {
-      const tools = extractTools((resp as any).tools);
-      if (tools.length) {
-        attrs.tools = tools;
-      }
+    if ("tools" in resp) {
+      setJsonStructuredAttr(
+        attrs,
+        RespanSpanAttributes.RESPAN_SPAN_TOOLS,
+        extractTools((resp as any).tools),
+      );
     }
 
     if ((resp as any).usage) {
@@ -712,8 +685,8 @@ function emitResponse(item: Span<any>): void {
     traceId: item.traceId,
     spanId: item.spanId,
     parentId: item.parentId || item.traceId,
-    startTimeHr: startHr,
-    endTimeHr: endHr,
+    startTimeHr,
+    endTimeHr,
     attributes: attrs,
     statusCode: item.error ? 400 : 200,
     errorMessage: item.error ? String(item.error) : undefined,
@@ -723,10 +696,8 @@ function emitResponse(item: Span<any>): void {
 
 function emitFunction(item: Span<any>): void {
   const data = item.spanData as any;
+  const { startTimeHr, endTimeHr } = resolveSpanTimes(item);
   const name = data.name || "function";
-  const json = JSON.parse(JSON.stringify(item));
-  const startHr = parseISOToHrTime(json.started_at);
-  const endHr = parseISOToHrTime(json.ended_at);
 
   const attrs = baseAttrs(name, name, RespanLogType.TOOL);
   attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson([
@@ -742,8 +713,8 @@ function emitFunction(item: Span<any>): void {
     traceId: item.traceId,
     spanId: item.spanId,
     parentId: item.parentId || item.traceId,
-    startTimeHr: startHr,
-    endTimeHr: endHr,
+    startTimeHr,
+    endTimeHr,
     attributes: attrs,
     statusCode: item.error ? 400 : 200,
     errorMessage: item.error ? String(item.error) : undefined,
@@ -753,9 +724,7 @@ function emitFunction(item: Span<any>): void {
 
 function emitGeneration(item: Span<any>): void {
   const data = item.spanData as any;
-  const json = JSON.parse(JSON.stringify(item));
-  const startHr = parseISOToHrTime(json.started_at);
-  const endHr = parseISOToHrTime(json.ended_at);
+  const { startTimeHr, endTimeHr } = resolveSpanTimes(item);
 
   const attrs = baseAttrs("generation", "generation", RespanLogType.GENERATION);
   attrs[RespanSpanAttributes.LLM_REQUEST_TYPE] = RespanLogType.CHAT;
@@ -767,8 +736,11 @@ function emitGeneration(item: Span<any>): void {
     attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson(inputMsgs);
   }
 
-  attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = formatOutputMessage(
-    data.output,
+  attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = formatOutput(data.output);
+  setJsonStructuredAttr(
+    attrs,
+    RespanSpanAttributes.RESPAN_SPAN_TOOL_CALLS,
+    extractToolCalls(data.output),
   );
 
   if (data.usage) {
@@ -783,8 +755,8 @@ function emitGeneration(item: Span<any>): void {
     traceId: item.traceId,
     spanId: item.spanId,
     parentId: item.parentId || item.traceId,
-    startTimeHr: startHr,
-    endTimeHr: endHr,
+    startTimeHr,
+    endTimeHr,
     attributes: attrs,
     statusCode: item.error ? 400 : 200,
     errorMessage: item.error ? String(item.error) : undefined,
@@ -794,9 +766,7 @@ function emitGeneration(item: Span<any>): void {
 
 function emitHandoff(item: Span<any>): void {
   const data = item.spanData as any;
-  const json = JSON.parse(JSON.stringify(item));
-  const startHr = parseISOToHrTime(json.started_at);
-  const endHr = parseISOToHrTime(json.ended_at);
+  const { startTimeHr, endTimeHr } = resolveSpanTimes(item);
 
   const fromAgent = data.from_agent || "";
   const toAgent = data.to_agent || "";
@@ -812,8 +782,8 @@ function emitHandoff(item: Span<any>): void {
     traceId: item.traceId,
     spanId: item.spanId,
     parentId: item.parentId || item.traceId,
-    startTimeHr: startHr,
-    endTimeHr: endHr,
+    startTimeHr,
+    endTimeHr,
     attributes: attrs,
     statusCode: item.error ? 400 : 200,
     errorMessage: item.error ? String(item.error) : undefined,
@@ -823,10 +793,8 @@ function emitHandoff(item: Span<any>): void {
 
 function emitGuardrail(item: Span<any>): void {
   const data = item.spanData as any;
+  const { startTimeHr, endTimeHr } = resolveSpanTimes(item);
   const name = `guardrail:${data.name}`;
-  const json = JSON.parse(JSON.stringify(item));
-  const startHr = parseISOToHrTime(json.started_at);
-  const endHr = parseISOToHrTime(json.ended_at);
 
   const attrs = baseAttrs(name, name, RespanLogType.GUARDRAIL);
   attrs[RespanSpanAttributes.RESPAN_METADATA_GUARDRAIL_NAME] = data.name;
@@ -837,8 +805,8 @@ function emitGuardrail(item: Span<any>): void {
     traceId: item.traceId,
     spanId: item.spanId,
     parentId: item.parentId || item.traceId,
-    startTimeHr: startHr,
-    endTimeHr: endHr,
+    startTimeHr,
+    endTimeHr,
     attributes: attrs,
     statusCode: item.error ? 400 : 200,
     errorMessage: item.error ? String(item.error) : undefined,
@@ -848,24 +816,27 @@ function emitGuardrail(item: Span<any>): void {
 
 function emitCustom(item: Span<any>): void {
   const data = item.spanData as any;
+  const { startTimeHr, endTimeHr } = resolveSpanTimes(item);
   const name = data.name || data.data?.name || "custom";
-  const json = JSON.parse(JSON.stringify(item));
-  const startHr = parseISOToHrTime(json.started_at);
-  const endHr = parseISOToHrTime(json.ended_at);
 
   const attrs = baseAttrs(name, name, RespanLogType.CUSTOM);
   const customData = data.data || {};
-  for (const [k, v] of Object.entries(customData)) {
-    if (k === "model") attrs[RespanSpanAttributes.GEN_AI_REQUEST_MODEL] = v;
-    else if (k === "prompt_tokens") attrs[RespanSpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS] = v;
-    else if (k === "completion_tokens")
-      attrs[RespanSpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS] = v;
-    else if (k === "name") continue;
-    else if (k === "input")
-      attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson(v);
-    else if (k === "output")
-      attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson(v);
-    else attrs[`respan.metadata.${k}`] = String(v);
+  for (const [key, value] of Object.entries(customData)) {
+    if (key === "model") {
+      attrs[RespanSpanAttributes.GEN_AI_REQUEST_MODEL] = value;
+    } else if (key === "prompt_tokens") {
+      attrs[RespanSpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS] = value;
+    } else if (key === "completion_tokens") {
+      attrs[RespanSpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS] = value;
+    } else if (key === "name") {
+      continue;
+    } else if (key === "input") {
+      attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson(value);
+    } else if (key === "output") {
+      attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson(value);
+    } else {
+      attrs[`respan.metadata.${key}`] = String(value);
+    }
   }
 
   const span = buildReadableSpan({
@@ -873,16 +844,14 @@ function emitCustom(item: Span<any>): void {
     traceId: item.traceId,
     spanId: item.spanId,
     parentId: item.parentId || item.traceId,
-    startTimeHr: startHr,
-    endTimeHr: endHr,
+    startTimeHr,
+    endTimeHr,
     attributes: attrs,
     statusCode: item.error ? 400 : 200,
     errorMessage: item.error ? String(item.error) : undefined,
   });
   injectSpan(span);
 }
-
-// ── Dispatcher ─────────────────────────────────────────────────────────────
 
 export function emitSdkItem(item: Trace | Span<any>): void {
   if (isTrace(item)) {
@@ -905,9 +874,7 @@ export function emitSdkItem(item: Trace | Span<any>): void {
     else if (typeof spanData?.triggered === "boolean") emitGuardrail(item);
     else if (spanData?.name && spanData?.data) emitCustom(item);
     else {
-      console.debug(
-        `[Respan] Unknown OpenAI Agents span data type: ${type}`,
-      );
+      console.debug(`[Respan] Unknown OpenAI Agents span data type: ${type}`);
     }
   } catch (error) {
     console.error(`[Respan] Error emitting OpenAI Agents span:`, error);
