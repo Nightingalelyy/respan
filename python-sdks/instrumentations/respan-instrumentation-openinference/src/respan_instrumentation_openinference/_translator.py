@@ -47,44 +47,12 @@ from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes as TLS
 from openinference.semconv.trace import SpanAttributes as OISpanAttributes
 
 from respan_sdk.constants.span_attributes import (
-    GEN_AI_PROVIDER_NAME,
     GEN_AI_SYSTEM,
-    GEN_AI_USAGE_INPUT_TOKENS,
-    GEN_AI_USAGE_OUTPUT_TOKENS,
-    LLM_CHAT_STOP_SEQUENCES,
-    LLM_FREQUENCY_PENALTY,
-    LLM_PRESENCE_PENALTY,
-    LLM_REQUEST_FUNCTIONS,
     LLM_REQUEST_MODEL,
-    LLM_REQUEST_MAX_TOKENS,
-    LLM_REQUEST_REPETITION_PENALTY,
-    LLM_REQUEST_TEMPERATURE,
     LLM_REQUEST_TYPE,
-    LLM_REQUEST_TOP_P,
-    LLM_TOP_K,
     LLM_USAGE_COMPLETION_TOKENS,
-    LLM_USAGE_CACHE_READ_INPUT_TOKENS,
     LLM_USAGE_PROMPT_TOKENS,
-    LLM_USAGE_TOTAL_TOKENS,
-    OPENINFERENCE_AGENT_NAME,
-    OPENINFERENCE_INPUT_MIME_TYPE,
-    OPENINFERENCE_INPUT_MESSAGES_PREFIX,
-    OPENINFERENCE_LLM_TOKEN_COUNT_PROMPT_DETAILS_CACHE_READ,
-    OPENINFERENCE_MESSAGE_CONTENT,
-    OPENINFERENCE_MESSAGE_CONTENT_PREFIX,
-    OPENINFERENCE_MESSAGE_FINISH_REASON,
-    OPENINFERENCE_MESSAGE_FUNCTION_CALL_ARGUMENTS_JSON,
-    OPENINFERENCE_MESSAGE_FUNCTION_CALL_NAME,
-    OPENINFERENCE_MESSAGE_ROLE,
-    OPENINFERENCE_MESSAGE_TOOL_CALLS_PREFIX,
-    OPENINFERENCE_OUTPUT_MIME_TYPE,
-    OPENINFERENCE_OUTPUT_MESSAGES_PREFIX,
     OPENINFERENCE_SPAN_KIND,
-    OPENINFERENCE_TOKEN_COUNT_PREFIX,
-    OPENINFERENCE_TOOL_CALL_PREFIX,
-    OPENINFERENCE_TOOL_JSON_SCHEMA,
-    OPENINFERENCE_TOOL_PREFIX,
-    OPENINFERENCE_TOOLS_PREFIX,
     RESPAN_LOG_TYPE,
     RESPAN_SPAN_TOOL_CALLS,
     RESPAN_SPAN_TOOLS,
@@ -107,10 +75,22 @@ TRACELOOP_ENTITY_OUTPUT = TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT
 TRACELOOP_ENTITY_PATH = TLSpanAttributes.TRACELOOP_ENTITY_PATH
 GEN_AI_PROMPT_PREFIX = f"{TLSpanAttributes.LLM_PROMPTS}."
 GEN_AI_COMPLETION_PREFIX = f"{TLSpanAttributes.LLM_COMPLETIONS}."
+TL_LLM_REQUEST_TEMPERATURE = TLSpanAttributes.LLM_REQUEST_TEMPERATURE
+TL_LLM_REQUEST_TOP_P = TLSpanAttributes.LLM_REQUEST_TOP_P
+TL_LLM_REQUEST_MAX_TOKENS = TLSpanAttributes.LLM_REQUEST_MAX_TOKENS
+TL_LLM_REQUEST_FUNCTIONS = TLSpanAttributes.LLM_REQUEST_FUNCTIONS
+TL_LLM_REQUEST_REPETITION_PENALTY = TLSpanAttributes.LLM_REQUEST_REPETITION_PENALTY
+TL_LLM_USAGE_TOTAL_TOKENS = TLSpanAttributes.LLM_USAGE_TOTAL_TOKENS
+TL_LLM_TOP_K = TLSpanAttributes.LLM_TOP_K
+TL_LLM_CHAT_STOP_SEQUENCES = TLSpanAttributes.LLM_CHAT_STOP_SEQUENCES
+TL_LLM_FREQUENCY_PENALTY = TLSpanAttributes.LLM_FREQUENCY_PENALTY
+TL_LLM_PRESENCE_PENALTY = TLSpanAttributes.LLM_PRESENCE_PENALTY
 
 # OpenInference attributes (from upstream openinference-semantic-conventions)
 OI_INPUT_VALUE = OISpanAttributes.INPUT_VALUE
+OI_INPUT_MIME_TYPE = OISpanAttributes.INPUT_MIME_TYPE
 OI_OUTPUT_VALUE = OISpanAttributes.OUTPUT_VALUE
+OI_OUTPUT_MIME_TYPE = OISpanAttributes.OUTPUT_MIME_TYPE
 OI_LLM_MODEL_NAME = OISpanAttributes.LLM_MODEL_NAME
 OI_LLM_PROVIDER = OISpanAttributes.LLM_PROVIDER
 OI_LLM_SYSTEM = OISpanAttributes.LLM_SYSTEM
@@ -118,17 +98,29 @@ OI_LLM_INVOCATION_PARAMETERS = OISpanAttributes.LLM_INVOCATION_PARAMETERS
 OI_LLM_TOKEN_COUNT_PROMPT = OISpanAttributes.LLM_TOKEN_COUNT_PROMPT
 OI_LLM_TOKEN_COUNT_COMPLETION = OISpanAttributes.LLM_TOKEN_COUNT_COMPLETION
 OI_LLM_TOKEN_COUNT_TOTAL = OISpanAttributes.LLM_TOKEN_COUNT_TOTAL
-OI_LLM_TOKEN_COUNT_CACHE_READ = getattr(
-    OISpanAttributes,
-    "LLM_TOKEN_COUNT_PROMPT_DETAILS_CACHE_READ",
-    OPENINFERENCE_LLM_TOKEN_COUNT_PROMPT_DETAILS_CACHE_READ,
-)
+OI_LLM_TOKEN_COUNT_CACHE_READ = OISpanAttributes.LLM_TOKEN_COUNT_PROMPT_DETAILS_CACHE_READ
 OI_LLM_TOOLS = OISpanAttributes.LLM_TOOLS
-OI_AGENT_NAME = getattr(
-    OISpanAttributes,
-    "AGENT_NAME",
-    OPENINFERENCE_AGENT_NAME,
-)
+OI_AGENT_NAME = OISpanAttributes.AGENT_NAME
+
+_GEN_AI_PROVIDER_NAME = "gen_ai.provider.name"
+_GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
+_GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
+_LLM_USAGE_CACHE_READ_INPUT_TOKENS = "llm.usage.cache_read_input_tokens"
+
+_OI_INPUT_MESSAGES_PREFIX = "llm.input_messages."
+_OI_OUTPUT_MESSAGES_PREFIX = "llm.output_messages."
+_OI_TOKEN_COUNT_PREFIX = "llm.token_count."
+_OI_TOOLS_PREFIX = "llm.tools."
+_OI_MESSAGE_ROLE = "message.role"
+_OI_MESSAGE_CONTENT = "message.content"
+_OI_MESSAGE_CONTENT_PREFIX = "message.content."
+_OI_MESSAGE_TOOL_CALLS_PREFIX = "message.tool_calls."
+_OI_MESSAGE_FUNCTION_CALL_NAME = "message.function_call_name"
+_OI_MESSAGE_FUNCTION_CALL_ARGUMENTS_JSON = "message.function_call_arguments_json"
+_OI_MESSAGE_FINISH_REASON = "message.finish_reason"
+_OI_TOOL_PREFIX = "tool."
+_OI_TOOL_JSON_SCHEMA = "tool.json_schema"
+_OI_TOOL_CALL_PREFIX = "tool_call."
 
 logger = logging.getLogger(__name__)
 
@@ -170,16 +162,16 @@ _LLM_KINDS = {"LLM", "EMBEDDING"}
 # Invocation parameter key → OpenLLMetry target attribute
 _INVOCATION_PARAM_MAP: Dict[str, str] = {
     "model": LLM_REQUEST_MODEL,
-    "temperature": LLM_REQUEST_TEMPERATURE,
-    "top_p": LLM_REQUEST_TOP_P,
-    "max_tokens": LLM_REQUEST_MAX_TOKENS,
-    "max_output_tokens": LLM_REQUEST_MAX_TOKENS,
-    "top_k": LLM_TOP_K,
-    "stop_sequences": LLM_CHAT_STOP_SEQUENCES,
-    "stop": LLM_CHAT_STOP_SEQUENCES,
-    "repetition_penalty": LLM_REQUEST_REPETITION_PENALTY,
-    "frequency_penalty": LLM_FREQUENCY_PENALTY,
-    "presence_penalty": LLM_PRESENCE_PENALTY,
+    "temperature": TL_LLM_REQUEST_TEMPERATURE,
+    "top_p": TL_LLM_REQUEST_TOP_P,
+    "max_tokens": TL_LLM_REQUEST_MAX_TOKENS,
+    "max_output_tokens": TL_LLM_REQUEST_MAX_TOKENS,
+    "top_k": TL_LLM_TOP_K,
+    "stop_sequences": TL_LLM_CHAT_STOP_SEQUENCES,
+    "stop": TL_LLM_CHAT_STOP_SEQUENCES,
+    "repetition_penalty": TL_LLM_REQUEST_REPETITION_PENALTY,
+    "frequency_penalty": TL_LLM_FREQUENCY_PENALTY,
+    "presence_penalty": TL_LLM_PRESENCE_PENALTY,
 }
 
 
@@ -263,16 +255,16 @@ def _extract_tool_calls_from_buckets(
         tool_call_buckets: Dict[int, Dict[str, Any]] = defaultdict(dict)
 
         for field_key, field_val in raw.items():
-            if not field_key.startswith(OPENINFERENCE_MESSAGE_TOOL_CALLS_PREFIX):
+            if not field_key.startswith(_OI_MESSAGE_TOOL_CALLS_PREFIX):
                 continue
-            rest = field_key[len(OPENINFERENCE_MESSAGE_TOOL_CALLS_PREFIX):]
+            rest = field_key[len(_OI_MESSAGE_TOOL_CALLS_PREFIX):]
             parts = rest.split(".", 1)
             if not parts[0].isdigit() or len(parts) == 1:
                 continue
             tc_idx = int(parts[0])
             tc_field = parts[1]
-            if tc_field.startswith(OPENINFERENCE_TOOL_CALL_PREFIX):
-                tc_field = tc_field[len(OPENINFERENCE_TOOL_CALL_PREFIX):]
+            if tc_field.startswith(_OI_TOOL_CALL_PREFIX):
+                tc_field = tc_field[len(_OI_TOOL_CALL_PREFIX):]
             tool_call_buckets[tc_idx][tc_field] = field_val
 
         for tc_idx in sorted(tool_call_buckets):
@@ -288,8 +280,8 @@ def _extract_tool_calls_from_buckets(
                 seen.add(signature)
                 result.append(tool_call)
 
-        func_name = raw.get(OPENINFERENCE_MESSAGE_FUNCTION_CALL_NAME)
-        func_args = raw.get(OPENINFERENCE_MESSAGE_FUNCTION_CALL_ARGUMENTS_JSON)
+        func_name = raw.get(_OI_MESSAGE_FUNCTION_CALL_NAME)
+        func_args = raw.get(_OI_MESSAGE_FUNCTION_CALL_ARGUMENTS_JSON)
         if func_name is None and func_args is None:
             continue
 
@@ -313,15 +305,15 @@ def _extract_tool_calls_from_buckets(
 
 def _extract_message_content(raw: Dict[str, Any]) -> Any:
     """Rebuild message content from scalar or indexed OpenInference fields."""
-    content = raw.get(OPENINFERENCE_MESSAGE_CONTENT)
+    content = raw.get(_OI_MESSAGE_CONTENT)
     if content is not None:
         return content
 
     indexed_content: List[tuple[int, Any]] = []
     for field_key, field_val in raw.items():
-        if not field_key.startswith(OPENINFERENCE_MESSAGE_CONTENT_PREFIX):
+        if not field_key.startswith(_OI_MESSAGE_CONTENT_PREFIX):
             continue
-        idx_str = field_key[len(OPENINFERENCE_MESSAGE_CONTENT_PREFIX):]
+        idx_str = field_key[len(_OI_MESSAGE_CONTENT_PREFIX):]
         if not idx_str.isdigit():
             continue
         indexed_content.append((int(idx_str), field_val))
@@ -365,7 +357,7 @@ def _extract_tools_from_indexed_attrs(
     attrs: Dict[str, Any],
 ) -> List[Dict[str, Any]] | None:
     """Rebuild tool definitions from indexed OI llm.tools.N.tool.* attributes."""
-    buckets = _collect_oi_message_buckets(attrs=attrs, oi_prefix=OPENINFERENCE_TOOLS_PREFIX)
+    buckets = _collect_oi_message_buckets(attrs=attrs, oi_prefix=_OI_TOOLS_PREFIX)
     result: List[Dict[str, Any]] = []
     seen: set[str] = set()
 
@@ -373,7 +365,7 @@ def _extract_tools_from_indexed_attrs(
         raw = buckets[idx]
         tool: Dict[str, Any] = {}
 
-        json_schema = raw.get(OPENINFERENCE_TOOL_JSON_SCHEMA)
+        json_schema = raw.get(_OI_TOOL_JSON_SCHEMA)
         if json_schema is not None:
             parsed_json_schema = _parse_json(json_schema)
             if isinstance(parsed_json_schema, dict):
@@ -382,11 +374,11 @@ def _extract_tools_from_indexed_attrs(
                 tool["json_schema"] = parsed_json_schema
 
         for field_key, field_val in raw.items():
-            if field_key == OPENINFERENCE_TOOL_JSON_SCHEMA:
+            if field_key == _OI_TOOL_JSON_SCHEMA:
                 continue
             normalized_key = (
-                field_key[len(OPENINFERENCE_TOOL_PREFIX):]
-                if field_key.startswith(OPENINFERENCE_TOOL_PREFIX)
+                field_key[len(_OI_TOOL_PREFIX):]
+                if field_key.startswith(_OI_TOOL_PREFIX)
                 else field_key
             )
             _set_nested_value(
@@ -439,7 +431,7 @@ def _oi_messages_to_openllmetry(
         target = f"{gen_ai_prefix}.{idx}"
 
         # message.role → gen_ai.prompt.N.role
-        role = raw.get(OPENINFERENCE_MESSAGE_ROLE)
+        role = raw.get(_OI_MESSAGE_ROLE)
         if role:
             attrs[f"{target}.role"] = role
 
@@ -450,15 +442,15 @@ def _oi_messages_to_openllmetry(
 
         # message.tool_calls.M.tool_call.function.name → gen_ai.prompt.N.tool_calls.M.function.name
         for field_key, field_val in raw.items():
-            if field_key.startswith(OPENINFERENCE_MESSAGE_TOOL_CALLS_PREFIX):
-                rest = field_key[len(OPENINFERENCE_MESSAGE_TOOL_CALLS_PREFIX):]
+            if field_key.startswith(_OI_MESSAGE_TOOL_CALLS_PREFIX):
+                rest = field_key[len(_OI_MESSAGE_TOOL_CALLS_PREFIX):]
                 parts = rest.split(".", 1)
                 if parts[0].isdigit() and len(parts) > 1:
                     tc_idx = parts[0]
                     tc_field = parts[1]
                     # Strip "tool_call." prefix (OI nests under tool_call.*)
-                    if tc_field.startswith(OPENINFERENCE_TOOL_CALL_PREFIX):
-                        tc_field = tc_field[len(OPENINFERENCE_TOOL_CALL_PREFIX):]
+                    if tc_field.startswith(_OI_TOOL_CALL_PREFIX):
+                        tc_field = tc_field[len(_OI_TOOL_CALL_PREFIX):]
                     attrs[f"{target}.tool_calls.{tc_idx}.{tc_field}"] = field_val
 
         structured_tool_calls = _extract_tool_calls_from_buckets({idx: raw})
@@ -466,17 +458,17 @@ def _oi_messages_to_openllmetry(
             attrs.setdefault(f"{target}.tool_calls", structured_tool_calls)
 
         # message.function_call_name → gen_ai.prompt.N.function_call.name
-        func_name = raw.get(OPENINFERENCE_MESSAGE_FUNCTION_CALL_NAME)
+        func_name = raw.get(_OI_MESSAGE_FUNCTION_CALL_NAME)
         if func_name:
             attrs[f"{target}.function_call.name"] = func_name
 
         # message.function_call_arguments_json → gen_ai.prompt.N.function_call.arguments
-        func_args = raw.get(OPENINFERENCE_MESSAGE_FUNCTION_CALL_ARGUMENTS_JSON)
+        func_args = raw.get(_OI_MESSAGE_FUNCTION_CALL_ARGUMENTS_JSON)
         if func_args:
             attrs[f"{target}.function_call.arguments"] = func_args
 
         # message.finish_reason → gen_ai.completion.N.finish_reason (completions only)
-        finish_reason = raw.get(OPENINFERENCE_MESSAGE_FINISH_REASON)
+        finish_reason = raw.get(_OI_MESSAGE_FINISH_REASON)
         if finish_reason:
             attrs[f"{target}.finish_reason"] = finish_reason
 
@@ -545,7 +537,7 @@ class OpenInferenceTranslator(SpanProcessor):
 
         provider = attrs.get(OI_LLM_PROVIDER)
         if provider:
-            attrs.setdefault(GEN_AI_PROVIDER_NAME, str(provider).lower())
+            attrs.setdefault(_GEN_AI_PROVIDER_NAME, str(provider).lower())
             # Also set gen_ai.system if not already set (provider is a good fallback)
             attrs.setdefault(GEN_AI_SYSTEM, str(provider).lower())
 
@@ -553,20 +545,20 @@ class OpenInferenceTranslator(SpanProcessor):
         prompt_tokens = attrs.get(OI_LLM_TOKEN_COUNT_PROMPT)
         if prompt_tokens is not None:
             attrs.setdefault(LLM_USAGE_PROMPT_TOKENS, prompt_tokens)
-            attrs.setdefault(GEN_AI_USAGE_INPUT_TOKENS, prompt_tokens)
+            attrs.setdefault(_GEN_AI_USAGE_INPUT_TOKENS, prompt_tokens)
 
         completion_tokens = attrs.get(OI_LLM_TOKEN_COUNT_COMPLETION)
         if completion_tokens is not None:
             attrs.setdefault(LLM_USAGE_COMPLETION_TOKENS, completion_tokens)
-            attrs.setdefault(GEN_AI_USAGE_OUTPUT_TOKENS, completion_tokens)
+            attrs.setdefault(_GEN_AI_USAGE_OUTPUT_TOKENS, completion_tokens)
 
         total_tokens = attrs.get(OI_LLM_TOKEN_COUNT_TOTAL)
         if total_tokens is not None:
-            attrs.setdefault(LLM_USAGE_TOTAL_TOKENS, total_tokens)
+            attrs.setdefault(TL_LLM_USAGE_TOTAL_TOKENS, total_tokens)
 
         cache_read = attrs.get(OI_LLM_TOKEN_COUNT_CACHE_READ)
         if cache_read is not None:
-            attrs.setdefault(LLM_USAGE_CACHE_READ_INPUT_TOKENS, cache_read)
+            attrs.setdefault(_LLM_USAGE_CACHE_READ_INPUT_TOKENS, cache_read)
 
         direct_tools = _normalize_structured_list(attrs.get(OI_LLM_TOOLS))
         if direct_tools is None:
@@ -576,7 +568,7 @@ class OpenInferenceTranslator(SpanProcessor):
 
         direct_tool_calls = _extract_tool_calls(
             attrs=attrs,
-            oi_prefixes=[OPENINFERENCE_OUTPUT_MESSAGES_PREFIX],
+            oi_prefixes=[_OI_OUTPUT_MESSAGES_PREFIX],
         )
         if direct_tool_calls is not None:
             attrs.setdefault(RESPAN_SPAN_TOOL_CALLS, _safe_json_str(direct_tool_calls))
@@ -594,8 +586,8 @@ class OpenInferenceTranslator(SpanProcessor):
         attrs.setdefault(LLM_REQUEST_TYPE, LLMRequestTypeValues.CHAT.value)
 
         # --- Messages (reverse of Arize _collect_oi_messages) ---
-        _oi_messages_to_openllmetry(attrs, OPENINFERENCE_INPUT_MESSAGES_PREFIX, GEN_AI_PROMPT_PREFIX.rstrip("."))
-        _oi_messages_to_openllmetry(attrs, OPENINFERENCE_OUTPUT_MESSAGES_PREFIX, GEN_AI_COMPLETION_PREFIX.rstrip("."))
+        _oi_messages_to_openllmetry(attrs, _OI_INPUT_MESSAGES_PREFIX, GEN_AI_PROMPT_PREFIX.rstrip("."))
+        _oi_messages_to_openllmetry(attrs, _OI_OUTPUT_MESSAGES_PREFIX, GEN_AI_COMPLETION_PREFIX.rstrip("."))
 
         # --- Invocation parameters (reverse of Arize invocation_params extraction) ---
         # OI stores all params as a single JSON string; OpenLLMetry uses individual attributes
@@ -613,9 +605,9 @@ class OpenInferenceTranslator(SpanProcessor):
         # OpenLLMetry: llm.request.functions = JSON string of tool definitions
         tools_raw = attrs.get(OI_LLM_TOOLS)
         if tools_raw:
-            attrs.setdefault(LLM_REQUEST_FUNCTIONS, tools_raw)
+            attrs.setdefault(TL_LLM_REQUEST_FUNCTIONS, tools_raw)
         elif attrs.get(RESPAN_SPAN_TOOLS):
-            attrs.setdefault(LLM_REQUEST_FUNCTIONS, attrs[RESPAN_SPAN_TOOLS])
+            attrs.setdefault(TL_LLM_REQUEST_FUNCTIONS, attrs[RESPAN_SPAN_TOOLS])
 
     @staticmethod
     def _remove_redundant_oi_attrs(attrs: Dict[str, Any]) -> None:
@@ -623,9 +615,9 @@ class OpenInferenceTranslator(SpanProcessor):
         keys_to_remove = {
             OPENINFERENCE_SPAN_KIND,
             OI_INPUT_VALUE,
-            OPENINFERENCE_INPUT_MIME_TYPE,
+            OI_INPUT_MIME_TYPE,
             OI_OUTPUT_VALUE,
-            OPENINFERENCE_OUTPUT_MIME_TYPE,
+            OI_OUTPUT_MIME_TYPE,
             OI_LLM_MODEL_NAME,
             OI_LLM_PROVIDER,
             OI_LLM_SYSTEM,
@@ -638,10 +630,10 @@ class OpenInferenceTranslator(SpanProcessor):
             OI_AGENT_NAME,
         }
         prefixes_to_remove = (
-            OPENINFERENCE_INPUT_MESSAGES_PREFIX,
-            OPENINFERENCE_OUTPUT_MESSAGES_PREFIX,
-            OPENINFERENCE_TOKEN_COUNT_PREFIX,
-            OPENINFERENCE_TOOLS_PREFIX,
+            _OI_INPUT_MESSAGES_PREFIX,
+            _OI_OUTPUT_MESSAGES_PREFIX,
+            _OI_TOKEN_COUNT_PREFIX,
+            _OI_TOOLS_PREFIX,
         )
 
         for key in keys_to_remove:

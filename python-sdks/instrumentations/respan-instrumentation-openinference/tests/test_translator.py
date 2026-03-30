@@ -10,11 +10,7 @@ from types import SimpleNamespace
 import pytest
 from opentelemetry.attributes import BoundedAttributes
 
-from respan_instrumentation_openinference._translator import (
-    OI_AGENT_NAME,
-    OI_LLM_TOKEN_COUNT_CACHE_READ,
-    OpenInferenceTranslator,
-)
+from respan_instrumentation_openinference._translator import OpenInferenceTranslator
 from respan_sdk.constants.span_attributes import (
     RESPAN_SPAN_TOOL_CALLS,
     RESPAN_SPAN_TOOLS,
@@ -32,11 +28,6 @@ def _make_span(attrs: dict, name: str = "test-span"):
 @pytest.fixture
 def translator():
     return OpenInferenceTranslator()
-
-
-def test_openinference_floor_version_attrs_resolve_to_stable_keys():
-    assert OI_AGENT_NAME == "agent.name"
-    assert OI_LLM_TOKEN_COUNT_CACHE_READ == "llm.token_count.prompt_details.cache_read"
 
 
 # ------------------------------------------------------------------
