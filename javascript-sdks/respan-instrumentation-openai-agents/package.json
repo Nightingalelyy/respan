@@ -7,6 +7,11 @@
   "types": "dist/index.d.ts",
   "author": "Respan <team@respan.ai>",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/respanai/respan",
+    "directory": "javascript-sdks/respan-instrumentation-openai-agents"
+  },
   "files": [
     "dist",
     "README.md",
@@ -17,8 +22,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "publish": "yarn npm publish",
-    "release": "yarn build && yarn version patch && yarn publish"
+    "publish:package": "yarn npm publish",
+    "release": "yarn build && yarn version patch && yarn publish:package"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",

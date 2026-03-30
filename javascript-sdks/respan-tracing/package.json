@@ -22,7 +22,11 @@
     "examples:advanced": "yarn build && cd examples && yarn dev",
     "test:build": "npm run build && npm pack && npm install ./respan-tracing-*.tgz --no-save && tsx tests/test_build.ts"
   },
-  "repository": "https://github.com/respan-ai/respan-sdks.git",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/respanai/respan",
+    "directory": "javascript-sdks/respan-tracing"
+  },
   "author": "Respan <team@respan.ai>",
   "license": "Apache-2.0",
   "dependencies": {
