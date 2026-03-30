@@ -8,6 +8,11 @@
   "bin": {
     "respan": "./bin/run.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/respanai/respan",
+    "directory": "javascript-sdks/respan-cli"
+  },
   "scripts": {
     "build": "tsc && npm run build:hooks",
     "build:hooks": "node -e \"const{build}=require('esbuild');const hooks=['claude-code','codex-cli','gemini-cli'];Promise.all(hooks.map(h=>build({entryPoints:['src/hooks/'+h+'.ts'],bundle:true,platform:'node',target:'node18',format:'cjs',outfile:'dist/hooks/'+h+'.cjs',external:[]}))).then(()=>console.log('Hooks bundled.'))\"",
