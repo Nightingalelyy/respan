@@ -149,7 +149,7 @@ jobs:
 
       - name: Publish package
         working-directory: ${{ matrix.path }}
-        run: yarn npm publish --access public --provenance --tolerate-republish
+        run: npm publish --access public
 
   build-python:
     needs: discover
