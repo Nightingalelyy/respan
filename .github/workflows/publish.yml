@@ -117,7 +117,6 @@ jobs:
       - name: Install and build package
         run: |
           corepack enable
-          corepack install
           cd javascript-sdks
           yarn install
           cd ../${{ matrix.path }}
