@@ -7,6 +7,7 @@
  *
  * The mapping is the exact reverse of Arize's `openinference-instrumentation-openllmetry`
  * package which converts OpenLLMetry → OpenInference.
+ * Translation stays additive on the live span; cleanup is reserved for export clones.
  *
  * Arize direction (OpenLLMetry → OI)          | Our reverse (OI → OpenLLMetry)
  * ---------------------------------------------|------------------------------------------
