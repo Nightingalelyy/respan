@@ -52,7 +52,6 @@ from respan_sdk.constants.span_attributes import (
     LLM_REQUEST_TYPE,
     LLM_USAGE_COMPLETION_TOKENS,
     LLM_USAGE_PROMPT_TOKENS,
-    OPENINFERENCE_SPAN_KIND,
     RESPAN_LOG_TYPE,
     RESPAN_SPAN_TOOL_CALLS,
     RESPAN_SPAN_TOOLS,
@@ -88,6 +87,7 @@ TL_LLM_PRESENCE_PENALTY = TLSpanAttributes.LLM_PRESENCE_PENALTY
 
 # OpenInference attributes (from upstream openinference-semantic-conventions)
 OI_INPUT_VALUE = OISpanAttributes.INPUT_VALUE
+OI_SPAN_KIND = OISpanAttributes.OPENINFERENCE_SPAN_KIND
 OI_INPUT_MIME_TYPE = OISpanAttributes.INPUT_MIME_TYPE
 OI_OUTPUT_VALUE = OISpanAttributes.OUTPUT_VALUE
 OI_OUTPUT_MIME_TYPE = OISpanAttributes.OUTPUT_MIME_TYPE
@@ -497,7 +497,7 @@ class OpenInferenceTranslator(SpanProcessor):
             return
         attrs = dict(original_attrs)
 
-        oi_kind = attrs.get(OPENINFERENCE_SPAN_KIND)
+        oi_kind = attrs.get(OI_SPAN_KIND)
         if not oi_kind:
             return
 
@@ -613,7 +613,7 @@ class OpenInferenceTranslator(SpanProcessor):
     def _remove_redundant_oi_attrs(attrs: Dict[str, Any]) -> None:
         """Remove noisy raw OpenInference attrs while keeping promoted fields."""
         keys_to_remove = {
-            OPENINFERENCE_SPAN_KIND,
+            OI_SPAN_KIND,
             OI_INPUT_VALUE,
             OI_INPUT_MIME_TYPE,
             OI_OUTPUT_VALUE,

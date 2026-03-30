@@ -167,11 +167,3 @@ GEN_AI_TOOL_CALL_RESULT = "gen_ai.tool.call.result"
 PYDANTIC_AI_AGENT_NAME = "agent_name"
 PYDANTIC_AI_TOOL_ARGUMENTS = "tool_arguments"
 PYDANTIC_AI_TOOL_RESPONSE = "tool_response"
-
-# ---------------------------------------------------------------------------
-# OpenInference vendor attributes
-# Only OPENINFERENCE_SPAN_KIND is here because respan-tracing uses it
-# for span filtering without depending on the openinference package.
-# All other OI attributes should be imported from openinference.semconv.trace.
-# ---------------------------------------------------------------------------
-OPENINFERENCE_SPAN_KIND = "openinference.span.kind"
