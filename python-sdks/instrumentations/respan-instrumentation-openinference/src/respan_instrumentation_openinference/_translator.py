@@ -243,6 +243,58 @@ def _set_nested_value(target: Dict[str, Any], dotted_path: str, value: Any) -> N
     cursor[parts[-1]] = value
 
 
+def _canonicalize_for_signature(value: Any) -> Any:
+    """Recursively canonicalize structured values for deterministic signatures."""
+    if isinstance(value, dict):
+        return {
+            key: _canonicalize_for_signature(value[key])
+            for key in sorted(value)
+        }
+    if isinstance(value, list):
+        return [_canonicalize_for_signature(item) for item in value]
+    return value
+
+
+def _normalize_tool_call(tool_call: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize tool-call payloads to one canonical internal shape."""
+    normalized: Dict[str, Any] = {}
+
+    tool_call_id = tool_call.get("id")
+    if tool_call_id is not None:
+        normalized["id"] = tool_call_id
+
+    function = tool_call.get("function")
+    normalized_function: Dict[str, Any] = {}
+    if isinstance(function, dict):
+        function_name = function.get("name")
+        if function_name is not None:
+            normalized_function["name"] = function_name
+        function_arguments = function.get("arguments")
+        if function_arguments is not None:
+            normalized_function["arguments"] = function_arguments
+
+    tool_type = tool_call.get("type")
+    if tool_type is not None:
+        normalized["type"] = tool_type
+    elif normalized_function:
+        normalized["type"] = "function"
+
+    if normalized_function:
+        normalized["function"] = normalized_function
+
+    return normalized
+
+
+def _tool_call_signature(tool_call: Dict[str, Any]) -> str:
+    """Return a deterministic semantic signature for a tool call."""
+    normalized = _normalize_tool_call(tool_call)
+    return json.dumps(
+        _canonicalize_for_signature(normalized),
+        default=str,
+        separators=(",", ":"),
+    )
+
+
 def _extract_tool_calls_from_buckets(
     buckets: Dict[int, Dict[str, Any]],
 ) -> List[Dict[str, Any]] | None:
@@ -271,11 +323,10 @@ def _extract_tool_calls_from_buckets(
             tool_call: Dict[str, Any] = {}
             for field_key, field_val in tool_call_buckets[tc_idx].items():
                 _set_nested_value(tool_call, field_key, field_val)
-            if "function" in tool_call and "type" not in tool_call:
-                tool_call["type"] = "function"
+            tool_call = _normalize_tool_call(tool_call)
             if not tool_call:
                 continue
-            signature = _safe_json_str(tool_call)
+            signature = _tool_call_signature(tool_call)
             if signature not in seen:
                 seen.add(signature)
                 result.append(tool_call)
@@ -293,9 +344,10 @@ def _extract_tool_calls_from_buckets(
             legacy_tool_call["function"]["name"] = func_name
         if func_args is not None:
             legacy_tool_call["function"]["arguments"] = func_args
-        if not legacy_tool_call["function"]:
+        legacy_tool_call = _normalize_tool_call(legacy_tool_call)
+        if not legacy_tool_call:
             continue
-        signature = _safe_json_str(legacy_tool_call)
+        signature = _tool_call_signature(legacy_tool_call)
         if signature not in seen:
             seen.add(signature)
             result.append(legacy_tool_call)
@@ -344,7 +396,7 @@ def _extract_tool_calls(
         if not tool_calls:
             continue
         for tool_call in tool_calls:
-            signature = _safe_json_str(tool_call)
+            signature = _tool_call_signature(tool_call)
             if signature in seen:
                 continue
             seen.add(signature)
