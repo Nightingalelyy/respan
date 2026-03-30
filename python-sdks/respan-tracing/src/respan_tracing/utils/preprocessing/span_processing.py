@@ -10,7 +10,6 @@ from respan_sdk.constants.span_attributes import (
     GEN_AI_TOOL_CALL_ARGUMENTS,
     GEN_AI_TOOL_CALL_RESULT,
     LLM_REQUEST_TYPE,
-    OPENINFERENCE_SPAN_KIND,
     PYDANTIC_AI_AGENT_NAME,
     PYDANTIC_AI_TOOL_ARGUMENTS,
     PYDANTIC_AI_TOOL_RESPONSE,
@@ -97,16 +96,6 @@ def is_processable_span(span: ReadableSpan) -> bool:
         logger.debug(
             f"[Respan Debug] Processing standalone GenAI span: {span.name} "
             f"(gen_ai.system: {span.attributes.get(GEN_AI_SYSTEM)})"
-        )
-        return True
-
-    # OpenInference span (has openinference.span.kind, e.g. "LLM", "CHAIN", "AGENT")
-    # OI instrumentors create proper parent-child hierarchy, so we accept these
-    # without adding to _GENAI_INDICATOR_ATTRS (which would trigger root promotion).
-    if span.attributes.get(OPENINFERENCE_SPAN_KIND):
-        logger.debug(
-            f"[Respan Debug] Processing OpenInference span: {span.name} "
-            f"(openinference.span.kind: {span.attributes.get(OPENINFERENCE_SPAN_KIND)})"
         )
         return True
 
