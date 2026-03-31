@@ -1544,7 +1544,7 @@ if len(collected_spans) > 0:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `trace_id` | `str` | required | Trace ID for the spans being buffered |
+| `trace_id` | `str` | required | Trace ID for the spans being buffered. *As of v2.16.0*, when no `parent_trace_id` is provided, this value is injected as the OTel trace context so all spans inherit it instead of generating a random trace ID. |
 | `parent_trace_id` | `str \| None` | `None` | OTel trace ID (hex) to continue. Spans inherit this trace_id. |
 | `parent_span_id` | `str \| None` | `None` | OTel span ID (hex) of the parent. Must be provided with `parent_trace_id`. |
 
@@ -1565,6 +1565,7 @@ if len(collected_spans) > 0:
 - **Spans are extractable as list** - spans are transportable!
 - Processing happens through standard OTEL processor pipeline (filters, transformations, export)
 - When `parent_trace_id` + `parent_span_id` are set, all spans inherit the parent's trace_id
+- **(v2.16.0+)** When only `trace_id` is provided (no `parent_trace_id`), the SDK injects `trace_id` as the OTel trace context. Spans inherit the caller's trace_id instead of generating a random one, eliminating ID mismatches between the caller and OTel.
 
 **Key Insight: Transportable Spans**
 The real power is that spans are **transportable** - collect in one place, process anywhere:
@@ -1814,3 +1815,29 @@ execute()
 ```
 
 The backend resolves the link by matching IDs across stored spans and renders the relationship in the trace UI.
+
+## Changelog
+
+### 2.16.0
+
+**SpanBuffer trace_id injection.** When `trace_id` is provided to `get_span_buffer()` without a `parent_trace_id`/`parent_span_id`, the SDK now injects it as the OTel trace context. All spans created in the buffer inherit the caller's `trace_id` instead of generating a random one. This eliminates the ID mismatch between the caller's trace_id and the OTel trace_id -- no manual alignment needed.
+
+### 2.15.2
+
+**OpenInference cleanup.** Keep openinference semconv out of respan-tracing; unify exporter path and centralize OI semconv attributes. Fixes openinference instrumentation tool capture.
+
+### 2.15.1
+
+**SpanBuffer continuation mode: processors propagation.** Fixed `processors` attribute not being propagated to child spans when using SpanBuffer continuation mode. The `continuation_processors` fallback in `on_start` ensures child spans inherit the correct processor routing from the buffer context.
+
+### 2.15.0
+
+**SpanBuffer continuation mode.** `SpanBuffer` now supports continuation mode -- when continuing an existing trace (via `parent_trace_id`/`parent_span_id`), the SDK skips creating wrapper spans and attaches new spans directly under the parent. Removed `is_root_span_candidate` from the SDK (replaced by natural parent span detection).
+
+### 2.14.2
+
+**Root candidate detection fix.** Preserve parent span in root candidate detection, preventing incorrect root span selection when spans have existing parents.
+
+### 2.14.0
+
+**Dynamic span naming.** Decorators (`@workflow`, `@task`, `@agent`, `@tool`) now accept a callable for the `name` parameter, enabling dynamic span names resolved at invocation time.
