@@ -28,6 +28,7 @@ Scope:
 
   static examples = [
     'respan integrate claude-code',
+    'respan integrate claude-code --disable',
     'respan integrate claude-code --global',
     'respan integrate claude-code --local --project-id my-project',
     'respan integrate claude-code --attrs \'{"env":"prod"}\'',
@@ -44,6 +45,40 @@ Scope:
     this.globalFlags = flags;
 
     try {
+      const dryRun = flags['dry-run'];
+      const scope = resolveScope(flags, 'both');
+      const doLocal = scope === 'local' || scope === 'both';
+
+      // ── Disable mode ─────────────────────────────────────────────
+      if (flags.disable) {
+        // Remove the Stop hook entry from global settings
+        const globalSettingsPath = expandHome('~/.claude/settings.json');
+        const globalSettings = readJsonFile(globalSettingsPath);
+        const hooksSection = (globalSettings.hooks || {}) as Record<string, unknown>;
+        if (Array.isArray(hooksSection.Stop)) {
+          hooksSection.Stop = (hooksSection.Stop as Array<Record<string, unknown>>).filter((entry) => {
+            const inner = Array.isArray(entry.hooks)
+              ? (entry.hooks as Array<Record<string, unknown>>)
+              : [];
+            return !inner.some(
+              (h) => typeof h.command === 'string' &&
+                ((h.command as string).includes('respan') || (h.command as string).includes('hook.py') || (h.command as string).includes('claude-code')),
+            );
+          });
+        }
+        const merged = deepMerge(globalSettings, { hooks: hooksSection });
+        if (dryRun) {
+          this.log(`[dry-run] Would update: ${globalSettingsPath}`);
+          this.log(JSON.stringify(merged, null, 2));
+        } else {
+          writeJsonFile(globalSettingsPath, merged);
+          this.log(`Removed hook entry: ${globalSettingsPath}`);
+        }
+        this.log('Claude Code tracing disabled. Run "respan integrate claude-code" to re-enable.');
+        return;
+      }
+
+      // ── Enable mode (default) ────────────────────────────────────
       // Verify the user is authenticated (key is read by hook from ~/.respan/)
       this.resolveApiKey();
       const baseUrl = flags['base-url']!;
@@ -52,12 +87,9 @@ Scope:
       const spanName = flags['span-name'];
       const workflowName = flags['workflow-name'];
       const attrs = parseAttrs(flags.attrs!);
-      const dryRun = flags['dry-run'];
       // Claude Code default: both global + local
-      const scope = resolveScope(flags, 'both');
 
       const doGlobal = scope === 'global' || scope === 'both';
-      const doLocal = scope === 'local' || scope === 'both';
 
       // ── Global: hook script + registration ────────────────────────
       if (doGlobal) {
