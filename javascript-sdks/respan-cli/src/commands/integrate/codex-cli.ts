@@ -47,10 +47,13 @@ Scope:
 
       // ── Disable mode ─────────────────────────────────────────────
       if (flags.disable) {
+        // Remove the notify line from ~/.codex/config.toml
         const configPath = expandHome('~/.codex/config.toml');
         const existing = readTextFile(configPath);
         const lines = existing.split('\n');
-        const filtered = lines.filter((line) => !/^\s*notify\s*=/.test(line) && !line.includes('respan integrate codex-cli'));
+        const filtered = lines.filter((line) =>
+          !/^\s*notify\s*=/.test(line) && !line.includes('respan integrate codex-cli'),
+        );
         if (dryRun) {
           this.log(`[dry-run] Would update: ${configPath}`);
           this.log(filtered.join('\n'));
@@ -58,7 +61,7 @@ Scope:
           writeTextFile(configPath, filtered.join('\n'));
           this.log(`Removed notify hook: ${configPath}`);
         }
-        this.log('Codex CLI tracing disabled. Run with --enable to re-enable.');
+        this.log('Codex CLI tracing disabled. Run "respan integrate codex-cli" to re-enable.');
         return;
       }
 

@@ -52,33 +52,33 @@ Note: Gemini CLI ignores workspace-level telemetry settings, so
 
       // ── Disable mode ─────────────────────────────────────────────
       if (flags.disable) {
+        // Remove respan hook entries from settings.json
         const settingsPath = scope === 'global'
           ? expandHome('~/.gemini/settings.json')
           : path.join(findProjectRoot(), '.gemini', 'settings.json');
         const existing = readJsonFile(settingsPath);
         const hooksSection = (existing.hooks || {}) as Record<string, unknown>;
-
-        // Remove respan hook entries from each event type
         for (const eventName of ['AfterModel', 'BeforeTool', 'AfterTool']) {
           if (!Array.isArray(hooksSection[eventName])) continue;
           hooksSection[eventName] = (hooksSection[eventName] as Array<Record<string, unknown>>).filter((entry) => {
-            const inner = Array.isArray(entry.hooks) ? (entry.hooks as Array<Record<string, unknown>>) : [];
+            const inner = Array.isArray(entry.hooks)
+              ? (entry.hooks as Array<Record<string, unknown>>)
+              : [];
             return !inner.some(
               (h) => typeof h.command === 'string' &&
-                ((h.command as string).includes('respan') || (h.command as string).includes('gemini-cli.js')),
+                ((h.command as string).includes('respan') || (h.command as string).includes('gemini-cli')),
             );
           });
         }
-
         const merged = { ...existing, hooks: hooksSection };
         if (dryRun) {
           this.log(`[dry-run] Would update: ${settingsPath}`);
           this.log(JSON.stringify(merged, null, 2));
         } else {
           writeJsonFile(settingsPath, merged);
-          this.log(`Removed hooks: ${settingsPath}`);
+          this.log(`Removed hook entries: ${settingsPath}`);
         }
-        this.log('Gemini CLI tracing disabled. Run with --enable to re-enable.');
+        this.log('Gemini CLI tracing disabled. Run "respan integrate gemini-cli" to re-enable.');
         return;
       }
 

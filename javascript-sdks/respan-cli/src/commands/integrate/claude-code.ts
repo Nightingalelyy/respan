@@ -51,22 +51,30 @@ Scope:
 
       // ── Disable mode ─────────────────────────────────────────────
       if (flags.disable) {
-        if (doLocal) {
-          const projectRoot = findProjectRoot();
-          const localSettingsPath = `${projectRoot}/.claude/settings.local.json`;
-          const localSettings = readJsonFile(localSettingsPath);
-          const envBlock = (localSettings.env || {}) as Record<string, string>;
-          envBlock.TRACE_TO_RESPAN = 'false';
-          const merged = deepMerge(localSettings, { env: envBlock });
-          if (dryRun) {
-            this.log(`[dry-run] Would update: ${localSettingsPath}`);
-            this.log(JSON.stringify(merged, null, 2));
-          } else {
-            writeJsonFile(localSettingsPath, merged);
-            this.log(`Disabled tracing: ${localSettingsPath}`);
-          }
+        // Remove the Stop hook entry from global settings
+        const globalSettingsPath = expandHome('~/.claude/settings.json');
+        const globalSettings = readJsonFile(globalSettingsPath);
+        const hooksSection = (globalSettings.hooks || {}) as Record<string, unknown>;
+        if (Array.isArray(hooksSection.Stop)) {
+          hooksSection.Stop = (hooksSection.Stop as Array<Record<string, unknown>>).filter((entry) => {
+            const inner = Array.isArray(entry.hooks)
+              ? (entry.hooks as Array<Record<string, unknown>>)
+              : [];
+            return !inner.some(
+              (h) => typeof h.command === 'string' &&
+                ((h.command as string).includes('respan') || (h.command as string).includes('hook.py') || (h.command as string).includes('claude-code')),
+            );
+          });
         }
-        this.log('Claude Code tracing disabled. Run with --enable to re-enable.');
+        const merged = deepMerge(globalSettings, { hooks: hooksSection });
+        if (dryRun) {
+          this.log(`[dry-run] Would update: ${globalSettingsPath}`);
+          this.log(JSON.stringify(merged, null, 2));
+        } else {
+          writeJsonFile(globalSettingsPath, merged);
+          this.log(`Removed hook entry: ${globalSettingsPath}`);
+        }
+        this.log('Claude Code tracing disabled. Run "respan integrate claude-code" to re-enable.');
         return;
       }
 
