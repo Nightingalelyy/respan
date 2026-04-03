@@ -382,17 +382,20 @@ function parseTools(attrs: Record<string, any>): string | undefined {
 }
 
 /**
- * Parse gen_ai.usage.tool_choice into a normalized structure.
+ * Parse tool choice from Vercel (ai.prompt.toolChoice) or GenAI (gen_ai.usage.tool_choice).
  */
 function parseToolChoice(attrs: Record<string, any>): string | undefined {
   try {
-    const toolChoice = attrs["gen_ai.usage.tool_choice"];
+    const toolChoice = attrs["ai.prompt.toolChoice"] ?? attrs["gen_ai.usage.tool_choice"];
     if (!toolChoice) return undefined;
     const parsed = typeof toolChoice === "string" ? JSON.parse(toolChoice) : toolChoice;
-    return safeJsonStr({
-      type: String(parsed.type),
-      function: { name: String(parsed.function.name) },
-    });
+    if (parsed.function?.name) {
+      return safeJsonStr({
+        type: String(parsed.type),
+        function: { name: String(parsed.function.name) },
+      });
+    }
+    return safeJsonStr({ type: String(parsed.type) });
   } catch {
     return undefined;
   }
