@@ -16,7 +16,7 @@
  * - Prompt message parsing (ai.prompt.messages + ai.prompt fallback)
  * - Completion message building (ai.response.text, ai.response.object, tool calls)
  * - Token count normalization (input/output → prompt/completion)
- * - Tool definitions (ai.prompt.tools) and tool choice (gen_ai.usage.tool_choice)
+ * - Tool definitions (ai.prompt.tools) and tool choice (ai.prompt.toolChoice)
  * - Customer params (ai.telemetry.metadata.customer_* + customer_params JSON)
  * - General metadata (ai.telemetry.metadata.* → respan.metadata.*)
  * - Stream detection, environment, cost, TTFT, generation time, unit prices
@@ -382,11 +382,11 @@ function parseTools(attrs: Record<string, any>): string | undefined {
 }
 
 /**
- * Parse tool choice from Vercel (ai.prompt.toolChoice) or GenAI (gen_ai.usage.tool_choice).
+ * Parse tool choice from Vercel's ai.prompt.toolChoice attribute.
  */
 function parseToolChoice(attrs: Record<string, any>): string | undefined {
   try {
-    const toolChoice = attrs["ai.prompt.toolChoice"] ?? attrs["gen_ai.usage.tool_choice"];
+    const toolChoice = attrs["ai.prompt.toolChoice"];
     if (!toolChoice) return undefined;
     const parsed = typeof toolChoice === "string" ? JSON.parse(toolChoice) : toolChoice;
     if (parsed.function?.name) {
