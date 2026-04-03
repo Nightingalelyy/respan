@@ -23,6 +23,16 @@ export const integrateFlags = {
     default: false,
     exclusive: ['local'],
   }),
+  enable: Flags.boolean({
+    description: 'Enable tracing (default)',
+    default: false,
+    exclusive: ['disable'],
+  }),
+  disable: Flags.boolean({
+    description: 'Disable tracing',
+    default: false,
+    exclusive: ['enable'],
+  }),
   'project-id': Flags.string({
     description: 'Respan project ID (added to metadata / resource attributes)',
     env: 'RESPAN_PROJECT_ID',

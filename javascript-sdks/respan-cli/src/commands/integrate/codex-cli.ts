@@ -26,6 +26,7 @@ Scope:
 
   static examples = [
     'respan integrate codex-cli',
+    'respan integrate codex-cli --disable',
     'respan integrate codex-cli --global',
     'respan integrate codex-cli --local --customer-id frank',
     'respan integrate codex-cli --attrs \'{"env":"prod"}\'',
@@ -42,6 +43,26 @@ Scope:
     this.globalFlags = flags;
 
     try {
+      const dryRun = flags['dry-run'];
+
+      // ── Disable mode ─────────────────────────────────────────────
+      if (flags.disable) {
+        const configPath = expandHome('~/.codex/config.toml');
+        const existing = readTextFile(configPath);
+        const lines = existing.split('\n');
+        const filtered = lines.filter((line) => !/^\s*notify\s*=/.test(line) && !line.includes('respan integrate codex-cli'));
+        if (dryRun) {
+          this.log(`[dry-run] Would update: ${configPath}`);
+          this.log(filtered.join('\n'));
+        } else {
+          writeTextFile(configPath, filtered.join('\n'));
+          this.log(`Removed notify hook: ${configPath}`);
+        }
+        this.log('Codex CLI tracing disabled. Run with --enable to re-enable.');
+        return;
+      }
+
+      // ── Enable mode (default) ────────────────────────────────────
       // Verify the user is authenticated (key is read by hook from ~/.respan/)
       this.resolveApiKey();
       const projectId = flags['project-id'];
@@ -49,7 +70,6 @@ Scope:
       const spanName = flags['span-name'];
       const workflowName = flags['workflow-name'];
       const attrs = parseAttrs(flags.attrs!);
-      const dryRun = flags['dry-run'];
       // Codex CLI default: both global + local
       const scope = resolveScope(flags, 'both');
 

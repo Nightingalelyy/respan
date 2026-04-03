@@ -31,6 +31,7 @@ Note: Gemini CLI ignores workspace-level telemetry settings, so
 
   static examples = [
     'respan integrate gemini-cli',
+    'respan integrate gemini-cli --disable',
     'respan integrate gemini-cli --local',
     'respan integrate gemini-cli --project-id my-project --attrs \'{"env":"prod"}\'',
     'respan integrate gemini-cli --dry-run',
@@ -46,6 +47,42 @@ Note: Gemini CLI ignores workspace-level telemetry settings, so
     this.globalFlags = flags;
 
     try {
+      const dryRun = flags['dry-run'];
+      const scope = resolveScope(flags, 'global');
+
+      // ── Disable mode ─────────────────────────────────────────────
+      if (flags.disable) {
+        const settingsPath = scope === 'global'
+          ? expandHome('~/.gemini/settings.json')
+          : path.join(findProjectRoot(), '.gemini', 'settings.json');
+        const existing = readJsonFile(settingsPath);
+        const hooksSection = (existing.hooks || {}) as Record<string, unknown>;
+
+        // Remove respan hook entries from each event type
+        for (const eventName of ['AfterModel', 'BeforeTool', 'AfterTool']) {
+          if (!Array.isArray(hooksSection[eventName])) continue;
+          hooksSection[eventName] = (hooksSection[eventName] as Array<Record<string, unknown>>).filter((entry) => {
+            const inner = Array.isArray(entry.hooks) ? (entry.hooks as Array<Record<string, unknown>>) : [];
+            return !inner.some(
+              (h) => typeof h.command === 'string' &&
+                ((h.command as string).includes('respan') || (h.command as string).includes('gemini-cli.js')),
+            );
+          });
+        }
+
+        const merged = { ...existing, hooks: hooksSection };
+        if (dryRun) {
+          this.log(`[dry-run] Would update: ${settingsPath}`);
+          this.log(JSON.stringify(merged, null, 2));
+        } else {
+          writeJsonFile(settingsPath, merged);
+          this.log(`Removed hooks: ${settingsPath}`);
+        }
+        this.log('Gemini CLI tracing disabled. Run with --enable to re-enable.');
+        return;
+      }
+
+      // ── Enable mode (default) ────────────────────────────────────
       // Verify the user is authenticated (key is read by hook from ~/.respan/)
       this.resolveApiKey();
       const projectId = flags['project-id'];
@@ -53,8 +90,6 @@ Note: Gemini CLI ignores workspace-level telemetry settings, so
       const spanName = flags['span-name'];
       const workflowName = flags['workflow-name'];
       const attrs = parseAttrs(flags.attrs!);
-      const dryRun = flags['dry-run'];
-      const scope = resolveScope(flags, 'global');
 
       // ── 1. Install hook script ──────────────────────────────────
       const hookDir = expandHome('~/.respan/hooks');

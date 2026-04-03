@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
 import { BaseCommand } from '../../lib/base-command.js';
@@ -23,6 +24,7 @@ Scope:
 
   static examples = [
     'respan integrate opencode',
+    'respan integrate opencode --disable',
     'respan integrate opencode --global',
     'respan integrate opencode --project-id my-project --attrs \'{"env":"prod"}\'',
     'respan integrate opencode --dry-run',
@@ -38,12 +40,33 @@ Scope:
     this.globalFlags = flags;
 
     try {
+      const dryRun = flags['dry-run'];
+      const scope = resolveScope(flags, 'local');
+
+      // ── Disable mode ─────────────────────────────────────────────
+      if (flags.disable) {
+        const pluginPath = scope === 'global'
+          ? expandHome('~/.config/opencode/plugins/otel.json')
+          : path.join(findProjectRoot(), '.opencode', 'plugins', 'otel.json');
+        if (dryRun) {
+          this.log(`[dry-run] Would remove: ${pluginPath}`);
+        } else {
+          try {
+            fs.unlinkSync(pluginPath);
+            this.log(`Removed plugin config: ${pluginPath}`);
+          } catch {
+            this.log(`No plugin config found at: ${pluginPath}`);
+          }
+        }
+        this.log('OpenCode tracing disabled. Run with --enable to re-enable.');
+        return;
+      }
+
+      // ── Enable mode (default) ────────────────────────────────────
       const apiKey = this.resolveApiKey();
       const baseUrl = (flags['base-url']!).replace(/\/+$/, '');
       const projectId = flags['project-id'];
       const attrs = parseAttrs(flags.attrs!);
-      const dryRun = flags['dry-run'];
-      const scope = resolveScope(flags, 'local');
 
       // ── 1. Install opencode-otel (always global) ─────────────────
       if (dryRun) {
