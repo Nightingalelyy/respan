@@ -244,12 +244,13 @@ function formatCompletionOutput(attrs: Record<string, any>): string | undefined 
     content = String(attrs["ai.response.text"] ?? "");
   }
 
-  if (!content) return undefined;
-
   // Build assistant message with optional tool calls
-  const message: Record<string, any> = { role: "assistant", content };
-
   const toolCalls = parseToolCalls(attrs);
+
+  // Bail only when there's no text AND no tool calls
+  if (!content && (!toolCalls || toolCalls.length === 0)) return undefined;
+
+  const message: Record<string, any> = { role: "assistant", content };
   if (toolCalls && toolCalls.length > 0) {
     message.tool_calls = toolCalls;
   }
@@ -350,15 +351,24 @@ function parseTools(attrs: Record<string, any>): string | undefined {
       .map((tool: any) => {
         // Accept both nested and flat shapes; normalize to nested
         if (tool && tool.type === "function") {
-          if (tool.function && typeof tool.function === "object") return tool;
-          const { name, description, parameters, ...rest } = tool;
+          if (tool.function && typeof tool.function === "object") {
+            // Already nested — move top-level inputSchema into function.parameters
+            // (Vercel AI SDK puts inputSchema at the top level, backend expects function.parameters)
+            if (tool.inputSchema && !tool.function.parameters) {
+              const { inputSchema, ...rest } = tool;
+              return { ...rest, function: { ...tool.function, parameters: inputSchema } };
+            }
+            return tool;
+          }
+          const { name, description, parameters, inputSchema, ...rest } = tool;
+          const params = parameters ?? inputSchema;
           return {
             ...rest,
             type: "function",
             function: {
               name,
               ...(description ? { description } : {}),
-              ...(parameters ? { parameters } : {}),
+              ...(params ? { parameters: params } : {}),
             },
           };
         }
@@ -540,9 +550,14 @@ const VERCEL_ATTRS_TO_STRIP = [
   "ai.response.text",
   "ai.response.object",
 
-  // Tokens (translated to gen_ai.usage.prompt_tokens/completion_tokens)
+  // Tokens — old names (v5) + new names (v6)
   "ai.usage.promptTokens",
   "ai.usage.completionTokens",
+  "ai.usage.inputTokens",
+  "ai.usage.outputTokens",
+  "ai.usage.totalTokens",
+  "ai.usage.reasoningTokens",
+  "ai.usage.cachedInputTokens",
 
   // Response metadata (redundant with standard OTEL/GenAI attrs)
   "ai.response.finishReason",
@@ -550,6 +565,15 @@ const VERCEL_ATTRS_TO_STRIP = [
   "ai.response.timestamp",
   "ai.response.providerMetadata",
   "ai.response.msToFinish",
+  "ai.response.msToFirstChunk",
+  "ai.response.avgOutputTokensPerSecond",
+  "ai.response.avgCompletionTokensPerSecond",
+
+  // Request metadata
+  "ai.request.headers.user-agent",
+
+  // Tool choice (translated to respan.metadata.tool_choice)
+  "ai.prompt.toolChoice",
 
   // SDK internals (no user value)
   "ai.operationId",
@@ -614,10 +638,16 @@ function stripRedundantAttrs(attrs: Record<string, any>): void {
   for (const key of VERCEL_ATTRS_TO_STRIP) {
     delete attrs[key];
   }
-  // Strip ai.telemetry.metadata.* (already mapped to respan.metadata.* / respan.customer_params.*)
   for (const key of Object.keys(attrs)) {
+    // Strip ai.telemetry.metadata.* (already mapped to respan.metadata.* / respan.customer_params.*)
     if (key.startsWith("ai.telemetry.metadata.")) {
       delete attrs[key];
+      continue;
+    }
+    // Strip ai.usage.*Details.* (e.g. inputTokenDetails.noCacheTokens, outputTokenDetails.textTokens)
+    if (key.startsWith("ai.usage.") && key.includes("Details.")) {
+      delete attrs[key];
+      continue;
     }
   }
   // Strip ai.prompt.tools (translated to respan.span.tools)
@@ -647,7 +677,8 @@ export class VercelAITranslator implements SpanProcessor {
     if (config) {
       s.setAttribute(RESPAN_LOG_TYPE, config.logType);
     } else if (VERCEL_PARENT_SPANS[name] !== undefined) {
-      s.setAttribute(RESPAN_LOG_TYPE, VERCEL_PARENT_SPANS[name]);
+      // Parent wrappers are structural — mark as TASK to avoid duplicate LLM entries
+      s.setAttribute(RESPAN_LOG_TYPE, RespanLogType.TASK);
     } else {
       // Unknown ai.* span — use full fallback detection
       // At onStart, attributes may be sparse, so set a generic type.
@@ -673,8 +704,10 @@ export class VercelAITranslator implements SpanProcessor {
     enrichMetadata(attrs, name);
 
     // ── Parent wrapper spans: minimal enrichment only ─────────────────────
+    // Use TASK type so these structural wrappers don't create duplicate LLM
+    // entries alongside their .doGenerate/.doStream children.
     if (parentLogType !== undefined && !config) {
-      setDefault(attrs, RESPAN_LOG_TYPE, logType);
+      attrs[RESPAN_LOG_TYPE] = RespanLogType.TASK;
       stripRedundantAttrs(attrs);
       return;
     }
