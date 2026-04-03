@@ -39,7 +39,8 @@ const CUSTOMER_ID = RespanSpanAttributes.RESPAN_CUSTOMER_PARAMS_ID;
 const CUSTOMER_EMAIL = RespanSpanAttributes.RESPAN_CUSTOMER_PARAMS_EMAIL;
 const CUSTOMER_NAME = RespanSpanAttributes.RESPAN_CUSTOMER_PARAMS_NAME;
 const THREAD_ID = RespanSpanAttributes.RESPAN_THREADS_ID;
-const SESSION_ID = RespanSpanAttributes.RESPAN_SESSION_ID;
+// RESPAN_SESSION_ID not yet published in @respan/respan-sdk — use wire value directly
+const SESSION_ID = "respan.sessions.session_identifier";
 const TRACE_GROUP_ID = RespanSpanAttributes.RESPAN_TRACE_GROUP_ID;
 const RESPAN_SPAN_TOOLS = RespanSpanAttributes.RESPAN_SPAN_TOOLS;
 const RESPAN_METADATA_AGENT_NAME = RespanSpanAttributes.RESPAN_METADATA_AGENT_NAME;
@@ -680,8 +681,7 @@ export class VercelAITranslator implements SpanProcessor {
     if (config) {
       s.setAttribute(RESPAN_LOG_TYPE, config.logType);
     } else if (VERCEL_PARENT_SPANS[name] !== undefined) {
-      // Parent wrappers are structural — mark as TASK to avoid duplicate LLM entries
-      s.setAttribute(RESPAN_LOG_TYPE, RespanLogType.TASK);
+      s.setAttribute(RESPAN_LOG_TYPE, VERCEL_PARENT_SPANS[name]);
     } else {
       // Unknown ai.* span — use full fallback detection
       // At onStart, attributes may be sparse, so set a generic type.
@@ -707,10 +707,8 @@ export class VercelAITranslator implements SpanProcessor {
     enrichMetadata(attrs, name);
 
     // ── Parent wrapper spans: minimal enrichment only ─────────────────────
-    // Use TASK type so these structural wrappers don't create duplicate LLM
-    // entries alongside their .doGenerate/.doStream children.
     if (parentLogType !== undefined && !config) {
-      attrs[RESPAN_LOG_TYPE] = RespanLogType.TASK;
+      setDefault(attrs, RESPAN_LOG_TYPE, logType);
       stripRedundantAttrs(attrs);
       return;
     }
