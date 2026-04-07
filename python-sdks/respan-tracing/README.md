@@ -176,6 +176,34 @@ def multi_task():
 - ✅ **Automatic filtering**: Just provide `name` parameter - filter is auto-created!
 - ✅ **Single or multiple**: `processors="debug"` or `processors=["debug", "analytics"]`
 - ✅ **Custom filters**: Override with `filter_fn` for advanced logic
+- ✅ **Per-processor batching**: Override `is_batching_enabled` per processor
+
+#### Per-Processor Batching
+
+Each processor can override the global `is_batching_enabled` setting:
+
+```python
+kai = RespanTelemetry(
+    app_name="my-app",
+    api_key="your-key",
+    is_batching_enabled=True,  # Global default: async batch export
+)
+
+# HTTP exporter: batched (inherits global True) — non-blocking
+kai.add_processor(
+    exporter=RespanSpanExporter(endpoint="https://api.respan.ai/v2/traces"),
+    name="remote",
+)
+
+# Local exporter: synchronous — ensures spans are written before task returns
+kai.add_processor(
+    exporter=LocalPipelineExporter(),
+    name="local",
+    is_batching_enabled=False,  # Override: sync export for this processor
+)
+```
+
+**When to use `is_batching_enabled=False`:** For exporters that write to local/in-process destinations (file, database, in-memory queue). Synchronous export guarantees spans are written before the calling function returns — critical for worker processes where greenlets/threads may exit before a background batch thread runs.
 
 See [Multi-Processor Examples](#multiple-processors) for complete examples.
 
