@@ -15,7 +15,7 @@
  * ```
  */
 
-import { trace, SpanKind, SpanStatusCode } from "@opentelemetry/api";
+import { context, trace, SpanKind, SpanStatusCode, TraceFlags } from "@opentelemetry/api";
 import { hrTime, hrTimeDuration } from "@opentelemetry/core";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
@@ -151,13 +151,16 @@ function buildReadableSpan(opts: {
   attributes: Record<string, any>;
   errorMessage?: string;
 }): ReadableSpan {
-  // Generate random hex IDs
-  const traceId = Array.from({ length: 32 }, () =>
+  const activeSpan = trace.getSpan(context.active());
+  const activeSpanContext = activeSpan?.spanContext();
+  const traceId = activeSpanContext?.traceId ?? Array.from({ length: 32 }, () =>
     Math.floor(Math.random() * 16).toString(16),
   ).join("");
   const spanId = Array.from({ length: 16 }, () =>
     Math.floor(Math.random() * 16).toString(16),
   ).join("");
+  const parentSpanId = activeSpanContext?.spanId;
+  const traceFlags = activeSpanContext?.traceFlags ?? TraceFlags.SAMPLED;
 
   const status = opts.errorMessage
     ? { code: SpanStatusCode.ERROR, message: opts.errorMessage }
@@ -169,10 +172,10 @@ function buildReadableSpan(opts: {
     spanContext: () => ({
       traceId,
       spanId,
-      traceFlags: 1,
+      traceFlags,
       isRemote: false,
     }),
-    parentSpanId: undefined,
+    parentSpanId,
     startTime: opts.startTime,
     endTime: opts.endTime,
     duration: hrTimeDuration(opts.startTime, opts.endTime),

@@ -106,6 +106,16 @@ def _serialize_content_block(block: Any) -> Any:
     return str(block)
 
 
+def _normalize_content_block(block: Any) -> str:
+    """Normalize a content block into human-readable text for turn tracking."""
+    value = _serialize_content_block(block)
+    if value in ("", None, [], {}):
+        return ""
+    if isinstance(value, str):
+        return value
+    return _safe_json(value)
+
+
 def _format_input_messages(
     messages: List[Any],
     system: Any = None,
