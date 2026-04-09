@@ -168,11 +168,28 @@ jobs:
         working-directory: ${{ matrix.path }}
         env:
           IMPORT_NAME: ${{ matrix.import_name }}
+          DEPENDENCY_PATHS_JSON: ${{ toJson(matrix.dependency_paths) }}
+          REPO_ROOT: ${{ github.workspace }}
         run: |
           python3 -m venv .ci-smoke-venv
           . .ci-smoke-venv/bin/activate
           python -m pip install --upgrade pip
-          python -m pip install --no-deps dist/*.whl
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          repo_root = Path(os.environ["REPO_ROOT"])
+          dependency_paths = json.loads(os.environ["DEPENDENCY_PATHS_JSON"])
+
+          for dependency_path in dependency_paths:
+              subprocess.check_call(
+                  [sys.executable, "-m", "pip", "install", str(repo_root / dependency_path)]
+              )
+          PY
+          python -m pip install dist/*.whl
           python - <<'PY'
           import importlib
           import os
