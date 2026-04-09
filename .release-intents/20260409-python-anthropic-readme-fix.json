@@ -1,0 +1,6 @@
+{
+  "summary": "Republish respan-instrumentation-anthropic after fixing its package README for PyPI rendering",
+  "packages": {
+    "respan-instrumentation-anthropic": "new"
+  }
+}
