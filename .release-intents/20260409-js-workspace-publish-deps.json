@@ -1,0 +1,7 @@
+{
+  "summary": "Replace unreleasable workspace dependency ranges in active JS instrumentation packages and republish the broken OpenAI Agents package",
+  "packages": {
+    "@respan/instrumentation-anthropic": "none",
+    "@respan/instrumentation-openai-agents": "patch"
+  }
+}
