@@ -1,0 +1,7 @@
+{
+  "summary": "Publish newly registered Python instrumentation packages after adding trusted publishers",
+  "packages": {
+    "respan-instrumentation-anthropic": "new",
+    "respan-instrumentation-pydantic-ai": "new"
+  }
+}
