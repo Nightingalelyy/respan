@@ -160,6 +160,7 @@ jobs:
           PACKAGE_NAME: ${{ matrix.name }}
           PACKAGE_VERSION: ${{ env.RELEASE_VERSION }}
           BIN_NAME: ${{ matrix.bin_name }}
+          PACKAGE_PATH: ${{ matrix.path }}
         run: |
           tmpdir="$(mktemp -d)"
           cd "${tmpdir}"
@@ -187,8 +188,20 @@ jobs:
             sleep 15
           done
 
+          HAS_PEER_DEPENDENCIES="$(python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = json.loads(Path(os.environ["GITHUB_WORKSPACE"], os.environ["PACKAGE_PATH"], "package.json").read_text())
+          print("true" if manifest.get("peerDependencies") else "false")
+          PY
+          )"
+
           if [ -n "${BIN_NAME}" ] && [ "${BIN_NAME}" != "null" ]; then
             "./node_modules/.bin/${BIN_NAME}" --help >/dev/null
+          elif [ "${HAS_PEER_DEPENDENCIES}" = "true" ]; then
+            echo "Skipping empty-project import smoke for ${PACKAGE_NAME} because it declares peer dependencies."
           else
             node --input-type=module -e "await import(process.env.PACKAGE_NAME)"
           fi

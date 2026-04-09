@@ -1,0 +1,6 @@
+{
+  "summary": "Patch @respan/instrumentation-openai-agents publish smoke checks to treat peer-dependent installs as install-only verification",
+  "packages": {
+    "@respan/instrumentation-openai-agents": "patch"
+  }
+}
