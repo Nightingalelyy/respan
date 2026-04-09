@@ -1,0 +1,6 @@
+{
+  "summary": "Republish @respan/instrumentation-anthropic and opt GitHub Actions workflows into Node 24 execution",
+  "packages": {
+    "@respan/instrumentation-anthropic": "patch"
+  }
+}
