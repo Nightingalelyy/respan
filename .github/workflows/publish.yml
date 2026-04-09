@@ -292,6 +292,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
 
       - name: Registry smoke test
+        if: ${{ matrix.import_name != null }}
         env:
           PACKAGE_NAME: ${{ matrix.name }}
           PACKAGE_VERSION: ${{ steps.release_version.outputs.value }}

@@ -4,7 +4,7 @@ This repository does not use hand-maintained final version bumps in each PR.
 
 Instead, release-managed changes are driven by:
 
-- [.github/release-packages.json](/Users/chensihan/Documents/github/respan/.github/release-packages.json)
+- [.github/release-packages.json](../.github/release-packages.json)
 - `.release-intents/*.json`
 
 ## Why Release Intents Exist
@@ -28,7 +28,7 @@ Release intents remove that problem:
 Intent files live at repo root:
 
 - `.release-intents/`
-- use [.release-intents/20260409-example.json](/Users/chensihan/Documents/github/respan/.release-intents/20260409-example.json) as the template
+- use [.release-intents/20260409-example.json](../.release-intents/20260409-example.json) as the template
 
 Recommended naming:
 

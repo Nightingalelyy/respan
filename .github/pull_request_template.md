@@ -13,7 +13,7 @@ Rules:
 - use one of `none`, `new`, `patch`, `minor`, or `major`
 - do not hand-edit final package versions just to satisfy CI
 - prefer `YYYYMMDD-short-description.json` naming
-- use [.release-intents/20260409-example.json](/Users/chensihan/Documents/github/respan/.release-intents/20260409-example.json) as the starting shape
+- use [.release-intents/20260409-example.json](../.release-intents/20260409-example.json) as the starting shape
 
 ## Validation
 

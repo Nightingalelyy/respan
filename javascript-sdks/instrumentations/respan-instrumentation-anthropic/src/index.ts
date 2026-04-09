@@ -293,12 +293,15 @@ function emitSpan(
 // Instrumentor
 // ---------------------------------------------------------------------------
 
-let _originalCreate: any = null;
-let _originalStream: any = null;
-let _messagesPrototype: any = null;
-
 export class AnthropicInstrumentor {
   public readonly name = "anthropic";
+  private static readonly _sharedState = {
+    activeInstances: 0,
+    messagesPrototype: null as any,
+    originalCreate: null as any,
+    originalStream: null as any,
+  };
+
   private _isInstrumented = false;
 
   async activate(): Promise<void> {
@@ -319,11 +322,19 @@ export class AnthropicInstrumentor {
     try {
       const tempClient = new Anthropic({ apiKey: "sk-placeholder" });
       const messagesProto = Object.getPrototypeOf(tempClient.messages);
-      _messagesPrototype = messagesProto;
+      const sharedState = AnthropicInstrumentor._sharedState;
+
+      if (sharedState.activeInstances > 0) {
+        this._isInstrumented = true;
+        sharedState.activeInstances += 1;
+        return;
+      }
+
+      sharedState.messagesPrototype = messagesProto;
 
       // Patch create
-      if (!_originalCreate) {
-        _originalCreate = messagesProto.create;
+      if (!sharedState.originalCreate) {
+        sharedState.originalCreate = messagesProto.create;
       }
       messagesProto.create = async function (
         this: any,
@@ -332,7 +343,7 @@ export class AnthropicInstrumentor {
       ) {
         const startTime = hrTime();
         try {
-          const message = await _originalCreate.call(this, body, options);
+          const message = await sharedState.originalCreate.call(this, body, options);
           try {
             const attrs = buildSpanAttrs(body, message);
             emitSpan(attrs, startTime);
@@ -353,8 +364,8 @@ export class AnthropicInstrumentor {
 
       // Patch stream
       if (typeof messagesProto.stream === "function") {
-        if (!_originalStream) {
-          _originalStream = messagesProto.stream;
+        if (!sharedState.originalStream) {
+          sharedState.originalStream = messagesProto.stream;
         }
         messagesProto.stream = function (
           this: any,
@@ -362,7 +373,7 @@ export class AnthropicInstrumentor {
           options?: any,
         ) {
           const startTime = hrTime();
-          const streamResult = _originalStream.call(this, body, options);
+          const streamResult = sharedState.originalStream.call(this, body, options);
           let spanEmitted = false;
 
           const emitStreamSpan = (message: any) => {
@@ -400,6 +411,7 @@ export class AnthropicInstrumentor {
         };
       }
 
+      sharedState.activeInstances = 1;
       this._isInstrumented = true;
     } catch (err) {
       console.warn("[Respan] Failed to activate Anthropic instrumentation:", err);
@@ -407,22 +419,27 @@ export class AnthropicInstrumentor {
   }
 
   deactivate(): void {
-    if (!this._isInstrumented || !_messagesPrototype) return;
+    if (!this._isInstrumented) return;
+
+    const sharedState = AnthropicInstrumentor._sharedState;
+    sharedState.activeInstances = Math.max(0, sharedState.activeInstances - 1);
+    this._isInstrumented = false;
+
+    if (sharedState.activeInstances > 0 || !sharedState.messagesPrototype) return;
 
     try {
-      if (_originalCreate) {
-        _messagesPrototype.create = _originalCreate;
-        _originalCreate = null;
+      if (sharedState.originalCreate) {
+        sharedState.messagesPrototype.create = sharedState.originalCreate;
+        sharedState.originalCreate = null;
       }
-      if (_originalStream) {
-        _messagesPrototype.stream = _originalStream;
-        _originalStream = null;
+      if (sharedState.originalStream) {
+        sharedState.messagesPrototype.stream = sharedState.originalStream;
+        sharedState.originalStream = null;
       }
     } catch {
       /* ignore */
     }
 
-    _messagesPrototype = null;
-    this._isInstrumented = false;
+    sharedState.messagesPrototype = null;
   }
 }

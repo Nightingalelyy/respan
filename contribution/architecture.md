@@ -46,9 +46,9 @@ Responsibilities:
 
 Important Python entrypoints:
 
-- [__init__.py](/Users/chensihan/Documents/github/respan/python-sdks/respan-sdk/src/respan_sdk/__init__.py)
-- [span_attributes.py](/Users/chensihan/Documents/github/respan/python-sdks/respan-sdk/src/respan_sdk/constants/span_attributes.py)
-- [otlp_constants.py](/Users/chensihan/Documents/github/respan/python-sdks/respan-sdk/src/respan_sdk/constants/otlp_constants.py)
+- [__init__.py](../python-sdks/respan-sdk/src/respan_sdk/__init__.py)
+- [span_attributes.py](../python-sdks/respan-sdk/src/respan_sdk/constants/span_attributes.py)
+- [otlp_constants.py](../python-sdks/respan-sdk/src/respan_sdk/constants/otlp_constants.py)
 
 Boundary rule:
 
@@ -73,28 +73,28 @@ This is the real engine of the system.
 
 Core objects:
 
-- [RespanTelemetry](/Users/chensihan/Documents/github/respan/python-sdks/respan-tracing/src/respan_tracing/main.py)
+- [RespanTelemetry](../python-sdks/respan-tracing/src/respan_tracing/main.py)
   - high-level runtime facade
   - configures logging
   - creates the singleton tracer
   - exposes decorators as instance methods
   - exposes `add_processor()`, `flush()`, and `get_client()`
-- [RespanTracer](/Users/chensihan/Documents/github/respan/python-sdks/respan-tracing/src/respan_tracing/core/tracer.py)
+- [RespanTracer](../python-sdks/respan-tracing/src/respan_tracing/core/tracer.py)
   - singleton OTEL owner
   - creates the `TracerProvider`
   - installs default Respan exporter when `api_key` exists
   - manages additional processors via `add_processor()`
   - controls auto-instrumentation via `_setup_instrumentations()`
-- [RespanClient](/Users/chensihan/Documents/github/respan/python-sdks/respan-tracing/src/respan_tracing/core/client.py)
+- [RespanClient](../python-sdks/respan-tracing/src/respan_tracing/core/client.py)
   - imperative API over current OTEL context
   - reads current trace/span ids
   - updates span attributes via `update_current_span()`
   - records events and exceptions
-- [create_entity_method()](/Users/chensihan/Documents/github/respan/python-sdks/respan-tracing/src/respan_tracing/decorators/base.py)
+- [create_entity_method()](../python-sdks/respan-tracing/src/respan_tracing/decorators/base.py)
   - decorator factory used by `workflow`, `task`, `agent`, and `tool`
   - creates spans around sync, async, generator, and async-generator functions
   - serializes input/output when content tracing is enabled
-- [RespanSpanExporter](/Users/chensihan/Documents/github/respan/python-sdks/respan-tracing/src/respan_tracing/exporters/respan.py)
+- [RespanSpanExporter](../python-sdks/respan-tracing/src/respan_tracing/exporters/respan.py)
   - transforms `ReadableSpan` objects into Respan OTLP payloads
   - enriches spans before export
   - performs exporter-only synthetic span generation when needed
@@ -107,7 +107,7 @@ Supporting subsystems:
   - filtering, buffering, and span collection behavior
 - `utils/span_setup.py`
   - common span setup/cleanup logic used by decorators and clients
-- [instruments.py](/Users/chensihan/Documents/github/respan/python-sdks/respan-tracing/src/respan_tracing/instruments.py)
+- [instruments.py](../python-sdks/respan-tracing/src/respan_tracing/instruments.py)
   - enum of built-in auto-instrumentable libraries
 
 Design rule:
@@ -118,16 +118,16 @@ Design rule:
 
 Core objects:
 
-- [RespanTelemetry](/Users/chensihan/Documents/github/respan/javascript-sdks/respan-tracing/src/main.ts)
+- [RespanTelemetry](../javascript-sdks/respan-tracing/src/main.ts)
   - high-level runtime facade
   - owns explicit async initialization through `initialize()`
   - exposes `withWorkflow`, `withTask`, `withAgent`, `withTool`
   - exposes `addProcessor()`, `getClient()`, and `getSpanBufferManager()`
-- [instrumentation/manager.ts](/Users/chensihan/Documents/github/respan/javascript-sdks/respan-tracing/src/instrumentation/manager.ts)
+- [instrumentation/manager.ts](../javascript-sdks/respan-tracing/src/instrumentation/manager.ts)
   - discovers and configures OTEL/Traceloop instrumentations
   - maintains loaded instrumentation instances
   - applies trace-content config to instrumentors
-- [MultiProcessorManager](/Users/chensihan/Documents/github/respan/javascript-sdks/respan-tracing/src/processor/manager.ts)
+- [MultiProcessorManager](../javascript-sdks/respan-tracing/src/processor/manager.ts)
   - routes spans to named processors
   - supports processor-name routing plus custom filters
   - preserves a default route for backward compatibility
@@ -159,8 +159,8 @@ These packages are thin orchestration layers over the tracing runtime.
 
 Key exports:
 
-- [Respan](/Users/chensihan/Documents/github/respan/python-sdks/respan/src/respan/_core.py)
-- [OTELInstrumentor](/Users/chensihan/Documents/github/respan/python-sdks/respan/src/respan/_otel_instrumentor.py)
+- [Respan](../python-sdks/respan/src/respan/_core.py)
+- [OTELInstrumentor](../python-sdks/respan/src/respan/_otel_instrumentor.py)
 - decorator and client re-exports from `respan_tracing`
 
 `Respan` owns three things:
@@ -188,9 +188,9 @@ Important methods:
 
 Key exports:
 
-- [Respan](/Users/chensihan/Documents/github/respan/javascript-sdks/respan/src/_core.ts)
-- [OTELInstrumentor](/Users/chensihan/Documents/github/respan/javascript-sdks/respan/src/_otel_instrumentor.ts)
-- [OpenInferenceInstrumentor](/Users/chensihan/Documents/github/respan/javascript-sdks/respan/src/_openinference_instrumentor.ts)
+- [Respan](../javascript-sdks/respan/src/_core.ts)
+- [OTELInstrumentor](../javascript-sdks/respan/src/_otel_instrumentor.ts)
+- [OpenInferenceInstrumentor](../javascript-sdks/respan/src/_openinference_instrumentor.ts)
 
 `Respan` in JS owns:
 
@@ -229,11 +229,11 @@ There are two valid adapter styles:
 
 Representative examples:
 
-- [Python Anthropic instrumentation](/Users/chensihan/Documents/github/respan/python-sdks/instrumentations/respan-instrumentation-anthropic/src/respan_instrumentation_anthropic/_instrumentation.py)
+- [Python Anthropic instrumentation](../python-sdks/instrumentations/respan-instrumentation-anthropic/src/respan_instrumentation_anthropic/_instrumentation.py)
   - monkey-patches Anthropic clients
   - normalizes messages, tools, tool calls, and token usage
   - emits GenAI semantic-convention attributes
-- [JavaScript OpenAI instrumentation](/Users/chensihan/Documents/github/respan/javascript-sdks/instrumentations/respan-instrumentation-openai/src/index.ts)
+- [JavaScript OpenAI instrumentation](../javascript-sdks/instrumentations/respan-instrumentation-openai/src/index.ts)
   - wraps `@traceloop/instrumentation-openai`
   - points it at the global tracer provider
   - manually patches the OpenAI module
@@ -267,12 +267,12 @@ Core responsibilities:
 
 Representative modules:
 
-- [auth.ts](/Users/chensihan/Documents/github/respan/javascript-sdks/respan-cli/src/lib/auth.ts)
+- [auth.ts](../javascript-sdks/respan-cli/src/lib/auth.ts)
   - resolves auth from flags, env, or stored credentials
   - refreshes JWT tokens when needed
-- [config.ts](/Users/chensihan/Documents/github/respan/javascript-sdks/respan-cli/src/lib/config.ts)
+- [config.ts](../javascript-sdks/respan-cli/src/lib/config.ts)
   - persists credentials and defaults in `~/.respan`
-- [src/commands/](/Users/chensihan/Documents/github/respan/javascript-sdks/respan-cli/src/commands)
+- [src/commands/](../javascript-sdks/respan-cli/src/commands)
   - command surface grouped by product area
 
 Boundary rule:
@@ -322,6 +322,6 @@ This file explains runtime architecture and package responsibilities.
 
 Related docs:
 
-- [writing-instrumentations.md](/Users/chensihan/Documents/github/respan/contribution/writing-instrumentations.md)
-- [cicd.md](/Users/chensihan/Documents/github/respan/contribution/cicd.md)
-- [publish.md](/Users/chensihan/Documents/github/respan/contribution/publish.md)
+- [writing-instrumentations.md](writing-instrumentations.md)
+- [cicd.md](cicd.md)
+- [publish.md](publish.md)

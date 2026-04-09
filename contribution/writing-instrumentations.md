@@ -81,7 +81,7 @@ For every new active instrumentation:
 
 Release-managed instrumentations must be added to:
 
-- [.github/release-packages.json](/Users/chensihan/Documents/github/respan/.github/release-packages.json)
+- [.github/release-packages.json](../.github/release-packages.json)
 
 If the package is not in release inventory, CI/CD will not treat it as part of the active release surface.
 
@@ -89,7 +89,7 @@ If the package is not in release inventory, CI/CD will not treat it as part of t
 
 Release-managed JS instrumentations must be listed in:
 
-- [package.json](/Users/chensihan/Documents/github/respan/javascript-sdks/package.json)
+- [package.json](../javascript-sdks/package.json)
 
 Legacy packages must stay out of that workspace list.
 
@@ -151,7 +151,7 @@ Use one of:
 - `minor`
 - `major`
 
-See [publish.md](/Users/chensihan/Documents/github/respan/contribution/publish.md) for the release workflow.
+See [publish.md](publish.md) for the release workflow.
 
 ## Anti-Patterns
 
