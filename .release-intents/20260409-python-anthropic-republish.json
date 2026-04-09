@@ -1,0 +1,6 @@
+{
+  "summary": "Republish respan-instrumentation-anthropic after fixing its PyPI pending publisher configuration",
+  "packages": {
+    "respan-instrumentation-anthropic": "new"
+  }
+}
