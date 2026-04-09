@@ -165,8 +165,19 @@ jobs:
           cd "${tmpdir}"
           npm init -y >/dev/null 2>&1
 
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+            if npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version >/tmp/npm-view.log 2>&1; then
+              break
+            fi
+            if [ "${attempt}" -eq 16 ]; then
+              cat /tmp/npm-view.log
+              exit 1
+            fi
+            sleep 15
+          done
+
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            if npm install "${PACKAGE_NAME}@${PACKAGE_VERSION}" >/tmp/npm-install.log 2>&1; then
+            if npm install --prefer-online "${PACKAGE_NAME}@${PACKAGE_VERSION}" >/tmp/npm-install.log 2>&1; then
               break
             fi
             if [ "${attempt}" -eq 10 ]; then
