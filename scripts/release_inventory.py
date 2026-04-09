@@ -265,39 +265,6 @@ def internal_dependency_names(entries: list[dict], ecosystem: str) -> dict[str, 
     raise ValueError(f"unsupported ecosystem for dependency graph: {ecosystem}")
 
 
-def transitive_internal_dependency_entries(
-    entries: list[dict],
-    ecosystem: str,
-    package_name: str,
-) -> list[dict]:
-    scoped_entries = [entry for entry in entries if entry["ecosystem"] == ecosystem]
-    entries_by_name = {entry["name"]: entry for entry in scoped_entries}
-    if package_name not in entries_by_name:
-        raise KeyError(package_name)
-
-    graph = internal_dependency_names(entries, ecosystem)
-    ordered_names: list[str] = []
-    visiting: set[str] = set()
-    visited: set[str] = set()
-
-    def visit(name: str) -> None:
-        if name in visited:
-            return
-        if name in visiting:
-            raise ValueError(f"cyclic {ecosystem} dependency detected at {name}")
-
-        visiting.add(name)
-        for dependency_name in sorted(graph.get(name, set())):
-            visit(dependency_name)
-        visiting.remove(name)
-        visited.add(name)
-        if name != package_name:
-            ordered_names.append(name)
-
-    visit(package_name)
-    return [entries_by_name[name] for name in ordered_names]
-
-
 def expand_with_dependents(entries: list[dict], selected: list[dict], ecosystem: str) -> list[dict]:
     if not selected:
         return []
@@ -436,7 +403,7 @@ def validate(entries: list[dict]) -> list[str]:
     return errors
 
 
-def build_record(entry: dict, manifest: dict, entries: list[dict] | None = None) -> dict:
+def build_record(entry: dict, manifest: dict) -> dict:
     record = {
         "ecosystem": entry["ecosystem"],
         "name": entry["name"],
@@ -451,12 +418,6 @@ def build_record(entry: dict, manifest: dict, entries: list[dict] | None = None)
         record["bin_name"] = javascript_bin_name(manifest)
     else:
         record["import_name"] = python_import_name(manifest)
-        dependency_entries = (
-            transitive_internal_dependency_entries(entries, "python", entry["name"])
-            if entries is not None
-            else []
-        )
-        record["dependency_paths"] = [dependency_entry["path"] for dependency_entry in dependency_entries]
     return record
 
 
@@ -490,7 +451,7 @@ def filtered_entries(
                 filtered.append(entry)
         selected = filtered
 
-    return [build_record(entry, manifests[entry["name"]], entries) for entry in selected]
+    return [build_record(entry, manifests[entry["name"]]) for entry in selected]
 
 
 def entries_missing_version_bump(
@@ -513,7 +474,7 @@ def entries_missing_version_bump(
         current_version = manifest_version(entry, manifests[entry["name"]])
         previous_version = version_from_git_ref(entry, base or "")
         if previous_version == current_version:
-            missing.append(build_record(entry, manifests[entry["name"]], entries))
+            missing.append(build_record(entry, manifests[entry["name"]]))
 
     return missing
 
@@ -562,7 +523,7 @@ def main() -> int:
                 print(entry["name"])
             return 0
 
-        selected = [build_record(entry, load_manifest(entry), entries) for entry in selected_entries]
+        selected = [build_record(entry, load_manifest(entry)) for entry in selected_entries]
         if args.count:
             print(len(selected))
             return 0
