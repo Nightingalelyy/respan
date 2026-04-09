@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from pathlib import PurePosixPath
 
 try:
     import tomllib
@@ -163,9 +164,31 @@ def changed_files(base: str, head: str) -> set[str]:
     return {line.strip() for line in output.splitlines() if line.strip()}
 
 
+def is_non_substantive_path(path: str) -> bool:
+    pure = PurePosixPath(path)
+
+    if pure.name == ".DS_Store":
+        return True
+    if pure.suffix == ".pyc":
+        return True
+    if "__pycache__" in pure.parts:
+        return True
+    if ".pytest_cache" in pure.parts or ".mypy_cache" in pure.parts:
+        return True
+    if pure.name in {".env", ".env.backup"}:
+        return True
+    if pure.parts[-2:] == (".yarn", "install-state.gz"):
+        return True
+
+    return False
+
+
 def package_changed(entry: dict, files: set[str]) -> bool:
     prefix = f"{entry['path']}/"
-    return any(path == entry["path"] or path.startswith(prefix) for path in files)
+    return any(
+        (path == entry["path"] or path.startswith(prefix)) and not is_non_substantive_path(path)
+        for path in files
+    )
 
 
 def version_from_git_ref(entry: dict, ref: str) -> str | None:
