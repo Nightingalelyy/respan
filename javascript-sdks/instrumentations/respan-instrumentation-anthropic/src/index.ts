@@ -363,6 +363,18 @@ export class AnthropicInstrumentor {
         ) {
           const startTime = hrTime();
           const streamResult = _originalStream.call(this, body, options);
+          let spanEmitted = false;
+
+          const emitStreamSpan = (message: any) => {
+            if (spanEmitted) return;
+            spanEmitted = true;
+            try {
+              const attrs = buildSpanAttrs(body, message);
+              emitSpan(attrs, startTime);
+            } catch {
+              // Never break the application
+            }
+          };
 
           // The Anthropic JS SDK stream returns a MessageStream which is
           // an async iterable with a .finalMessage() promise
@@ -370,25 +382,17 @@ export class AnthropicInstrumentor {
           if (typeof originalFinalMessage === "function") {
             streamResult.finalMessage = async function () {
               const message = await originalFinalMessage();
-              try {
-                const attrs = buildSpanAttrs(body, message);
-                emitSpan(attrs, startTime);
-              } catch {
-                // Never break the application
-              }
+              emitStreamSpan(message);
               return message;
             };
           }
 
-          // Also hook into the 'end' event if EventEmitter-style
+          // Also hook into the finalMessage event if EventEmitter-style
           if (typeof streamResult.on === "function") {
-            streamResult.on("finalMessage", (message: any) => {
-              try {
-                const attrs = buildSpanAttrs(body, message);
-                emitSpan(attrs, startTime);
-              } catch {
-                // Never break the application
-              }
+            const subscribeMethod =
+              typeof streamResult.once === "function" ? "once" : "on";
+            streamResult[subscribeMethod]("finalMessage", (message: any) => {
+              emitStreamSpan(message);
             });
           }
 
