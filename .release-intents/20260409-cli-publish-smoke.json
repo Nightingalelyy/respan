@@ -1,0 +1,6 @@
+{
+  "summary": "Patch @respan/cli publish smoke checks to wait for npm registry visibility before install verification",
+  "packages": {
+    "@respan/cli": "patch"
+  }
+}
