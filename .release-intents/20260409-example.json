@@ -1,0 +1,7 @@
+{
+  "summary": "Describe the user-visible or package-level release change in one sentence",
+  "packages": {
+    "@respan/cli": "patch",
+    "respan-instrumentation-pydantic-ai": "new"
+  }
+}

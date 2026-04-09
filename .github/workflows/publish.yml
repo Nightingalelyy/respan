@@ -45,7 +45,9 @@ jobs:
           python-version: "3.11"
 
       - name: Validate release metadata
-        run: python3 scripts/release_inventory.py --validate
+        run: |
+          python3 scripts/release_inventory.py --validate
+          python3 scripts/release_intents.py validate
 
       - id: refs
         name: Resolve comparison refs
@@ -82,7 +84,7 @@ jobs:
           BASE_REF: ${{ steps.refs.outputs.base_ref }}
           HEAD_REF: ${{ steps.refs.outputs.head_ref }}
         run: |
-          echo "value=$(python3 scripts/release_inventory.py --ecosystem javascript --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --version-changed --format github-matrix)" >> "$GITHUB_OUTPUT"
+          echo "value=$(python3 scripts/release_intents.py plan --ecosystem javascript --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --format github-matrix)" >> "$GITHUB_OUTPUT"
 
       - id: javascript_count
         name: Count JavaScript publish packages
@@ -90,7 +92,7 @@ jobs:
           BASE_REF: ${{ steps.refs.outputs.base_ref }}
           HEAD_REF: ${{ steps.refs.outputs.head_ref }}
         run: |
-          echo "value=$(python3 scripts/release_inventory.py --ecosystem javascript --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --version-changed --count)" >> "$GITHUB_OUTPUT"
+          echo "value=$(python3 scripts/release_intents.py plan --ecosystem javascript --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --count)" >> "$GITHUB_OUTPUT"
 
       - id: python_matrix
         name: Build Python publish matrix
@@ -98,7 +100,7 @@ jobs:
           BASE_REF: ${{ steps.refs.outputs.base_ref }}
           HEAD_REF: ${{ steps.refs.outputs.head_ref }}
         run: |
-          echo "value=$(python3 scripts/release_inventory.py --ecosystem python --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --version-changed --format github-matrix)" >> "$GITHUB_OUTPUT"
+          echo "value=$(python3 scripts/release_intents.py plan --ecosystem python --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --format github-matrix)" >> "$GITHUB_OUTPUT"
 
       - id: python_count
         name: Count Python publish packages
@@ -106,7 +108,7 @@ jobs:
           BASE_REF: ${{ steps.refs.outputs.base_ref }}
           HEAD_REF: ${{ steps.refs.outputs.head_ref }}
         run: |
-          echo "value=$(python3 scripts/release_inventory.py --ecosystem python --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --version-changed --count)" >> "$GITHUB_OUTPUT"
+          echo "value=$(python3 scripts/release_intents.py plan --ecosystem python --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --count)" >> "$GITHUB_OUTPUT"
 
   publish-javascript:
     needs: discover
@@ -133,6 +135,8 @@ jobs:
 
       - name: Install and build package
         run: |
+          RELEASE_VERSION="$(python3 scripts/release_intents.py apply --package "${{ matrix.name }}" --bump "${{ matrix.bump }}" --prefer-registry)"
+          echo "RELEASE_VERSION=${RELEASE_VERSION}" >> "$GITHUB_ENV"
           corepack enable
           cd javascript-sdks
           yarn install
@@ -150,6 +154,58 @@ jobs:
       - name: Publish package
         working-directory: ${{ matrix.path }}
         run: npm publish --access public
+
+      - name: Registry smoke test
+        env:
+          PACKAGE_NAME: ${{ matrix.name }}
+          PACKAGE_VERSION: ${{ env.RELEASE_VERSION }}
+          BIN_NAME: ${{ matrix.bin_name }}
+        run: |
+          tmpdir="$(mktemp -d)"
+          cd "${tmpdir}"
+          npm init -y >/dev/null 2>&1
+
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if npm install "${PACKAGE_NAME}@${PACKAGE_VERSION}" >/tmp/npm-install.log 2>&1; then
+              break
+            fi
+            if [ "${attempt}" -eq 10 ]; then
+              cat /tmp/npm-install.log
+              exit 1
+            fi
+            sleep 15
+          done
+
+          if [ -n "${BIN_NAME}" ] && [ "${BIN_NAME}" != "null" ]; then
+            "./node_modules/.bin/${BIN_NAME}" --help >/dev/null
+          else
+            node --input-type=module -e "await import(process.env.PACKAGE_NAME)"
+          fi
+
+      - name: Record published version
+        run: |
+          mkdir -p .release-sync
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          payload = {
+              "name": os.environ["PACKAGE_NAME"],
+              "version": os.environ["PACKAGE_VERSION"],
+          }
+          Path(".release-sync/version.json").write_text(json.dumps(payload) + "\n")
+          PY
+        env:
+          PACKAGE_NAME: ${{ matrix.name }}
+          PACKAGE_VERSION: ${{ env.RELEASE_VERSION }}
+
+      - name: Upload published version artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: published-version-javascript-${{ matrix.slug }}
+          path: .release-sync/version.json
+          if-no-files-found: error
 
   build-python:
     needs: discover
@@ -173,13 +229,23 @@ jobs:
 
       - name: Build distribution
         working-directory: ${{ matrix.path }}
-        run: python3 -m build
+        run: |
+          RELEASE_VERSION="$(python3 "${GITHUB_WORKSPACE}/scripts/release_intents.py" apply --package "${{ matrix.name }}" --bump "${{ matrix.bump }}" --prefer-registry)"
+          echo "${RELEASE_VERSION}" > dist.release-version
+          python3 -m build
 
       - name: Upload distribution artifact
         uses: actions/upload-artifact@v4
         with:
           name: python-${{ matrix.slug }}
           path: ${{ matrix.path }}/dist/*
+          if-no-files-found: error
+
+      - name: Upload release version artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-version-${{ matrix.slug }}
+          path: ${{ matrix.path }}/dist.release-version
           if-no-files-found: error
 
   publish-python:
@@ -198,11 +264,142 @@ jobs:
       matrix:
         include: ${{ fromJson(needs.discover.outputs.python_matrix) }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.discover.outputs.head_ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Download distribution artifact
         uses: actions/download-artifact@v4
         with:
           name: python-${{ matrix.slug }}
           path: dist
 
+      - name: Download release version artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: python-version-${{ matrix.slug }}
+          path: version
+
+      - id: release_version
+        name: Read release version
+        run: echo "value=$(cat version/dist.release-version)" >> "$GITHUB_OUTPUT"
+
       - name: Publish package
         uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Registry smoke test
+        if: ${{ matrix.import_name != null }}
+        env:
+          PACKAGE_NAME: ${{ matrix.name }}
+          PACKAGE_VERSION: ${{ steps.release_version.outputs.value }}
+          IMPORT_NAME: ${{ matrix.import_name }}
+        run: |
+          python -m venv .smoke-venv
+          . .smoke-venv/bin/activate
+          python -m pip install --upgrade pip
+
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if python -m pip install "${PACKAGE_NAME}==${PACKAGE_VERSION}" >/tmp/pip-install.log 2>&1; then
+              break
+            fi
+            if [ "${attempt}" -eq 10 ]; then
+              cat /tmp/pip-install.log
+              exit 1
+            fi
+            sleep 15
+          done
+
+          python - <<'PY'
+          import importlib
+          import os
+
+          importlib.import_module(os.environ["IMPORT_NAME"])
+          PY
+
+      - name: Record published version
+        run: |
+          mkdir -p .release-sync
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          payload = {
+              "name": os.environ["PACKAGE_NAME"],
+              "version": os.environ["PACKAGE_VERSION"],
+          }
+          Path(".release-sync/version.json").write_text(json.dumps(payload) + "\n")
+          PY
+        env:
+          PACKAGE_NAME: ${{ matrix.name }}
+          PACKAGE_VERSION: ${{ steps.release_version.outputs.value }}
+
+      - name: Upload published version artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: published-version-python-${{ matrix.slug }}
+          path: .release-sync/version.json
+          if-no-files-found: error
+
+  sync-manifest-versions:
+    needs:
+      - discover
+      - publish-javascript
+      - publish-python
+    if: ${{ always() && (needs.discover.outputs.javascript_count != '0' || needs.discover.outputs.python_count != '0') && needs.discover.result == 'success' && (needs.publish-javascript.result == 'success' || needs.publish-javascript.result == 'skipped') && (needs.publish-python.result == 'success' || needs.publish-python.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download published version artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: published-version-*
+          path: .release-sync/artifacts
+          merge-multiple: false
+
+      - name: Build version mapping
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          artifact_root = Path(".release-sync/artifacts")
+          versions = {}
+
+          for payload_path in sorted(artifact_root.glob("*/version.json")):
+              payload = json.loads(payload_path.read_text())
+              versions[payload["name"]] = payload["version"]
+
+          output_path = Path(".release-sync/versions.json")
+          output_path.write_text(json.dumps(versions, indent=2, sort_keys=True) + "\n")
+          PY
+
+      - name: Sync manifest versions
+        run: |
+          python3 scripts/release_intents.py set-versions --file .release-sync/versions.json
+
+      - name: Commit synced versions
+        run: |
+          if git diff --quiet --exit-code; then
+            echo "No manifest changes to commit"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add javascript-sdks python-sdks
+          git commit -m "chore: sync published package versions [skip ci]"
+          git push origin HEAD:main

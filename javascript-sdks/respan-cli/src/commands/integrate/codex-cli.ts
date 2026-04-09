@@ -22,7 +22,8 @@ them to Respan as structured spans (chat, tool, reasoning).
 Scope:
   --global   Install hook script + register notify in ~/.codex/config.toml
   --local    Write .codex/respan.json with customer_id, span_name, etc.
-  (default)  Both: install hook globally + config for current project`;
+
+Default behavior installs the global notify hook and writes local project config.`;
 
   static examples = [
     'respan integrate codex-cli',

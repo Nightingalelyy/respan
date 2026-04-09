@@ -24,7 +24,8 @@ them to Respan as structured spans (chat, tool, thinking).
 Scope:
   --global   Install hook script + register in ~/.claude/settings.json
   --local    Write credentials + enable flag to .claude/settings.local.json
-  (default)  Both: install hook globally + enable for current project`;
+
+Default behavior installs the global hook and writes local project config.`;
 
   static examples = [
     'respan integrate claude-code',
@@ -87,7 +88,7 @@ Scope:
       const spanName = flags['span-name'];
       const workflowName = flags['workflow-name'];
       const attrs = parseAttrs(flags.attrs!);
-      // Claude Code default: both global + local
+      // Claude Code default: both global + local.
 
       const doGlobal = scope === 'global' || scope === 'both';
 

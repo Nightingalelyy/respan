@@ -26,8 +26,7 @@ Scope:
   --global   Write to ~/.gemini/settings.json (default)
   --local    Write to .gemini/settings.json in project root
 
-Note: Gemini CLI ignores workspace-level telemetry settings, so
---global is the default.`;
+Gemini CLI ignores workspace-level telemetry settings, so --global is the default.`;
 
   static examples = [
     'respan integrate gemini-cli',

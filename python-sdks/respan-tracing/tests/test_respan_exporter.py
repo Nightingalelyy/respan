@@ -23,6 +23,7 @@ from respan_sdk.constants.span_attributes import (
 
 from respan_tracing.exporters.respan import (
     RespanSpanExporter,
+    _get_enrichment_attrs,
     _prepare_spans_for_export,
     _span_to_otlp_json,
 )
@@ -303,6 +304,24 @@ def test_prepare_spans_backfills_completion_content_from_output_when_needed():
     assert prepared_attrs["gen_ai.completion.0.tool_calls"] == tool_calls
     assert prepared_attrs["gen_ai.completion.0.content"] == final_text
     assert prepared_attrs["gen_ai.completion.0.role"] == "assistant"
+
+
+def test_get_enrichment_attrs_remaps_cache_usage_to_override_fields():
+    span = _make_span(
+        name="anthropic.chat",
+        span_id=4003,
+        attributes={
+            "gen_ai.system": "anthropic",
+            SpanAttributes.LLM_USAGE_CACHE_READ_INPUT_TOKENS: 1422,
+            SpanAttributes.LLM_USAGE_CACHE_CREATION_INPUT_TOKENS: 71,
+        },
+    )
+
+    enriched = _get_enrichment_attrs(span)
+
+    assert enriched["prompt_cache_hit_tokens"] == 1422
+    assert enriched["prompt_cache_creation_tokens"] == 71
+
 
 def test_export_keeps_tool_helper_spans_in_single_otlp_pipeline():
     """Tool helper spans should stay in the OTLP export path."""

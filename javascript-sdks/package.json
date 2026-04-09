@@ -5,15 +5,12 @@
   "workspaces": [
     "respan",
     "respan-cli",
-    "respan-instrumentation-openai",
-    "respan-instrumentation-openai-agents",
-    "respan-instrumentation-openinference",
-    "respan-instrumentation-vercel",
-    "respan-exporter-anthropic-agents",
+    "instrumentations/respan-instrumentation-anthropic",
+    "instrumentations/respan-instrumentation-openai",
+    "instrumentations/respan-instrumentation-openai-agents",
+    "instrumentations/respan-instrumentation-openinference",
+    "instrumentations/respan-instrumentation-vercel",
     "respan-sdk",
     "respan-tracing"
-  ],
-  "scripts": {
-    "test:exporter": "cd respan-exporter-anthropic-agents && node ../node_modules/tsx/dist/cli.mjs --test tests/exporter.test.ts"
-  }
+  ]
 }

@@ -1,0 +1,17 @@
+{
+  "summary": "Patch SDK packaging, tracing runtime, CLI integration, and active instrumentation packages moved into the new release-managed structure",
+  "packages": {
+    "@respan/cli": "patch",
+    "@respan/instrumentation-anthropic": "patch",
+    "@respan/instrumentation-openai": "patch",
+    "@respan/instrumentation-openai-agents": "patch",
+    "@respan/instrumentation-openinference": "patch",
+    "@respan/instrumentation-vercel": "patch",
+    "@respan/tracing": "patch",
+    "respan-sdk": "patch",
+    "respan-tracing": "patch",
+    "respan-instrumentation-anthropic": "new",
+    "respan-instrumentation-openinference": "patch",
+    "respan-instrumentation-pydantic-ai": "new"
+  }
+}
