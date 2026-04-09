@@ -1,0 +1,41 @@
+{
+  "name": "@respan/exporter-vercel",
+  "type": "module",
+  "version": "1.0.30",
+  "packageManager": "yarn@4.9.2",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/respanai/respan",
+    "directory": "javascript-sdks/legacy/respan-exporter-vercel"
+  },
+  "author": "Respan <team@respan.ai>",
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "tsc",
+    "test": "yarn build && node --test",
+    "test:live": "yarn build && RESPAN_RUN_LIVE_TESTS=1 node --test",
+    "quickstart": "yarn build && node examples/quickstart.js",
+    "publish:package": "yarn npm publish",
+    "release": "yarn build && yarn version patch && yarn publish:package"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/core": "^2.0.1",
+    "@opentelemetry/sdk-trace-base": "^2.0.1",
+    "@respan/respan-sdk": "^1.1.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.1",
+    "typescript": "^5.9.2"
+  }
+}

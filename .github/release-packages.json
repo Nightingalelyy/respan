@@ -14,26 +14,32 @@
     },
     {
       "ecosystem": "javascript",
+      "name": "@respan/instrumentation-anthropic",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-anthropic",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
       "name": "@respan/instrumentation-openai",
-      "path": "javascript-sdks/respan-instrumentation-openai",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-openai",
       "registry": "npm"
     },
     {
       "ecosystem": "javascript",
       "name": "@respan/instrumentation-openai-agents",
-      "path": "javascript-sdks/respan-instrumentation-openai-agents",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-openai-agents",
       "registry": "npm"
     },
     {
       "ecosystem": "javascript",
       "name": "@respan/instrumentation-openinference",
-      "path": "javascript-sdks/respan-instrumentation-openinference",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-openinference",
       "registry": "npm"
     },
     {
       "ecosystem": "javascript",
       "name": "@respan/instrumentation-vercel",
-      "path": "javascript-sdks/respan-instrumentation-vercel",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-vercel",
       "registry": "npm"
     },
     {
@@ -68,6 +74,18 @@
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-anthropic",
+      "path": "python-sdks/instrumentations/respan-instrumentation-anthropic",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-langfuse",
+      "path": "python-sdks/instrumentations/respan-instrumentation-langfuse",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-openinference",
       "path": "python-sdks/instrumentations/respan-instrumentation-openinference",
       "registry": "pypi"
@@ -82,6 +100,12 @@
       "ecosystem": "python",
       "name": "respan-instrumentation-openai-agents",
       "path": "python-sdks/instrumentations/respan-instrumentation-openai-agents",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-pydantic-ai",
+      "path": "python-sdks/instrumentations/respan-instrumentation-pydantic-ai",
       "registry": "pypi"
     }
   ]

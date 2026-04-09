@@ -9,7 +9,7 @@
     "@openai/agents": "^0.8.1",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/sdk-trace-base": "^1.30.1",
-    "@respan/instrumentation-openai-agents": "file:../../respan-instrumentation-openai-agents",
+    "@respan/instrumentation-openai-agents": "file:../../instrumentations/respan-instrumentation-openai-agents",
     "@respan/respan": "file:../../respan",
     "@respan/respan-sdk": "file:../../respan-sdk",
     "@respan/tracing": "file:../../respan-tracing",

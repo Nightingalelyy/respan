@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from opentelemetry.attributes import BoundedAttributes
 
+from respan_instrumentation_openinference._instrumentation import OpenInferenceInstrumentor
 from respan_instrumentation_openinference._translator import OpenInferenceTranslator
 from respan_sdk.constants.span_attributes import (
     RESPAN_SPAN_TOOL_CALLS,
@@ -28,6 +29,47 @@ def _make_span(attrs: dict, name: str = "test-span"):
 @pytest.fixture
 def translator():
     return OpenInferenceTranslator()
+
+
+def test_span_processor_registration_orders_processor_before_translator(monkeypatch):
+    class FakeOIProcessor:
+        def shutdown(self):
+            self.did_shutdown = True
+
+    class FakeTracerProvider:
+        def __init__(self):
+            self._active_span_processor = SimpleNamespace(
+                _span_processors=("export-a", "export-b")
+            )
+
+        def add_span_processor(self, processor):
+            self._active_span_processor._span_processors = (
+                *self._active_span_processor._span_processors,
+                processor,
+            )
+
+    provider = FakeTracerProvider()
+    monkeypatch.setattr(OpenInferenceInstrumentor, "_translator_registered", False)
+    monkeypatch.setattr(OpenInferenceInstrumentor, "_translator", None)
+    monkeypatch.setattr(OpenInferenceInstrumentor, "_active_span_processors", [])
+    monkeypatch.setattr(
+        "respan_instrumentation_openinference._instrumentation.trace.get_tracer_provider",
+        lambda: provider,
+    )
+
+    instrumentor = OpenInferenceInstrumentor(FakeOIProcessor)
+    instrumentor.activate()
+
+    processors = provider._active_span_processor._span_processors
+    assert processors[0] is instrumentor._instrumentor
+    assert isinstance(processors[1], OpenInferenceTranslator)
+    assert processors[2:] == ("export-a", "export-b")
+
+    instrumentor.deactivate()
+
+    processors = provider._active_span_processor._span_processors
+    assert not any(processor is instrumentor._instrumentor for processor in processors)
+    assert isinstance(processors[0], OpenInferenceTranslator)
 
 
 # ------------------------------------------------------------------

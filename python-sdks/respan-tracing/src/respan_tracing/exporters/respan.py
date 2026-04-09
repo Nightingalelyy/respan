@@ -706,6 +706,17 @@ def _get_enrichment_attrs(span: ReadableSpan) -> Dict[str, Any]:
     if attrs.get(GEN_AI_SYSTEM) and not attrs.get(LLM_REQUEST_TYPE):
         extra[LLM_REQUEST_TYPE] = LLMRequestTypeValues.CHAT.value
 
+    cache_read = attrs.get(SpanAttributes.LLM_USAGE_CACHE_READ_INPUT_TOKENS)
+    if cache_read not in {None, ""} and "prompt_cache_hit_tokens" not in attrs:
+        extra["prompt_cache_hit_tokens"] = cache_read
+
+    cache_creation = attrs.get(SpanAttributes.LLM_USAGE_CACHE_CREATION_INPUT_TOKENS)
+    if (
+        cache_creation not in {None, ""}
+        and "prompt_cache_creation_tokens" not in attrs
+    ):
+        extra["prompt_cache_creation_tokens"] = cache_creation
+
     tool_calls = _parse_structured_json_attr(attrs.get(RESPAN_SPAN_TOOL_CALLS))
     if isinstance(tool_calls, list) and tool_calls:
         if "gen_ai.completion.0.tool_calls" not in attrs:

@@ -23,11 +23,8 @@ and sends it to Respan as structured spans with model, token counts,
 and input/output.
 
 Scope:
-  --global   Write to ~/.gemini/settings.json (default)
-  --local    Write to .gemini/settings.json in project root
-
-Note: Gemini CLI ignores workspace-level telemetry settings, so
---global is the default.`;
+  --global   Write to ~/.gemini/settings.json
+  --local    Write to .gemini/settings.json in project root (default)`;
 
   static examples = [
     'respan integrate gemini-cli',
@@ -48,7 +45,7 @@ Note: Gemini CLI ignores workspace-level telemetry settings, so
 
     try {
       const dryRun = flags['dry-run'];
-      const scope = resolveScope(flags, 'global');
+      const scope = resolveScope(flags);
 
       // ── Disable mode ─────────────────────────────────────────────
       if (flags.disable) {

@@ -17,12 +17,16 @@ jobs:
   discover:
     runs-on: ubuntu-latest
     outputs:
+      base_ref: ${{ steps.refs.outputs.base_ref }}
+      head_ref: ${{ steps.refs.outputs.head_ref }}
       javascript_matrix: ${{ steps.javascript_matrix.outputs.value }}
       javascript_count: ${{ steps.javascript_count.outputs.value }}
       python_matrix: ${{ steps.python_matrix.outputs.value }}
       python_count: ${{ steps.python_count.outputs.value }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -31,21 +35,73 @@ jobs:
       - name: Validate release metadata
         run: python3 scripts/release_inventory.py --validate
 
+      - id: refs
+        name: Resolve comparison refs
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+          DEFAULT_HEAD_SHA: ${{ github.sha }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            BASE_REF="${PR_BASE_SHA}"
+            HEAD_REF="${PR_HEAD_SHA}"
+          else
+            BASE_REF="${PUSH_BASE_SHA}"
+            HEAD_REF="${DEFAULT_HEAD_SHA}"
+          fi
+
+          if [ -z "${HEAD_REF}" ]; then
+            HEAD_REF="${DEFAULT_HEAD_SHA}"
+          fi
+
+          if [ -z "${BASE_REF}" ] || [ "${BASE_REF}" = "0000000000000000000000000000000000000000" ]; then
+            BASE_REF="$(git rev-parse "${HEAD_REF}^")"
+          fi
+
+          echo "base_ref=${BASE_REF}" >> "$GITHUB_OUTPUT"
+          echo "head_ref=${HEAD_REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate release intents
+        env:
+          BASE_REF: ${{ steps.refs.outputs.base_ref }}
+          HEAD_REF: ${{ steps.refs.outputs.head_ref }}
+        run: |
+          python3 scripts/release_intents.py validate
+          missing="$(python3 scripts/release_intents.py missing --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --format names)"
+          if [ -n "${missing}" ]; then
+            echo "The following release-managed packages changed without a release intent:"
+            echo "${missing}"
+            exit 1
+          fi
+
       - id: javascript_matrix
         name: Build JavaScript matrix
-        run: echo "value=$(python3 scripts/release_inventory.py --ecosystem javascript --format github-matrix)" >> "$GITHUB_OUTPUT"
+        env:
+          BASE_REF: ${{ steps.refs.outputs.base_ref }}
+          HEAD_REF: ${{ steps.refs.outputs.head_ref }}
+        run: echo "value=$(python3 scripts/release_inventory.py --ecosystem javascript --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --include-dependents --format github-matrix)" >> "$GITHUB_OUTPUT"
 
       - id: javascript_count
         name: Count JavaScript packages
-        run: echo "value=$(python3 scripts/release_inventory.py --ecosystem javascript --count)" >> "$GITHUB_OUTPUT"
+        env:
+          BASE_REF: ${{ steps.refs.outputs.base_ref }}
+          HEAD_REF: ${{ steps.refs.outputs.head_ref }}
+        run: echo "value=$(python3 scripts/release_inventory.py --ecosystem javascript --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --include-dependents --count)" >> "$GITHUB_OUTPUT"
 
       - id: python_matrix
         name: Build Python matrix
-        run: echo "value=$(python3 scripts/release_inventory.py --ecosystem python --format github-matrix)" >> "$GITHUB_OUTPUT"
+        env:
+          BASE_REF: ${{ steps.refs.outputs.base_ref }}
+          HEAD_REF: ${{ steps.refs.outputs.head_ref }}
+        run: echo "value=$(python3 scripts/release_inventory.py --ecosystem python --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --include-dependents --format github-matrix)" >> "$GITHUB_OUTPUT"
 
       - id: python_count
         name: Count Python packages
-        run: echo "value=$(python3 scripts/release_inventory.py --ecosystem python --count)" >> "$GITHUB_OUTPUT"
+        env:
+          BASE_REF: ${{ steps.refs.outputs.base_ref }}
+          HEAD_REF: ${{ steps.refs.outputs.head_ref }}
+        run: echo "value=$(python3 scripts/release_inventory.py --ecosystem python --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --include-dependents --count)" >> "$GITHUB_OUTPUT"
 
   javascript:
     needs: discover
@@ -81,6 +137,10 @@ jobs:
             yarn workspace "${{ matrix.name }}" test
           fi
 
+      - name: Package smoke check
+        working-directory: ${{ matrix.path }}
+        run: npm pack --dry-run
+
   python:
     needs: discover
     if: ${{ needs.discover.outputs.python_count != '0' }}
@@ -102,3 +162,20 @@ jobs:
       - name: Build distribution
         working-directory: ${{ matrix.path }}
         run: python3 -m build
+
+      - name: Install smoke check
+        if: ${{ matrix.import_name != null }}
+        working-directory: ${{ matrix.path }}
+        env:
+          IMPORT_NAME: ${{ matrix.import_name }}
+        run: |
+          python3 -m venv .ci-smoke-venv
+          . .ci-smoke-venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install --no-deps dist/*.whl
+          python - <<'PY'
+          import importlib
+          import os
+
+          importlib.import_module(os.environ["IMPORT_NAME"])
+          PY

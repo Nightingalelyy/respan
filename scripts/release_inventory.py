@@ -97,6 +97,27 @@ def manifest_version(entry: dict, manifest: dict) -> str:
     return manifest["tool"]["poetry"]["version"]
 
 
+def python_import_name(manifest: dict) -> str | None:
+    poetry = manifest.get("tool", {}).get("poetry", {})
+    packages = poetry.get("packages", [])
+    if isinstance(packages, list) and packages:
+        first = packages[0]
+        if isinstance(first, dict):
+            include = first.get("include")
+            if isinstance(include, str) and include:
+                return include
+    return None
+
+
+def javascript_bin_name(manifest: dict) -> str | None:
+    bin_field = manifest.get("bin")
+    if isinstance(bin_field, str):
+        return manifest.get("name")
+    if isinstance(bin_field, dict) and bin_field:
+        return next(iter(bin_field))
+    return None
+
+
 def has_js_script(manifest: dict, script_name: str) -> bool:
     return script_name in manifest.get("scripts", {})
 
@@ -186,6 +207,97 @@ def js_internal_dependency_names(entries: list[dict]) -> dict[str, set[str]]:
     return graph
 
 
+def python_internal_dependency_names(entries: list[dict]) -> dict[str, set[str]]:
+    py_entries = {entry["name"]: entry for entry in entries if entry["ecosystem"] == "python"}
+    manifests = {name: load_manifest(entry) for name, entry in py_entries.items()}
+    graph: dict[str, set[str]] = {}
+
+    for name, manifest in manifests.items():
+        internal: set[str] = set()
+
+        poetry_dependencies = manifest.get("tool", {}).get("poetry", {}).get("dependencies", {})
+        for dependency_name in poetry_dependencies:
+            if dependency_name != "python" and dependency_name in py_entries:
+                internal.add(dependency_name)
+
+        project_dependencies = manifest.get("project", {}).get("dependencies", [])
+        for dependency_spec in project_dependencies:
+            match = re.match(r"^\s*([A-Za-z0-9_.-]+)", dependency_spec)
+            if not match:
+                continue
+            dependency_name = match.group(1)
+            if dependency_name in py_entries:
+                internal.add(dependency_name)
+
+        graph[name] = internal
+
+    return graph
+
+
+def internal_dependency_names(entries: list[dict], ecosystem: str) -> dict[str, set[str]]:
+    if ecosystem == "javascript":
+        return js_internal_dependency_names(entries)
+    if ecosystem == "python":
+        return python_internal_dependency_names(entries)
+    raise ValueError(f"unsupported ecosystem for dependency graph: {ecosystem}")
+
+
+def expand_with_dependents(entries: list[dict], selected: list[dict], ecosystem: str) -> list[dict]:
+    if not selected:
+        return []
+
+    graph = internal_dependency_names(entries, ecosystem)
+    reverse_graph: dict[str, set[str]] = {entry["name"]: set() for entry in entries if entry["ecosystem"] == ecosystem}
+
+    for package_name, dependency_names in graph.items():
+        for dependency_name in dependency_names:
+            reverse_graph.setdefault(dependency_name, set()).add(package_name)
+
+    selected_names = {entry["name"] for entry in selected}
+    queue = list(selected_names)
+
+    while queue:
+        current = queue.pop()
+        for dependent_name in reverse_graph.get(current, set()):
+            if dependent_name in selected_names:
+                continue
+            selected_names.add(dependent_name)
+            queue.append(dependent_name)
+
+    ordered_entries = [entry for entry in entries if entry["ecosystem"] == ecosystem and entry["name"] in selected_names]
+    return ordered_entries
+
+
+def ecosystem_shared_change(entry: dict, files: set[str]) -> bool:
+    if entry["ecosystem"] == "javascript":
+        shared_paths = {
+            "javascript-sdks/package.json",
+            "javascript-sdks/yarn.lock",
+        }
+        if any(path in shared_paths for path in files):
+            return True
+        if any(path.startswith("javascript-sdks/.yarn/") for path in files):
+            return True
+    if entry["ecosystem"] == "python":
+        shared_paths = {
+            "python-sdks/pyproject.toml",
+            "python-sdks/poetry.lock",
+            "python-sdks/pytest.ini",
+            "python-sdks/setup.cfg",
+            "python-sdks/tox.ini",
+            "python-sdks/requirements.txt",
+            "python-sdks/requirements-dev.txt",
+            "python-sdks/constraints.txt",
+        }
+        if any(path in shared_paths for path in files):
+            return True
+        if any(re.fullmatch(r"python-sdks/requirements(?:[-_.][^/]+)?\.txt", path) for path in files):
+            return True
+        if any(re.fullmatch(r"python-sdks/[^/]+\.(toml|ini|cfg)", path) for path in files):
+            return True
+    return False
+
+
 def javascript_build_order(entries: list[dict], package_name: str) -> list[dict]:
     js_entries = {entry["name"]: entry for entry in entries if entry["ecosystem"] == "javascript"}
     if package_name not in js_entries:
@@ -234,6 +346,10 @@ def validate(entries: list[dict]) -> list[str]:
             continue
         seen_names.add(key)
 
+        if "/legacy/" in entry["path"]:
+            errors.append(f"{entry['name']} is under a legacy path and must not be release-managed")
+            continue
+
         path = manifest_path(entry)
         if not path.exists():
             errors.append(f"missing manifest for {entry['name']} at {path.relative_to(REPO_ROOT)}")
@@ -276,6 +392,9 @@ def build_record(entry: dict, manifest: dict) -> dict:
     if entry["ecosystem"] == "javascript":
         record["has_build"] = has_js_script(manifest, "build")
         record["has_test"] = has_js_script(manifest, "test")
+        record["bin_name"] = javascript_bin_name(manifest)
+    else:
+        record["import_name"] = python_import_name(manifest)
     return record
 
 
@@ -285,13 +404,20 @@ def filtered_entries(
     base: str | None,
     head: str | None,
     require_version_change: bool,
+    include_dependents: bool = False,
 ) -> list[dict]:
     selected = [entry for entry in entries if ecosystem == "all" or entry["ecosystem"] == ecosystem]
     manifests = {entry["name"]: load_manifest(entry) for entry in selected}
 
     if base and head:
         files = changed_files(base, head)
-        selected = [entry for entry in selected if package_changed(entry, files)]
+        selected = [
+            entry
+            for entry in selected
+            if package_changed(entry, files) or ecosystem_shared_change(entry, files)
+        ]
+        if include_dependents and ecosystem in {"javascript", "python"}:
+            selected = expand_with_dependents(entries, selected, ecosystem)
 
     if require_version_change:
         filtered: list[dict] = []
@@ -305,12 +431,39 @@ def filtered_entries(
     return [build_record(entry, manifests[entry["name"]]) for entry in selected]
 
 
+def entries_missing_version_bump(
+    entries: list[dict],
+    ecosystem: str,
+    base: str | None,
+    head: str | None,
+) -> list[dict]:
+    selected = [entry for entry in entries if ecosystem == "all" or entry["ecosystem"] == ecosystem]
+    manifests = {entry["name"]: load_manifest(entry) for entry in selected}
+
+    if base and head:
+        files = changed_files(base, head)
+        selected = [entry for entry in selected if package_changed(entry, files)]
+    else:
+        selected = []
+
+    missing: list[dict] = []
+    for entry in selected:
+        current_version = manifest_version(entry, manifests[entry["name"]])
+        previous_version = version_from_git_ref(entry, base or "")
+        if previous_version == current_version:
+            missing.append(build_record(entry, manifests[entry["name"]]))
+
+    return missing
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ecosystem", choices=["all", "javascript", "python"], default="all")
     parser.add_argument("--changed-from")
     parser.add_argument("--changed-to")
     parser.add_argument("--version-changed", action="store_true")
+    parser.add_argument("--missing-version-bump", action="store_true")
+    parser.add_argument("--include-dependents", action="store_true")
     parser.add_argument("--build-order-for")
     parser.add_argument("--validate", action="store_true")
     parser.add_argument("--count", action="store_true")
@@ -357,12 +510,44 @@ def main() -> int:
         print(json.dumps(selected, indent=2))
         return 0
 
+    if args.version_changed and args.missing_version_bump:
+        print(
+            "--version-changed and --missing-version-bump are mutually exclusive",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.missing_version_bump:
+        selected = entries_missing_version_bump(
+            entries,
+            ecosystem=args.ecosystem,
+            base=args.changed_from,
+            head=args.changed_to,
+        )
+        if args.count:
+            print(len(selected))
+            return 0
+        if args.format == "github-matrix":
+            print(json.dumps(selected, separators=(",", ":")))
+            return 0
+        if args.format == "names":
+            for entry in selected:
+                print(entry["name"])
+            return 0
+        if args.format == "paths":
+            for entry in selected:
+                print(entry["path"])
+            return 0
+        print(json.dumps(selected, indent=2))
+        return 0
+
     selected = filtered_entries(
         entries,
         ecosystem=args.ecosystem,
         base=args.changed_from,
         head=args.changed_to,
         require_version_change=args.version_changed,
+        include_dependents=args.include_dependents,
     )
 
     if args.count:

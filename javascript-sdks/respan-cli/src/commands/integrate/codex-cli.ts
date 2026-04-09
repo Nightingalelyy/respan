@@ -21,8 +21,7 @@ them to Respan as structured spans (chat, tool, reasoning).
 
 Scope:
   --global   Install hook script + register notify in ~/.codex/config.toml
-  --local    Write .codex/respan.json with customer_id, span_name, etc.
-  (default)  Both: install hook globally + config for current project`;
+  --local    Write .codex/respan.json with customer_id, span_name, etc. (default)`;
 
   static examples = [
     'respan integrate codex-cli',
@@ -74,7 +73,7 @@ Scope:
       const workflowName = flags['workflow-name'];
       const attrs = parseAttrs(flags.attrs!);
       // Codex CLI default: both global + local
-      const scope = resolveScope(flags, 'both');
+      const scope = resolveScope(flags);
 
       const doGlobal = scope === 'global' || scope === 'both';
       const doLocal = scope === 'local' || scope === 'both';

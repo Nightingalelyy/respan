@@ -1,0 +1,27 @@
+[tool.poetry]
+name = "respan-instrumentation-anthropic"
+version = "1.0.0"
+description = "Respan instrumentation plugin for the Anthropic SDK"
+authors = ["Respan <team@respan.ai>"]
+license = "Apache 2.0"
+readme = "README.md"
+packages = [
+    { include = "respan_instrumentation_anthropic", from = "./src" },
+]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.14"
+respan-tracing = "^2.3.0"
+anthropic = ">=0.39.0"
+
+[tool.poetry.plugins."respan.instrumentations"]
+anthropic = "respan_instrumentation_anthropic:AnthropicInstrumentor"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: live network tests (requires API keys)",
+]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

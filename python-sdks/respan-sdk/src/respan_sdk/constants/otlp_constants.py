@@ -150,6 +150,7 @@ GEN_AI_PROMOTED_KEYS = frozenset({
     # SDK enrichment remaps these to backend column names; promoted here
     # so originals don't leak into metadata passthrough.
     "gen_ai.usage.cache_read_input_tokens",
+    "gen_ai.usage.cache_creation_input_tokens",
     "llm.usage.reasoning_tokens",
     "llm.request.reasoning_effort",
     # Pydantic AI agent run span attributes — consumed by SDK enrichment,
@@ -162,6 +163,8 @@ GEN_AI_PROMOTED_KEYS = frozenset({
     # Promoted so they don't leak into passthrough metadata.
     "model",
     "prompt_tokens",
+    "prompt_cache_hit_tokens",
+    "prompt_cache_creation_tokens",
     "completion_tokens",
     "total_request_tokens",
 })
