@@ -17,6 +17,9 @@ on:
         description: Optional git ref or SHA to compare to
         required: false
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 permissions:
   contents: read
 
