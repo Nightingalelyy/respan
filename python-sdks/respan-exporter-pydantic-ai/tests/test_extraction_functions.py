@@ -5,19 +5,24 @@ telemetry providers, or span processors involved.
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from respan_exporter_pydantic_ai.constants import (
+    PYDANTIC_AI_AGENT_NAME_ATTR,
+    PYDANTIC_AI_OPERATION_NAME_ATTR,
     RESPAN_RESPONSE_FORMAT_ATTR,
     RESPAN_TOOLS_ATTR,
     PYDANTIC_AI_REQUEST_PARAMETERS_ATTR,
     PYDANTIC_AI_TOOL_DEFINITIONS_ATTR,
 )
 from respan_exporter_pydantic_ai.instrument import (
+    _extract_log_type,
     _extract_response_format,
     _extract_tools,
     _normalize_tool_definition,
 )
+from respan_sdk.constants.llm_logging import LOG_TYPE_AGENT, LOG_TYPE_CHAT
 
 
 # ── _normalize_tool_definition ──────────────────────────────────────────────
@@ -273,3 +278,25 @@ class TestExtractResponseFormat:
         """Returns None when response_format is a non-JSON string and no params."""
         attrs = {RESPAN_RESPONSE_FORMAT_ATTR: "not-valid-json{"}
         assert _extract_response_format(attrs) is None
+
+
+class TestExtractLogType:
+    def test_chat_operation_takes_precedence_over_agent_baggage(self):
+        """Model spans inherit agent baggage, but chat spans must still map to CHAT."""
+        attrs = {
+            PYDANTIC_AI_AGENT_NAME_ATTR: "agent",
+            PYDANTIC_AI_OPERATION_NAME_ATTR: "chat",
+        }
+        span = SimpleNamespace(name="chat gpt-4o")
+
+        assert _extract_log_type(span, attrs) == LOG_TYPE_CHAT
+
+    def test_agent_span_without_known_operation_maps_to_agent(self):
+        """Agent run spans use invoke_agent and should remain AGENT spans."""
+        attrs = {
+            PYDANTIC_AI_AGENT_NAME_ATTR: "agent",
+            PYDANTIC_AI_OPERATION_NAME_ATTR: "invoke_agent",
+        }
+        span = SimpleNamespace(name="invoke_agent agent")
+
+        assert _extract_log_type(span, attrs) == LOG_TYPE_AGENT

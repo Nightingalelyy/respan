@@ -426,14 +426,16 @@ def _extract_log_type(span: ReadableSpan, attributes: dict[str, Any]) -> Optiona
     if isinstance(attributes.get(PYDANTIC_AI_TOOL_NAME_ATTR), str):
         return LOG_TYPE_TOOL
 
+    operation_name = attributes.get(PYDANTIC_AI_OPERATION_NAME_ATTR)
+    if isinstance(operation_name, str):
+        operation_log_type = _PYDANTIC_AI_OPERATION_TO_LOG_TYPE.get(operation_name)
+        if operation_log_type is not None:
+            return operation_log_type
+
     if isinstance(attributes.get(PYDANTIC_AI_AGENT_NAME_ATTR), str) or isinstance(
         attributes.get(PYDANTIC_AI_LEGACY_AGENT_NAME_ATTR), str
     ):
         return LOG_TYPE_AGENT
-
-    operation_name = attributes.get(PYDANTIC_AI_OPERATION_NAME_ATTR)
-    if isinstance(operation_name, str):
-        return _PYDANTIC_AI_OPERATION_TO_LOG_TYPE.get(operation_name)
 
     running_tool_names = _extract_tool_name_sequence(attributes=attributes)
     if span.name == PYDANTIC_AI_RUNNING_TOOLS_SPAN_NAME and running_tool_names:
