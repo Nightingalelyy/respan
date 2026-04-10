@@ -1,0 +1,6 @@
+{
+  "summary": "Fix PydanticAI instrumentation: capture tools/tool_calls attributes, restore missing input/output on chat spans, and suppress duplicate nested provider usage",
+  "packages": {
+    "respan-instrumentation-pydantic-ai": "patch"
+  }
+}
