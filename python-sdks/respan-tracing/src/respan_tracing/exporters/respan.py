@@ -72,6 +72,17 @@ from respan_tracing.constants.generic_constants import LOGGER_NAME_EXPORTER
 
 logger = get_respan_logger(LOGGER_NAME_EXPORTER)
 
+_LLM_USAGE_CACHE_READ_INPUT_TOKENS = getattr(
+    SpanAttributes,
+    "LLM_USAGE_CACHE_READ_INPUT_TOKENS",
+    "gen_ai.usage.cache_read_input_tokens",
+)
+_LLM_USAGE_CACHE_CREATION_INPUT_TOKENS = getattr(
+    SpanAttributes,
+    "LLM_USAGE_CACHE_CREATION_INPUT_TOKENS",
+    "gen_ai.usage.cache_creation_input_tokens",
+)
+
 
 def _resolve_traces_endpoint(endpoint: str) -> str:
     """Normalize a Respan base URL or full traces URL to /v2/traces."""
@@ -135,7 +146,10 @@ class SyntheticSpan:
         return self._span_context
 
 
-_CLAUDE_AGENT_SCOPE_NAME = "openinference.instrumentation.claude_agent_sdk"
+_CLAUDE_AGENT_SCOPE_NAMES = frozenset({
+    "openinference.instrumentation.claude_agent_sdk",
+    "opentelemetry.instrumentation.claude_agent_sdk",
+})
 _CLAUDE_AGENT_RESPONSE_SPAN_NAMES = frozenset({
     "ClaudeAgentSDK.query",
     "ClaudeAgentSDK.ClaudeSDKClient.receive_response",
@@ -160,9 +174,13 @@ def _is_claude_agent_response_span(span: ReadableSpan) -> bool:
     """Return whether this span is a Claude Agent SDK response-turn parent."""
     scope = getattr(span, "instrumentation_scope", None)
     scope_name = getattr(scope, "name", None)
+    span_name = getattr(span, "name", "") or ""
     return (
-        scope_name == _CLAUDE_AGENT_SCOPE_NAME
-        and span.name in _CLAUDE_AGENT_RESPONSE_SPAN_NAMES
+        scope_name in _CLAUDE_AGENT_SCOPE_NAMES
+        and (
+            span_name in _CLAUDE_AGENT_RESPONSE_SPAN_NAMES
+            or span_name.startswith("invoke_agent")
+        )
     )
 
 
@@ -191,6 +209,7 @@ def _build_claude_agent_final_chat_span(
         RESPAN_LOG_TYPE: LOG_TYPE_CHAT,
         LLM_REQUEST_TYPE: LLMRequestTypeValues.CHAT.value,
         "traceloop.entity.name": _ASSISTANT_MESSAGE_SPAN_NAME,
+        "traceloop.entity.path": _ASSISTANT_MESSAGE_SPAN_NAME,
         "gen_ai.completion.0.role": "assistant",
         "gen_ai.completion.0.content": completion_text,
         SpanAttributes.TRACELOOP_ENTITY_OUTPUT: json.dumps(
@@ -245,8 +264,116 @@ def _build_claude_agent_final_chat_span(
     )
 
 
+def _stringify_json_like(value: Any) -> Optional[str]:
+    """Serialize JSON-like values to a stable string representation."""
+    parsed = _parse_json_like(value)
+    if parsed is None:
+        return None
+    if isinstance(parsed, str):
+        return parsed
+    return json.dumps(parsed, default=str)
+
+
+def _is_claude_tool_span(span: ReadableSpan) -> bool:
+    """Return whether the span represents a Claude tool execution."""
+    attrs = span.attributes or {}
+    return (
+        attrs.get(RESPAN_LOG_TYPE) == "tool"
+        or attrs.get(SpanAttributes.TRACELOOP_SPAN_KIND) == "tool"
+        or str(getattr(span, "name", "")).startswith("execute_tool")
+    )
+
+
+def _build_tool_call_from_tool_span(span: ReadableSpan) -> Optional[Dict[str, Any]]:
+    """Derive an OpenAI-style tool_call payload from a Claude tool span."""
+    attrs = span.attributes or {}
+
+    tool_name = (
+        attrs.get("traceloop.entity.name")
+        or attrs.get("gen_ai.tool.name")
+        or attrs.get("tool")
+    )
+    if not isinstance(tool_name, str) or not tool_name:
+        return None
+
+    tool_arguments = _stringify_json_like(
+        attrs.get(SpanAttributes.TRACELOOP_ENTITY_INPUT)
+        or attrs.get("input")
+    )
+
+    tool_call_id = attrs.get("gen_ai.tool.call.id") or ""
+    return {
+        "id": str(tool_call_id),
+        "type": "function",
+        "function": {
+            "name": tool_name,
+            "arguments": tool_arguments or "",
+        },
+    }
+
+
+def _inject_claude_agent_parent_tool_calls(
+    spans: List[ReadableSpan],
+) -> None:
+    """Backfill parent Claude agent spans with tool_calls from child tool spans."""
+    span_index_by_id: Dict[int, int] = {}
+    for idx, span in enumerate(spans):
+        span_context = span.get_span_context()
+        if span_context is not None:
+            span_index_by_id[span_context.span_id] = idx
+
+    tool_calls_by_parent: Dict[int, List[Dict[str, Any]]] = {}
+    for span in spans:
+        if not _is_claude_tool_span(span):
+            continue
+
+        parent = getattr(span, OTEL_SPAN_PARENT_FIELD, None)
+        parent_span_id = getattr(parent, "span_id", None)
+        if parent_span_id is None:
+            continue
+
+        parent_idx = span_index_by_id.get(parent_span_id)
+        if parent_idx is None:
+            continue
+
+        parent_span = spans[parent_idx]
+        if not _is_claude_agent_response_span(parent_span):
+            continue
+
+        tool_call = _build_tool_call_from_tool_span(span)
+        if tool_call is None:
+            continue
+
+        tool_calls_by_parent.setdefault(parent_span_id, []).append(tool_call)
+
+    for parent_span_id, tool_calls in tool_calls_by_parent.items():
+        parent_idx = span_index_by_id[parent_span_id]
+        parent_span = spans[parent_idx]
+        parent_attrs = dict(parent_span.attributes or {})
+
+        existing_tool_calls = parent_attrs.get("tool_calls")
+        if isinstance(existing_tool_calls, list) and existing_tool_calls:
+            continue
+
+        existing_respan_tool_calls = _parse_structured_json_attr(
+            parent_attrs.get(RESPAN_SPAN_TOOL_CALLS)
+        )
+        if not (isinstance(existing_respan_tool_calls, list) and existing_respan_tool_calls):
+            parent_attrs[RESPAN_SPAN_TOOL_CALLS] = json.dumps(tool_calls, default=str)
+
+        parent_attrs.setdefault("tool_calls", tool_calls)
+
+        if isinstance(parent_span, ModifiedSpan):
+            parent_span._overrides[OTEL_SPAN_ATTRIBUTES_FIELD] = parent_attrs
+        else:
+            spans[parent_idx] = ModifiedSpan(
+                original_span=parent_span,
+                overrides={OTEL_SPAN_ATTRIBUTES_FIELD: parent_attrs},
+            )
+
+
 def _prepare_spans_for_export(spans: Sequence[ReadableSpan]) -> List[ReadableSpan]:
-    prepared_spans: List[ReadableSpan] = []
+    prepared_core_spans: List[ReadableSpan] = []
 
     for span in spans:
         overrides: Dict[str, Any] = {}
@@ -263,6 +390,12 @@ def _prepare_spans_for_export(spans: Sequence[ReadableSpan]) -> List[ReadableSpa
             if overrides
             else span
         )
+        prepared_core_spans.append(prepared_span)
+
+    _inject_claude_agent_parent_tool_calls(prepared_core_spans)
+
+    prepared_spans: List[ReadableSpan] = []
+    for prepared_span in prepared_core_spans:
         prepared_spans.append(prepared_span)
 
         synthetic_child = _build_claude_agent_final_chat_span(prepared_span)
@@ -703,14 +836,24 @@ def _get_enrichment_attrs(span: ReadableSpan) -> Dict[str, Any]:
     attrs = span.attributes or {}
     extra: Dict[str, Any] = {}
 
-    if attrs.get(GEN_AI_SYSTEM) and not attrs.get(LLM_REQUEST_TYPE):
+    is_tool_span = (
+        attrs.get(RESPAN_LOG_TYPE) == "tool"
+        or attrs.get(SpanAttributes.TRACELOOP_SPAN_KIND) == "tool"
+        or str(getattr(span, "name", "")).startswith("execute_tool")
+    )
+
+    if (
+        attrs.get(GEN_AI_SYSTEM)
+        and not attrs.get(LLM_REQUEST_TYPE)
+        and not is_tool_span
+    ):
         extra[LLM_REQUEST_TYPE] = LLMRequestTypeValues.CHAT.value
 
-    cache_read = attrs.get(SpanAttributes.LLM_USAGE_CACHE_READ_INPUT_TOKENS)
+    cache_read = attrs.get(_LLM_USAGE_CACHE_READ_INPUT_TOKENS)
     if cache_read not in {None, ""} and "prompt_cache_hit_tokens" not in attrs:
         extra["prompt_cache_hit_tokens"] = cache_read
 
-    cache_creation = attrs.get(SpanAttributes.LLM_USAGE_CACHE_CREATION_INPUT_TOKENS)
+    cache_creation = attrs.get(_LLM_USAGE_CACHE_CREATION_INPUT_TOKENS)
     if (
         cache_creation not in {None, ""}
         and "prompt_cache_creation_tokens" not in attrs
