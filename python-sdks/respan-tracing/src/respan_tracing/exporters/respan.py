@@ -157,6 +157,11 @@ _CLAUDE_AGENT_RESPONSE_SPAN_NAMES = frozenset({
 _ASSISTANT_MESSAGE_SPAN_NAME = "assistant_message"
 _GEN_AI_PROMPT_PREFIX = "gen_ai.prompt."
 _GEN_AI_COMPLETION_PREFIX = "gen_ai.completion."
+_STRIPPED_SCOPE_NAMES = frozenset({
+    "respan.tracer",
+    "opentelemetry.instrumentation.claude_agent_sdk",
+    "openinference.instrumentation.claude_agent_sdk",
+})
 
 
 def _derive_synthetic_span_id(*parts: Any) -> int:
@@ -447,6 +452,13 @@ def _convert_attribute_value(value: Any) -> Optional[Dict[str, Any]]:
 _STRIPPED_ATTRIBUTES = frozenset({
     "pydantic_ai.all_messages",
     "logfire.json_schema",
+    "input",
+    "output",
+    "tool_calls",
+    "span_tools",
+    "span_workflow_name",
+    "traceloop.entity.name",
+    "service.name",
     RESPAN_SPAN_TOOL_CALLS,
     RESPAN_SPAN_TOOLS,
 })
@@ -804,7 +816,7 @@ def _build_otlp_payload(spans: Sequence[ReadableSpan]) -> Dict[str, Any]:
         for s_key, span_dicts in scope_groups.items():
             scope_entry = {OTLP_SPANS_KEY: span_dicts}
             scope = scope_info_map.get(s_key)
-            if scope:
+            if scope and getattr(scope, "name", None) not in _STRIPPED_SCOPE_NAMES:
                 scope_dict = {}
                 if scope.name:
                     scope_dict[OTLP_NAME_KEY] = scope.name
@@ -849,6 +861,23 @@ def _get_enrichment_attrs(span: ReadableSpan) -> Dict[str, Any]:
     ):
         extra[LLM_REQUEST_TYPE] = LLMRequestTypeValues.CHAT.value
 
+    primary_completion_message = None
+    if _is_claude_agent_response_span(span):
+        primary_completion_message = _select_primary_completion_from_attrs(attrs)
+        if isinstance(primary_completion_message, Mapping):
+            completion_role = primary_completion_message.get("role")
+            if (
+                completion_role not in {None, ""}
+                and "gen_ai.completion.0.role" not in attrs
+            ):
+                extra["gen_ai.completion.0.role"] = completion_role
+
+            existing_completion_content = attrs.get("gen_ai.completion.0.content")
+            if existing_completion_content in {None, ""}:
+                completion_text = _extract_text_from_message(primary_completion_message)
+                if completion_text not in {None, ""}:
+                    extra["gen_ai.completion.0.content"] = completion_text
+
     cache_read = attrs.get(_LLM_USAGE_CACHE_READ_INPUT_TOKENS)
     if cache_read not in {None, ""} and "prompt_cache_hit_tokens" not in attrs:
         extra["prompt_cache_hit_tokens"] = cache_read
@@ -864,11 +893,15 @@ def _get_enrichment_attrs(span: ReadableSpan) -> Dict[str, Any]:
     if isinstance(tool_calls, list) and tool_calls:
         if "gen_ai.completion.0.tool_calls" not in attrs:
             extra["gen_ai.completion.0.tool_calls"] = tool_calls
-        if "gen_ai.completion.0.role" not in attrs:
+        if (
+            "gen_ai.completion.0.role" not in attrs
+            and "gen_ai.completion.0.role" not in extra
+        ):
             extra["gen_ai.completion.0.role"] = "assistant"
         existing_completion_content = attrs.get("gen_ai.completion.0.content")
-        if existing_completion_content in {None, ""}:
-            primary_completion_message = _select_primary_completion_from_attrs(attrs)
+        if existing_completion_content in {None, ""} and "gen_ai.completion.0.content" not in extra:
+            if primary_completion_message is None:
+                primary_completion_message = _select_primary_completion_from_attrs(attrs)
             completion_text = _extract_text_from_message(primary_completion_message)
             if completion_text not in {None, ""}:
                 extra["gen_ai.completion.0.content"] = completion_text

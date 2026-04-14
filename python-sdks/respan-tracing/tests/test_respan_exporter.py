@@ -306,6 +306,61 @@ def test_prepare_spans_backfills_completion_content_from_output_when_needed():
     assert prepared_attrs["gen_ai.completion.0.role"] == "assistant"
 
 
+def test_span_to_otlp_json_strips_redundant_override_attrs():
+    chat_span = _make_span(
+        name="invoke_agent claude-agent-sdk-complex-edge-cases",
+        span_id=4004,
+        attributes={
+            "gen_ai.system": "anthropic",
+            "tools": [{"type": "function", "function": {"name": "get_weather"}}],
+            "tool_calls": [{"id": "call_1"}],
+            "span_tools": ["get_weather"],
+            "span_workflow_name": "claude-agent-sdk-complex-edge-cases",
+            "input": '[{"role":"user","content":"hi"}]',
+            "output": '{"role":"assistant","content":"hello"}',
+            "traceloop.entity.name": "claude-agent-sdk-complex-edge-cases",
+        },
+        scope_name="opentelemetry.instrumentation.claude_agent_sdk",
+    )
+
+    otlp_span = _span_to_otlp_json(chat_span)
+    otlp_attrs = {
+        item[OTLP_ATTR_KEY]: item[OTLP_ATTR_VALUE]
+        for item in otlp_span[OTLP_ATTRIBUTES_KEY]
+    }
+
+    assert "tools" in otlp_attrs
+    assert "tool_calls" not in otlp_attrs
+    assert "span_tools" not in otlp_attrs
+    assert "span_workflow_name" not in otlp_attrs
+    assert "input" not in otlp_attrs
+    assert "output" not in otlp_attrs
+    assert "traceloop.entity.name" not in otlp_attrs
+
+
+def test_exporter_omits_internal_scope_metadata_for_claude_spans():
+    chat_span = _make_span(
+        name="invoke_agent claude-agent-sdk-complex-edge-cases",
+        span_id=4005,
+        attributes={"gen_ai.system": "anthropic"},
+        scope_name="opentelemetry.instrumentation.claude_agent_sdk",
+    )
+
+    exporter = RespanSpanExporter(endpoint="https://example.com/api", api_key="test-key")
+    exporter._session = Mock()
+    exporter._session.post.return_value = SimpleNamespace(status_code=200, text="ok")
+
+    result = exporter.export([chat_span])
+
+    assert result == SpanExportResult.SUCCESS
+
+    otlp_call = exporter._session.post.call_args.kwargs
+    otlp_payload = json.loads(otlp_call["data"])
+    scope_spans = otlp_payload[OTLP_RESOURCE_SPANS_KEY][0][OTLP_SCOPE_SPANS_KEY][0]
+
+    assert "scope" not in scope_spans
+
+
 def test_get_enrichment_attrs_remaps_cache_usage_to_override_fields():
     span = _make_span(
         name="anthropic.chat",

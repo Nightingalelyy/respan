@@ -143,11 +143,33 @@ def _extract_usage(
     cache_creation_tokens = attrs.get(
         CLAUDE_AGENT_SDK_USAGE_CACHE_CREATION_INPUT_TOKENS_ATTR
     )
+
+    normalized_prompt_tokens = (
+        prompt_tokens if isinstance(prompt_tokens, int) else None
+    )
+    normalized_cache_hit_tokens = (
+        cache_hit_tokens if isinstance(cache_hit_tokens, int) else None
+    )
+    normalized_cache_creation_tokens = (
+        cache_creation_tokens if isinstance(cache_creation_tokens, int) else None
+    )
+
+    if normalized_prompt_tokens is not None and (
+        normalized_cache_hit_tokens is not None
+        or normalized_cache_creation_tokens is not None
+    ):
+        uncached_prompt_tokens = normalized_prompt_tokens - (
+            (normalized_cache_hit_tokens or 0)
+            + (normalized_cache_creation_tokens or 0)
+        )
+        if uncached_prompt_tokens >= 0:
+            normalized_prompt_tokens = uncached_prompt_tokens
+
     return (
-        prompt_tokens if isinstance(prompt_tokens, int) else None,
+        normalized_prompt_tokens,
         completion_tokens if isinstance(completion_tokens, int) else None,
-        cache_hit_tokens if isinstance(cache_hit_tokens, int) else None,
-        cache_creation_tokens if isinstance(cache_creation_tokens, int) else None,
+        normalized_cache_hit_tokens,
+        normalized_cache_creation_tokens,
     )
 
 
@@ -490,8 +512,6 @@ def enrich_claude_agent_sdk_span(span: ReadableSpan) -> None:
             if isinstance(tool, Mapping)
         ]
         tool_names = [name for name in tool_names if isinstance(name, str) and name]
-        if tool_names:
-            _set_if_missing(attrs, RESPAN_OVERRIDE_SPAN_TOOLS_ATTR, tool_names)
 
     if operation_name == _CLAUDE_TOOL_OPERATION_NAME or attrs.get(GEN_AI_TOOL_NAME):
         tool_name = attrs.get(GEN_AI_TOOL_NAME)
@@ -509,14 +529,11 @@ def enrich_claude_agent_sdk_span(span: ReadableSpan) -> None:
         _set_if_missing(attrs, SpanAttributes.TRACELOOP_ENTITY_PATH, tool_name)
         _set_if_missing(attrs, SpanAttributes.TRACELOOP_ENTITY_INPUT, tool_input)
         _set_if_missing(attrs, SpanAttributes.TRACELOOP_ENTITY_OUTPUT, tool_output)
-        _set_if_missing(attrs, RESPAN_OVERRIDE_SPAN_TOOLS_ATTR, [tool_name])
         _set_if_missing(
             attrs,
             RESPAN_OVERRIDE_TOOLS_ATTR,
             [{"type": "function", "function": {"name": tool_name}}],
         )
-        _set_if_missing(attrs, RESPAN_OVERRIDE_INPUT_ATTR, tool_input)
-        _set_if_missing(attrs, RESPAN_OVERRIDE_OUTPUT_ATTR, tool_output)
         attrs.pop(LLM_REQUEST_TYPE, None)
     else:
         agent_name = _extract_agent_name(span, attrs)
@@ -539,15 +556,12 @@ def enrich_claude_agent_sdk_span(span: ReadableSpan) -> None:
         )
         _set_if_missing(attrs, SpanAttributes.TRACELOOP_ENTITY_INPUT, input_value)
         _set_if_missing(attrs, SpanAttributes.TRACELOOP_ENTITY_OUTPUT, output_value)
-        _set_if_missing(attrs, RESPAN_OVERRIDE_INPUT_ATTR, input_value)
-        _set_if_missing(attrs, RESPAN_OVERRIDE_OUTPUT_ATTR, output_value)
         if tool_calls is not None:
             _set_if_missing(
                 attrs,
                 RESPAN_SPAN_TOOL_CALLS,
                 json.dumps(tool_calls, default=str),
             )
-            _set_if_missing(attrs, RESPAN_OVERRIDE_TOOL_CALLS_ATTR, tool_calls)
 
     span._attributes = {
         key: value
