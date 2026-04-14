@@ -1,7 +1,6 @@
 {
   "summary": "Add the Python Claude Agent SDK instrumentation package and patch respan-tracing to export its spans correctly",
   "packages": {
-    "respan-tracing": "patch",
-    "respan-instrumentation-claude-agent-sdk": "add, unpublished"
+    "respan-tracing": "patch"
   }
 }
