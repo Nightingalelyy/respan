@@ -12,6 +12,9 @@ export abstract class BaseCommand extends Command {
       description: 'API key (env: RESPAN_API_KEY)',
       env: 'RESPAN_API_KEY',
     }),
+    'base-url': Flags.string({
+      description: 'Temporary API base URL override for this command',
+    }),
     profile: Flags.string({
       description: 'Named profile to use',
     }),
@@ -35,6 +38,7 @@ export abstract class BaseCommand extends Command {
   protected getAuth(): AuthConfig {
     return resolveAuth({
       'api-key': this.globalFlags['api-key'],
+      'base-url': this.globalFlags['base-url'],
       profile: this.globalFlags.profile,
     });
   }

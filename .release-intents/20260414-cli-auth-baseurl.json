@@ -1,0 +1,7 @@
+{
+  "summary": "Patch @respan/cli base URL resolution and backfill the missing respan-sdk patch intent for reasoning token persistence",
+  "packages": {
+    "@respan/cli": "patch",
+    "respan-sdk": "patch"
+  }
+}

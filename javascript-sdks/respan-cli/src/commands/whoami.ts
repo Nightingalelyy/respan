@@ -8,14 +8,15 @@ export default class Whoami extends BaseCommand {
   async run(): Promise<void> {
     const { flags } = await this.parse(Whoami);
     this.globalFlags = flags;
-    const profile = getActiveProfile();
+    const profile = flags.profile || getActiveProfile();
     const cred = getCredential(profile);
     if (!cred) {
       this.log('Not authenticated.');
       return;
     }
+    const auth = this.getAuth();
     this.log(`Profile: ${profile}`);
     if (cred.type === 'jwt') this.log(`Email: ${cred.email}`);
-    this.log(`Base URL: ${cred.baseUrl}`);
+    this.log(`Base URL: ${auth.baseUrl}`);
   }
 }

@@ -10,6 +10,13 @@ export default class ConfigGet extends BaseCommand {
   async run(): Promise<void> {
     const { args, flags } = await this.parse(ConfigGet);
     this.globalFlags = flags;
+    const normalizedKey = args.key.toLowerCase();
+    if (['base_url', 'baseurl', 'api_base_url'].includes(normalizedKey)) {
+      this.log(
+        'CLI API base URLs are managed by `respan auth login --base-url ...` and can be temporarily overridden with `--base-url` on any command.',
+      );
+      return;
+    }
     const value = getConfigValue(args.key);
     this.log(value !== undefined ? String(value) : `Key "${args.key}" not set.`);
   }
