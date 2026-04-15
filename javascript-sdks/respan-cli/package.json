@@ -1,6 +1,6 @@
 {
   "name": "@respan/cli",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "description": "Respan CLI - manage your LLM observability from the command line",
   "type": "module",
   "main": "dist/index.js",
