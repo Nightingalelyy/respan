@@ -14,10 +14,11 @@ export default class AuthStatus extends BaseCommand {
       this.log('Not authenticated. Run `respan auth login`.');
       return;
     }
+    const auth = this.getAuth();
     this.log(`Profile: ${profile}`);
     this.log(`Type: ${cred.type}`);
     if (cred.type === 'api_key') this.log(`API Key: ${cred.apiKey.slice(0, 8)}...`);
     if (cred.type === 'jwt') this.log(`Email: ${cred.email}`);
-    this.log(`Base URL: ${cred.baseUrl}`);
+    this.log(`Base URL: ${auth.baseUrl}`);
   }
 }

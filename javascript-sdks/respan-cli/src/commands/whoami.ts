@@ -14,8 +14,9 @@ export default class Whoami extends BaseCommand {
       this.log('Not authenticated.');
       return;
     }
+    const auth = this.getAuth();
     this.log(`Profile: ${profile}`);
     if (cred.type === 'jwt') this.log(`Email: ${cred.email}`);
-    this.log(`Base URL: ${cred.baseUrl}`);
+    this.log(`Base URL: ${auth.baseUrl}`);
   }
 }

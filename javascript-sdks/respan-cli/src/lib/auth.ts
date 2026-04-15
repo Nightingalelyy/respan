@@ -10,31 +10,41 @@ export interface AuthConfig {
   baseUrl: string;
 }
 
-export function resolveAuth(flags: { 'api-key'?: string; profile?: string }): AuthConfig {
+function normalizeBaseUrl(baseUrl?: string): string {
+  return (baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '');
+}
+
+function resolveConfiguredBaseUrl(credential?: Credential, flagBaseUrl?: string): string {
+  return normalizeBaseUrl(flagBaseUrl || credential?.baseUrl || DEFAULT_BASE_URL);
+}
+
+export function resolveAuth(flags: { 'api-key'?: string; 'base-url'?: string; profile?: string }): AuthConfig {
+  const credential = getCredential(flags.profile);
+  const baseUrl = resolveConfiguredBaseUrl(credential, flags['base-url']);
+
   if (flags['api-key']) {
-    return { apiKey: flags['api-key'], baseUrl: DEFAULT_BASE_URL };
+    return { apiKey: flags['api-key'], baseUrl };
   }
   if (process.env.RESPAN_API_KEY) {
     return {
       apiKey: process.env.RESPAN_API_KEY,
-      baseUrl: process.env.RESPAN_API_BASE_URL || DEFAULT_BASE_URL,
+      baseUrl,
     };
   }
-  const credential = getCredential(flags.profile);
   if (credential) {
-    return credentialToAuth(credential);
+    return credentialToAuth(credential, baseUrl);
   }
   throw new Error('Not authenticated. Run `respan auth login` or set RESPAN_API_KEY.');
 }
 
-function credentialToAuth(cred: Credential): AuthConfig {
+function credentialToAuth(cred: Credential, baseUrl: string): AuthConfig {
   if (cred.type === 'api_key') {
-    return { apiKey: cred.apiKey, baseUrl: cred.baseUrl };
+    return { apiKey: cred.apiKey, baseUrl };
   }
   return {
     accessToken: cred.accessToken,
     refreshToken: cred.refreshToken,
-    baseUrl: cred.baseUrl,
+    baseUrl,
   };
 }
 

@@ -1,0 +1,6 @@
+{
+  "summary": "Patch @respan/cli to use auth login as the persistent API base URL source and reserve --base-url for temporary command overrides",
+  "packages": {
+    "@respan/cli": "patch"
+  }
+}
