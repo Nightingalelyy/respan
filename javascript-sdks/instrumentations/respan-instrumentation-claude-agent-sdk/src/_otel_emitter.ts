@@ -81,7 +81,7 @@ export function createQueryState({
     startTime: hrTime(),
     statusCode: 200,
     toolCalls: [],
-    toolDefinitions: normalizeToolDefinitions(options?.tools),
+    toolDefinitions: normalizeConfiguredToolDefinitions(options),
     traceFlags: activeSpanContext?.traceFlags ?? TraceFlags.SAMPLED,
     traceId: activeSpanContext?.traceId ?? randomHex(16),
   };
@@ -139,18 +139,85 @@ function normalizeInputMessages(
   return messages;
 }
 
-function normalizeToolDefinitions(
-  tools: unknown,
+function normalizeConfiguredToolDefinitions(
+  options?: Record<string, unknown>,
 ): Record<string, unknown>[] | undefined {
-  if (!Array.isArray(tools)) {
+  const normalizedTools = [
+    ...normalizeToolDefinitions(options?.tools),
+    ...normalizeMcpServerToolDefinitions(options?.mcpServers),
+  ];
+
+  if (normalizedTools.length === 0) {
     return undefined;
   }
 
-  const normalizedTools = tools
+  return dedupeToolDefinitions(normalizedTools);
+}
+
+function normalizeToolDefinitions(
+  tools: unknown,
+): Record<string, unknown>[] {
+  if (!Array.isArray(tools)) {
+    return [];
+  }
+
+  return tools
     .map((tool) => normalizeToolDefinition(tool))
     .filter((tool): tool is Record<string, unknown> => tool !== null);
+}
 
-  return normalizedTools.length > 0 ? normalizedTools : undefined;
+function normalizeMcpServerToolDefinitions(
+  mcpServers: unknown,
+): Record<string, unknown>[] {
+  if (!mcpServers || typeof mcpServers !== "object" || Array.isArray(mcpServers)) {
+    return [];
+  }
+
+  const normalizedTools: Record<string, unknown>[] = [];
+  for (const [serverAlias, serverConfig] of Object.entries(
+    mcpServers as Record<string, unknown>,
+  )) {
+    if (
+      !serverConfig ||
+      typeof serverConfig !== "object" ||
+      Array.isArray(serverConfig)
+    ) {
+      continue;
+    }
+
+    const serverRecord = serverConfig as Record<string, unknown>;
+    const registeredTools =
+      serverRecord.instance &&
+      typeof serverRecord.instance === "object" &&
+      !Array.isArray(serverRecord.instance)
+        ? (serverRecord.instance as Record<string, unknown>)._registeredTools
+        : undefined;
+
+    if (
+      !registeredTools ||
+      typeof registeredTools !== "object" ||
+      Array.isArray(registeredTools)
+    ) {
+      continue;
+    }
+
+    for (const [toolName, toolConfig] of Object.entries(
+      registeredTools as Record<string, unknown>,
+    )) {
+      const normalizedTool = normalizeToolDefinition({
+        ...(toolConfig && typeof toolConfig === "object" && !Array.isArray(toolConfig)
+          ? (toolConfig as Record<string, unknown>)
+          : {}),
+        name: `mcp__${serverAlias}__${toolName}`,
+      });
+
+      if (normalizedTool) {
+        normalizedTools.push(normalizedTool);
+      }
+    }
+  }
+
+  return normalizedTools;
 }
 
 function normalizeToolDefinition(
@@ -182,7 +249,10 @@ function normalizeToolDefinition(
     const normalizedFunction: Record<string, unknown> = { name: functionName };
     for (const key of ["description", "parameters", "strict"]) {
       if (functionPayload[key] !== undefined) {
-        normalizedFunction[key] = toSerializableValue(functionPayload[key]);
+        normalizedFunction[key] =
+          key === "parameters"
+            ? normalizeToolParameters(functionPayload[key])
+            : toSerializableValue(functionPayload[key]);
       }
     }
 
@@ -201,15 +271,155 @@ function normalizeToolDefinition(
   if (record.description !== undefined) {
     normalizedFunction.description = toSerializableValue(record.description);
   }
-  const parameters = record.input_schema ?? record.parameters;
+  const parameters = record.input_schema ?? record.inputSchema ?? record.parameters;
   if (parameters !== undefined) {
-    normalizedFunction.parameters = toSerializableValue(parameters);
+    normalizedFunction.parameters = normalizeToolParameters(parameters);
   }
 
   return {
     type: record.type ?? "function",
     function: normalizedFunction,
   };
+}
+
+function normalizeToolParameters(parameters: unknown): unknown {
+  const jsonSchema =
+    extractJsonSchema(parameters) ?? extractZodLikeJsonSchema(parameters);
+  return toSerializableValue(jsonSchema ?? parameters);
+}
+
+function extractJsonSchema(parameters: unknown): unknown | undefined {
+  if (!parameters || typeof parameters !== "object" || Array.isArray(parameters)) {
+    return undefined;
+  }
+
+  const record = parameters as Record<string, unknown> & {
+    toJSONSchema?: (...args: unknown[]) => unknown;
+  };
+
+  if (typeof record.toJSONSchema === "function") {
+    try {
+      const jsonSchema = record.toJSONSchema();
+      if (jsonSchema !== undefined) {
+        return jsonSchema;
+      }
+    } catch {
+      // Fall back to serializing a stripped-down version of the original object.
+    }
+  }
+
+  return undefined;
+}
+
+function extractZodLikeJsonSchema(parameters: unknown): unknown | undefined {
+  if (!isZodLikeSchema(parameters)) {
+    return undefined;
+  }
+
+  const schemaRecord = parameters as Record<string, unknown>;
+  const schemaDef =
+    schemaRecord.def && typeof schemaRecord.def === "object" && !Array.isArray(schemaRecord.def)
+      ? (schemaRecord.def as Record<string, unknown>)
+      : {};
+  const schemaType =
+    typeof schemaRecord.type === "string"
+      ? schemaRecord.type
+      : typeof schemaDef.type === "string"
+        ? schemaDef.type
+        : undefined;
+
+  switch (schemaType) {
+    case "object": {
+      const shape =
+        schemaDef.shape &&
+        typeof schemaDef.shape === "object" &&
+        !Array.isArray(schemaDef.shape)
+          ? (schemaDef.shape as Record<string, unknown>)
+          : {};
+      const properties: Record<string, unknown> = {};
+      const required: string[] = [];
+
+      for (const [key, fieldSchema] of Object.entries(shape)) {
+        const normalizedField =
+          extractZodLikeJsonSchema(fieldSchema) ?? toSerializableValue(fieldSchema);
+        if (normalizedField !== undefined) {
+          properties[key] = normalizedField;
+        }
+
+        if (!isOptionalZodLikeSchema(fieldSchema)) {
+          required.push(key);
+        }
+      }
+
+      return {
+        type: "object",
+        properties,
+        ...(required.length > 0 ? { required } : {}),
+      };
+    }
+    case "optional":
+      return extractZodLikeJsonSchema(schemaDef.innerType);
+    case "string":
+    case "number":
+    case "boolean":
+      return { type: schemaType };
+    case "array": {
+      const items =
+        extractZodLikeJsonSchema(schemaDef.element) ??
+        extractZodLikeJsonSchema(schemaDef.innerType);
+      return {
+        type: "array",
+        ...(items !== undefined ? { items } : {}),
+      };
+    }
+    default:
+      return undefined;
+  }
+}
+
+function isOptionalZodLikeSchema(schema: unknown): boolean {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return false;
+  }
+
+  const record = schema as Record<string, unknown>;
+  if (record.type === "optional") {
+    return true;
+  }
+
+  return Boolean(
+    record.def &&
+    typeof record.def === "object" &&
+    !Array.isArray(record.def) &&
+    (record.def as Record<string, unknown>).type === "optional",
+  );
+}
+
+function isZodLikeSchema(schema: unknown): boolean {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return false;
+  }
+
+  const record = schema as Record<string, unknown>;
+  const standard =
+    record["~standard"] &&
+    typeof record["~standard"] === "object" &&
+    !Array.isArray(record["~standard"])
+      ? (record["~standard"] as Record<string, unknown>)
+      : undefined;
+  if (standard?.vendor === "zod") {
+    return true;
+  }
+
+  const def =
+    record.def && typeof record.def === "object" && !Array.isArray(record.def)
+      ? (record.def as Record<string, unknown>)
+      : undefined;
+  if (!def || typeof def.type !== "string") {
+    return false;
+  }
+
+  return true;
 }
 
 export function trackClaudeMessage(state: QueryState, message: unknown): void {
@@ -493,20 +703,22 @@ export function emitCompletedTool(
   state.pendingTools.delete(resolvedToolUseId);
 
   const toolName = String(input.tool_name ?? pendingTool.toolName ?? "tool");
+  const toolError =
+    typeof input.error === "string" && input.error.trim().length > 0
+      ? input.error
+      : undefined;
+  const toolOutput =
+    toolError ??
+    input.tool_response ??
+    input.tool_result ??
+    input.output ??
+    "";
   const attrs = baseAttrs(toolName, toolName, RespanLogType.TOOL);
   attrs[RespanSpanAttributes.RESPAN_LOG_METHOD] = RESPAN_LOG_METHOD_TS_TRACING;
   attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson(
     pendingTool.toolInput ?? input.tool_input ?? {},
   );
-  attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson(
-    input.tool_response ?? input.tool_result ?? input.output ?? "",
-  );
-  attrs[RespanSpanAttributes.RESPAN_SPAN_TOOLS] = safeJson([
-    {
-      type: "function",
-      function: { name: toolName },
-    },
-  ]);
+  attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson(toolOutput);
 
   if (state.model) {
     attrs[RespanSpanAttributes.GEN_AI_REQUEST_MODEL] = state.model;
@@ -526,12 +738,15 @@ export function emitCompletedTool(
       startTime: pendingTool.startTime,
       endTime: hrTime(),
       attributes: attrs,
+      statusCode: toolError ? 500 : undefined,
+      errorMessage: toolError,
     }),
   );
 }
 
 export function emitAgentSpan(state: QueryState): void {
   const attrs = baseAttrs(state.agentName, state.agentName, RespanLogType.AGENT);
+  const dedupedToolCalls = dedupeToolCalls(state.toolCalls);
   attrs[RespanSpanAttributes.RESPAN_LOG_METHOD] = RESPAN_LOG_METHOD_TS_TRACING;
   attrs[RespanSpanAttributes.GEN_AI_SYSTEM] = "anthropic";
   attrs[RespanSpanAttributes.LLM_SYSTEM] = "anthropic";
@@ -545,14 +760,6 @@ export function emitAgentSpan(state: QueryState): void {
   const formattedOutput = formatAgentOutput(state);
   if (formattedOutput) {
     attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = formattedOutput;
-  }
-  if (state.toolDefinitions && state.toolDefinitions.length > 0) {
-    attrs[RespanSpanAttributes.RESPAN_SPAN_TOOLS] = safeJson(state.toolDefinitions);
-  }
-  if (state.toolCalls.length > 0) {
-    attrs[RespanSpanAttributes.RESPAN_SPAN_TOOL_CALLS] = safeJson(
-      dedupeToolCalls(state.toolCalls),
-    );
   }
   if (state.model) {
     attrs[RespanSpanAttributes.GEN_AI_REQUEST_MODEL] = state.model;
@@ -580,6 +787,16 @@ export function emitAgentSpan(state: QueryState): void {
   }
   if (state.sessionId) {
     attrs[RespanSpanAttributes.RESPAN_SESSION_ID] = state.sessionId;
+  }
+  if (state.toolDefinitions && state.toolDefinitions.length > 0) {
+    attrs[RespanSpanAttributes.RESPAN_SPAN_TOOLS] = safeJson(state.toolDefinitions);
+  }
+  if (dedupedToolCalls.length > 0) {
+    attrs[RespanSpanAttributes.RESPAN_SPAN_TOOL_CALLS] = safeJson(dedupedToolCalls);
+    attrs.has_tool_calls = true;
+    if (dedupedToolCalls.length > 1) {
+      attrs.parallel_tool_calls = true;
+    }
   }
 
   injectSpan(
@@ -673,6 +890,34 @@ function normalizeToolCall(block: unknown): Record<string, unknown> | null {
 
 function addToolCall(state: QueryState, toolCall: Record<string, unknown>): void {
   state.toolCalls.push(toolCall);
+}
+
+function dedupeToolDefinitions(
+  toolDefinitions: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  const seen = new Set<string>();
+  const deduped: Record<string, unknown>[] = [];
+
+  for (const toolDefinition of toolDefinitions) {
+    const functionPayload =
+      toolDefinition.function &&
+      typeof toolDefinition.function === "object" &&
+      !Array.isArray(toolDefinition.function)
+        ? (toolDefinition.function as Record<string, unknown>)
+        : {};
+    const name = functionPayload.name;
+    if (typeof name !== "string" || !name) {
+      deduped.push(toolDefinition);
+      continue;
+    }
+    if (seen.has(name)) {
+      continue;
+    }
+    seen.add(name);
+    deduped.push(toolDefinition);
+  }
+
+  return deduped;
 }
 
 function dedupeToolCalls(
@@ -800,14 +1045,22 @@ function toSerializableValue(value: unknown): unknown {
     return value.toISOString();
   }
   if (Array.isArray(value)) {
-    return value.map((item) => toSerializableValue(item));
+    return value
+      .map((item) => toSerializableValue(item))
+      .filter((item) => item !== undefined);
   }
   if (typeof value === "object") {
     const normalizedObject: Record<string, unknown> = {};
     Object.entries(value as Record<string, unknown>).forEach(([key, itemValue]) => {
-      normalizedObject[key] = toSerializableValue(itemValue);
+      const normalizedValue = toSerializableValue(itemValue);
+      if (normalizedValue !== undefined) {
+        normalizedObject[key] = normalizedValue;
+      }
     });
     return normalizedObject;
+  }
+  if (typeof value === "function" || typeof value === "symbol") {
+    return undefined;
   }
   return String(value);
 }

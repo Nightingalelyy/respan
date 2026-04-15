@@ -182,6 +182,18 @@ export class ClaudeAgentSDKInstrumentor {
       return {};
     });
 
+    appendHook("PostToolUseFailure", async (input, toolUseId) => {
+      try {
+        emitCompletedTool(state, input, toolUseId);
+      } catch (error) {
+        console.warn(
+          "[respan] ClaudeAgentSDKInstrumentor PostToolUseFailure hook failed:",
+          error,
+        );
+      }
+      return {};
+    });
+
     return {
       ...options,
       hooks,

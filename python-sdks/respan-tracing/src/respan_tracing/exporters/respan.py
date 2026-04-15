@@ -177,7 +177,6 @@ def _build_claude_agent_final_chat_span(
     tool_calls = _parse_structured_json_attr(attrs.get(RESPAN_SPAN_TOOL_CALLS))
     if not isinstance(tool_calls, list) or not tool_calls:
         return None
-
     primary_completion_message = _select_primary_completion_from_attrs(attrs)
     completion_text = _extract_text_from_message(primary_completion_message)
     if completion_text in {None, ""}:
@@ -193,6 +192,7 @@ def _build_claude_agent_final_chat_span(
         "traceloop.entity.name": _ASSISTANT_MESSAGE_SPAN_NAME,
         "gen_ai.completion.0.role": "assistant",
         "gen_ai.completion.0.content": completion_text,
+        "gen_ai.completion.0.tool_calls": tool_calls,
         SpanAttributes.TRACELOOP_ENTITY_OUTPUT: json.dumps(
             primary_completion_message,
             default=str,

@@ -32,7 +32,7 @@ test.after(() => {
   });
 });
 
-function createFakeSdk() {
+function createFakeSdk({ toolFailure = false, toolName = "get_weather" } = {}) {
   const calls = [];
 
   return {
@@ -60,7 +60,7 @@ function createFakeSdk() {
         await firstHook("PreToolUse")?.({
           session_id: "sess-123",
           tool_use_id: "toolu_123",
-          tool_name: "get_weather",
+          tool_name: toolName,
           tool_input: { city: "Tokyo" },
         });
 
@@ -79,7 +79,7 @@ function createFakeSdk() {
               {
                 type: "tool_use",
                 id: "toolu_123",
-                name: "get_weather",
+                name: toolName,
                 input: { city: "Tokyo" },
               },
               {
@@ -90,12 +90,22 @@ function createFakeSdk() {
           },
         };
 
-        await firstHook("PostToolUse")?.({
-          session_id: "sess-123",
-          tool_use_id: "toolu_123",
-          tool_name: "get_weather",
-          tool_response: { forecast: "sunny" },
-        });
+        if (toolFailure) {
+          await firstHook("PostToolUseFailure")?.({
+            session_id: "sess-123",
+            tool_use_id: "toolu_123",
+            tool_name: toolName,
+            tool_input: { city: "Tokyo" },
+            error: "Tool execution failed",
+          });
+        } else {
+          await firstHook("PostToolUse")?.({
+            session_id: "sess-123",
+            tool_use_id: "toolu_123",
+            tool_name: toolName,
+            tool_response: { forecast: "sunny" },
+          });
+        }
 
         yield {
           type: "result",
@@ -151,6 +161,7 @@ test("instrumentor patches query, merges hooks, and emits tool + agent spans", a
   assert.ok(Array.isArray(sdk.calls[0].options.hooks.UserPromptSubmit));
   assert.ok(Array.isArray(sdk.calls[0].options.hooks.PreToolUse));
   assert.ok(Array.isArray(sdk.calls[0].options.hooks.PostToolUse));
+  assert.ok(Array.isArray(sdk.calls[0].options.hooks.PostToolUseFailure));
 
   assert.equal(captureState.spans.length, 2);
 
@@ -170,6 +181,7 @@ test("instrumentor patches query, merges hooks, and emits tool + agent spans", a
   assert.deepEqual(JSON.parse(toolSpan.attributes["traceloop.entity.output"]), {
     forecast: "sunny",
   });
+  assert.equal(toolSpan.attributes["respan.span.tools"], undefined);
 
   assert.equal(agentSpan.attributes["traceloop.entity.name"], "weather_agent");
   assert.equal(agentSpan.attributes["gen_ai.request.model"], "claude-sonnet-4-5");
@@ -186,7 +198,12 @@ test("instrumentor patches query, merges hooks, and emits tool + agent spans", a
   );
   assert.deepEqual(
     JSON.parse(agentSpan.attributes["respan.span.tools"]),
-    [{ type: "function", function: { name: "get_weather", parameters: { type: "object" } } }],
+    [
+      {
+        type: "function",
+        function: { name: "get_weather", parameters: { type: "object" } },
+      },
+    ],
   );
   assert.deepEqual(
     JSON.parse(agentSpan.attributes["respan.span.tool_calls"]),
@@ -201,18 +218,219 @@ test("instrumentor patches query, merges hooks, and emits tool + agent spans", a
       },
     ],
   );
+  assert.equal(agentSpan.attributes.tools, undefined);
+  assert.equal(agentSpan.attributes.tool_calls, undefined);
+  assert.equal(agentSpan.attributes["has_tool_calls"], true);
   assert.deepEqual(
     JSON.parse(agentSpan.attributes["traceloop.entity.input"]),
     [{ role: "user", content: "What is the weather in Tokyo?" }],
   );
-  assert.deepEqual(
-    agentSpan.attributes["traceloop.entity.output"],
-    "Tokyo is sunny.",
-  );
+  assert.equal(agentSpan.attributes["traceloop.entity.output"], "Tokyo is sunny.");
   assert.equal(toolSpan.parentSpanId, agentSpan.spanContext().spanId);
   assert.equal(toolSpan.spanContext().traceId, agentSpan.spanContext().traceId);
 
   instrumentor.deactivate();
 
   assert.equal(sdk.query, originalQuery);
+});
+
+test("instrumentor emits errored tool spans for PostToolUseFailure", async () => {
+  captureState.spans = [];
+  const sdk = createFakeSdk({ toolFailure: true });
+
+  const instrumentor = new ClaudeAgentSDKInstrumentor({
+    sdkModule: sdk,
+    agentName: "weather_agent",
+  });
+
+  await instrumentor.activate();
+
+  const iterator = await sdk.query({
+    prompt: "What is the weather in Tokyo?",
+    options: {},
+  });
+
+  for await (const _item of iterator) {
+    // Drain the stream so spans are emitted.
+  }
+
+  const toolSpan = captureState.spans.find(
+    (span) => span.attributes["respan.entity.log_type"] === "tool",
+  );
+  const agentSpan = captureState.spans.find(
+    (span) => span.attributes["respan.entity.log_type"] === "agent",
+  );
+
+  assert.ok(toolSpan);
+  assert.ok(agentSpan);
+  assert.equal(toolSpan.status.code, 2);
+  assert.equal(toolSpan.status.message, "Tool execution failed");
+  assert.equal(
+    JSON.parse(toolSpan.attributes["traceloop.entity.output"]),
+    "Tool execution failed",
+  );
+  assert.equal(toolSpan.parentSpanId, agentSpan.spanContext().spanId);
+});
+
+test("instrumentor extracts SDK MCP server tool definitions", async () => {
+  captureState.spans = [];
+  const sdk = createFakeSdk({ toolName: "mcp__demo__get_weather" });
+  const weatherInputSchema = {
+    vendor: "zod",
+    _internalValidator: () => true,
+    toJSONSchema() {
+      return {
+        type: "object",
+        properties: {
+          city: { type: "string" },
+        },
+      };
+    },
+  };
+
+  const instrumentor = new ClaudeAgentSDKInstrumentor({
+    sdkModule: sdk,
+    agentName: "weather_agent",
+  });
+
+  await instrumentor.activate();
+
+  const iterator = await sdk.query({
+    prompt: "What is the weather in Tokyo?",
+    options: {
+      mcpServers: {
+        demo: {
+          type: "sdk",
+          instance: {
+            _registeredTools: {
+              get_weather: {
+                description: "Get weather",
+                inputSchema: weatherInputSchema,
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+
+  for await (const _item of iterator) {
+    // Drain the stream so spans are emitted.
+  }
+
+  const agentSpan = captureState.spans.find(
+    (span) => span.attributes["respan.entity.log_type"] === "agent",
+  );
+
+  assert.ok(agentSpan);
+  assert.deepEqual(JSON.parse(agentSpan.attributes["respan.span.tools"]), [
+    {
+      type: "function",
+      function: {
+        name: "mcp__demo__get_weather",
+        description: "Get weather",
+        parameters: {
+          type: "object",
+          properties: {
+            city: { type: "string" },
+          },
+        },
+      },
+    },
+  ]);
+  assert.deepEqual(JSON.parse(agentSpan.attributes["respan.span.tool_calls"]), [
+    {
+      id: "toolu_123",
+      type: "function",
+      function: {
+        name: "mcp__demo__get_weather",
+        arguments: "{\"city\":\"Tokyo\"}",
+      },
+    },
+  ]);
+  assert.equal(agentSpan.attributes.tools, undefined);
+  assert.equal(agentSpan.attributes.tool_calls, undefined);
+});
+
+test("instrumentor normalizes Zod-like MCP server schemas", async () => {
+  captureState.spans = [];
+  const sdk = createFakeSdk({ toolName: "mcp__demo__get_weather" });
+  const zodLikeInputSchema = {
+    "~standard": {
+      vendor: "zod",
+      version: 1,
+    },
+    def: {
+      type: "object",
+      shape: {
+        city: {
+          def: { type: "string" },
+          type: "string",
+        },
+        unit: {
+          def: {
+            type: "optional",
+            innerType: {
+              def: { type: "string" },
+              type: "string",
+            },
+          },
+          type: "optional",
+        },
+      },
+    },
+  };
+
+  const instrumentor = new ClaudeAgentSDKInstrumentor({
+    sdkModule: sdk,
+    agentName: "weather_agent",
+  });
+
+  await instrumentor.activate();
+
+  const iterator = await sdk.query({
+    prompt: "What is the weather in Tokyo?",
+    options: {
+      mcpServers: {
+        demo: {
+          type: "sdk",
+          instance: {
+            _registeredTools: {
+              get_weather: {
+                description: "Get weather",
+                inputSchema: zodLikeInputSchema,
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+
+  for await (const _item of iterator) {
+    // Drain the stream so spans are emitted.
+  }
+
+  const agentSpan = captureState.spans.find(
+    (span) => span.attributes["respan.entity.log_type"] === "agent",
+  );
+
+  assert.ok(agentSpan);
+  assert.deepEqual(JSON.parse(agentSpan.attributes["respan.span.tools"]), [
+    {
+      type: "function",
+      function: {
+        name: "mcp__demo__get_weather",
+        description: "Get weather",
+        parameters: {
+          type: "object",
+          properties: {
+            city: { type: "string" },
+            unit: { type: "string" },
+          },
+          required: ["city"],
+        },
+      },
+    },
+  ]);
 });
