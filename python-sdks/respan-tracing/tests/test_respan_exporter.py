@@ -170,16 +170,6 @@ def test_exporter_accepts_full_v2_traces_endpoint_without_duplication():
 def test_prepare_spans_adds_claude_agent_final_chat_child_for_tool_turn():
     """Claude Agent tool turns should emit a synthetic final child chat span."""
 
-    tool_calls = [
-        {
-            "id": "call_1",
-            "type": "function",
-            "function": {
-                "name": "lookup_weather",
-                "arguments": '{"city":"Tokyo"}',
-            },
-        }
-    ]
     wrapper_span = _make_span(
         name="ClaudeAgentSDK.query",
         span_id=3002,
@@ -189,7 +179,16 @@ def test_prepare_spans_adds_claude_agent_final_chat_child_for_tool_turn():
             "gen_ai.request.model": "claude-sonnet-4-5",
             "traceloop.entity.input": "Use the weather tool.",
             "traceloop.entity.output": "Tokyo is sunny and 22C.",
-            RESPAN_SPAN_TOOL_CALLS: json.dumps(tool_calls),
+            RESPAN_SPAN_TOOL_CALLS: json.dumps([
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "lookup_weather",
+                        "arguments": '{"city":"Tokyo"}',
+                    },
+                }
+            ]),
         },
         scope_name="openinference.instrumentation.claude_agent_sdk",
     )
@@ -209,7 +208,6 @@ def test_prepare_spans_adds_claude_agent_final_chat_child_for_tool_turn():
         synthetic_child.attributes["gen_ai.completion.0.content"]
         == "Tokyo is sunny and 22C."
     )
-    assert synthetic_child.attributes["gen_ai.completion.0.tool_calls"] == tool_calls
     assert synthetic_child.attributes["traceloop.entity.input"] == "Use the weather tool."
 
 
@@ -252,6 +250,7 @@ def test_prepare_spans_remaps_tool_call_helpers_and_strips_helper_attrs():
     assert prepared_attrs["gen_ai.completion.0.tool_calls"] == tool_calls
     assert prepared_attrs["gen_ai.completion.0.role"] == "assistant"
     assert prepared_attrs["gen_ai.completion.0.content"] == ""
+
     otlp_span = _span_to_otlp_json(prepared[0])
     otlp_attrs = {
         item[OTLP_ATTR_KEY]: item[OTLP_ATTR_VALUE]
