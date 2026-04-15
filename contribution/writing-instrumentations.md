@@ -98,7 +98,7 @@ Legacy packages must stay out of that workspace list.
 Python instrumentation packages should generally depend on:
 
 - `respan-tracing`
-- `respan-sdk` only when they need shared constants or types
+- `respan-sdk` only when they need Respan-owned shared constants or types
 - the vendor SDK or upstream OTEL instrumentor they wrap
 
 Good defaults:
@@ -109,6 +109,33 @@ Good defaults:
 - put unit tests under `tests/`
 
 If the package is intended to be loaded as a plugin, make the plugin entrypoint explicit in `pyproject.toml`.
+
+## Constant Resolution Order
+
+When an instrumentation needs semantic-convention keys or attribute constants, resolve them in this order:
+
+1. Traceloop / GenAI semantic-convention packages already used by that instrumentation
+2. OpenInference semantic-convention packages already used by that instrumentation
+3. `respan-sdk` constants, but only for Respan-owned keys that do not exist upstream
+
+Rules:
+
+- Do not re-declare a Traceloop GenAI or OpenInference semantic-convention key inside `respan-sdk`.
+- Do not create local ad hoc string constants in an instrumentation if an upstream constant already exists.
+- Add a new `respan-sdk` constant only when the key is Respan-specific and cannot be sourced from Traceloop or OpenInference.
+- Prefer importing upstream constants directly in the instrumentation package that uses them.
+
+Examples of keys that belong upstream rather than in `respan-sdk`:
+
+- GenAI semantic-convention attributes
+- OpenInference semantic-convention attributes
+- other vendor-neutral tracing keys already published by an upstream semconv package
+
+Examples of keys that may belong in `respan-sdk`:
+
+- Respan-specific metadata keys
+- Respan-specific log type identifiers
+- Respan-owned plugin or registry keys shared across packages
 
 ## JavaScript Guidance
 
@@ -162,3 +189,4 @@ Do not do these:
 - keep duplicate contributor docs in package subtrees
 - introduce circular dependencies between core packages and instrumentations
 - rely on manual post-merge version editing
+- duplicate upstream semantic-convention constants inside `respan-sdk`
