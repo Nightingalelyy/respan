@@ -1,6 +1,7 @@
 {
-  "summary": "Patch @respan/cli to use auth login as the persistent API base URL source and reserve --base-url for temporary command overrides",
+  "summary": "Patch @respan/cli base URL resolution and backfill the missing respan-sdk patch intent for reasoning token persistence",
   "packages": {
-    "@respan/cli": "patch"
+    "@respan/cli": "patch",
+    "respan-sdk": "patch"
   }
 }
