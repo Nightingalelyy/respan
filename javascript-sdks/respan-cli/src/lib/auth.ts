@@ -15,7 +15,11 @@ function normalizeBaseUrl(baseUrl?: string): string {
 }
 
 function resolveConfiguredBaseUrl(credential?: Credential, flagBaseUrl?: string): string {
-  return normalizeBaseUrl(flagBaseUrl || credential?.baseUrl || DEFAULT_BASE_URL);
+  // Keep the legacy env override for scripted/CI flows while auth login remains
+  // the main persistent configuration path for CLI users.
+  return normalizeBaseUrl(
+    flagBaseUrl || process.env.RESPAN_API_BASE_URL || credential?.baseUrl || DEFAULT_BASE_URL,
+  );
 }
 
 export function resolveAuth(flags: { 'api-key'?: string; 'base-url'?: string; profile?: string }): AuthConfig {

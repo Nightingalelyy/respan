@@ -8,7 +8,7 @@ export default class Whoami extends BaseCommand {
   async run(): Promise<void> {
     const { flags } = await this.parse(Whoami);
     this.globalFlags = flags;
-    const profile = getActiveProfile();
+    const profile = flags.profile || getActiveProfile();
     const cred = getCredential(profile);
     if (!cred) {
       this.log('Not authenticated.');
