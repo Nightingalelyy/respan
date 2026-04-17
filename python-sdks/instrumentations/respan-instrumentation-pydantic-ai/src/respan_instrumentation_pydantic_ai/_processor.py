@@ -29,6 +29,7 @@ from respan_instrumentation_pydantic_ai._constants import (
     PYDANTIC_AI_TOOLS_ATTR,
     PYDANTIC_AI_USAGE_INPUT_TOKENS_ATTR,
     PYDANTIC_AI_USAGE_OUTPUT_TOKENS_ATTR,
+    PYDANTIC_AI_USAGE_TOTAL_TOKENS_ATTR,
     RESPAN_OVERRIDE_COMPLETION_TOKENS_ATTR,
     RESPAN_OVERRIDE_INPUT_ATTR,
     RESPAN_OVERRIDE_MODEL_ATTR,
@@ -73,6 +74,29 @@ _PYDANTIC_AI_OPERATION_TO_LOG_TYPE = {
     "speech": LOG_TYPE_SPEECH,
     "transcription": LOG_TYPE_TRANSCRIPTION,
 }
+_USAGE_LOG_TYPES = frozenset(
+    {
+        LOG_TYPE_CHAT,
+        LOG_TYPE_EMBEDDING,
+        LOG_TYPE_RESPONSE,
+        LOG_TYPE_SPEECH,
+        LOG_TYPE_TOOL,
+        LOG_TYPE_TRANSCRIPTION,
+    }
+)
+_NESTED_PROVIDER_USAGE_SUPPRESSIBLE_LOG_TYPES = frozenset(
+    _USAGE_LOG_TYPES - {LOG_TYPE_TOOL}
+)
+_RAW_USAGE_ATTRIBUTE_NAMES = frozenset(
+    {
+        PYDANTIC_AI_USAGE_INPUT_TOKENS_ATTR,
+        PYDANTIC_AI_USAGE_OUTPUT_TOKENS_ATTR,
+        PYDANTIC_AI_USAGE_TOTAL_TOKENS_ATTR,
+        SpanAttributes.LLM_USAGE_PROMPT_TOKENS,
+        SpanAttributes.LLM_USAGE_COMPLETION_TOKENS,
+        SpanAttributes.LLM_USAGE_TOTAL_TOKENS,
+    }
+)
 
 
 def _safe_json_loads(value: Any) -> Any:
@@ -225,17 +249,102 @@ def _extract_usage(attrs: Mapping[str, Any]) -> tuple[int | None, int | None]:
     )
 
 
+def _get_span_key(span: Any) -> tuple[int, int] | None:
+    try:
+        span_context = span.get_span_context()
+    except Exception:
+        return None
+
+    trace_id = getattr(span_context, "trace_id", None)
+    span_id = getattr(span_context, "span_id", None)
+    if isinstance(trace_id, int) and isinstance(span_id, int):
+        return trace_id, span_id
+    return None
+
+
+def _get_parent_span_key(span: Any) -> tuple[int, int] | None:
+    span_key = _get_span_key(span)
+    parent_span_id = getattr(getattr(span, "parent", None), "span_id", None)
+    if span_key is None or not isinstance(parent_span_id, int):
+        return None
+    return span_key[0], parent_span_id
+
+
+def _span_has_raw_usage_attributes(attrs: Mapping[str, Any]) -> bool:
+    return any(
+        isinstance(attrs.get(attribute_name), int)
+        for attribute_name in _RAW_USAGE_ATTRIBUTE_NAMES
+    )
+
+
+def _should_map_usage_fields(
+    log_type: str | None,
+    suppress_nested_provider_usage: bool = False,
+) -> bool:
+    if log_type not in _USAGE_LOG_TYPES:
+        return False
+    if (
+        suppress_nested_provider_usage
+        and log_type in _NESTED_PROVIDER_USAGE_SUPPRESSIBLE_LOG_TYPES
+    ):
+        return False
+    return True
+
+
+def _enrich_nested_provider_span(
+    span: ReadableSpan,
+    attrs: dict[str, Any],
+) -> None:
+    if is_pydantic_ai_span(span, attrs):
+        return
+    if not _span_has_raw_usage_attributes(attrs):
+        return
+
+    log_type = _extract_log_type(span, attrs)
+    if log_type not in _NESTED_PROVIDER_USAGE_SUPPRESSIBLE_LOG_TYPES:
+        return
+
+    _set_if_missing(attrs, RESPAN_LOG_METHOD, LogMethodChoices.TRACING_INTEGRATION.value)
+    _set_if_missing(attrs, RESPAN_LOG_TYPE, log_type)
+    _set_if_missing(attrs, SpanAttributes.TRACELOOP_SPAN_KIND, log_type)
+
+    prompt_tokens = attrs.get(PYDANTIC_AI_USAGE_INPUT_TOKENS_ATTR)
+    if isinstance(prompt_tokens, int):
+        _set_if_missing(attrs, LLM_USAGE_PROMPT_TOKENS, prompt_tokens)
+
+    completion_tokens = attrs.get(PYDANTIC_AI_USAGE_OUTPUT_TOKENS_ATTR)
+    if isinstance(completion_tokens, int):
+        _set_if_missing(attrs, LLM_USAGE_COMPLETION_TOKENS, completion_tokens)
+
+    total_tokens = attrs.get(PYDANTIC_AI_USAGE_TOTAL_TOKENS_ATTR)
+    if not isinstance(total_tokens, int) and (
+        isinstance(prompt_tokens, int) or isinstance(completion_tokens, int)
+    ):
+        total_tokens = (prompt_tokens if isinstance(prompt_tokens, int) else 0) + (
+            completion_tokens if isinstance(completion_tokens, int) else 0
+        )
+    if isinstance(total_tokens, int):
+        _set_if_missing(attrs, SpanAttributes.LLM_USAGE_TOTAL_TOKENS, total_tokens)
+
+    output_messages = attrs.get(PYDANTIC_AI_OUTPUT_MESSAGES_ATTR)
+    if output_messages is not None:
+        _set_if_missing(attrs, SpanAttributes.TRACELOOP_ENTITY_OUTPUT, output_messages)
+
+
 def _extract_log_type(span: ReadableSpan, attrs: Mapping[str, Any]) -> str | None:
     if isinstance(attrs.get(GEN_AI_TOOL_NAME), str):
         return LOG_TYPE_TOOL
+
+    operation_name = attrs.get(GEN_AI_OPERATION_NAME)
+    if isinstance(operation_name, str):
+        operation_log_type = _PYDANTIC_AI_OPERATION_TO_LOG_TYPE.get(operation_name)
+        if operation_log_type is not None:
+            return operation_log_type
+
     if isinstance(attrs.get(GEN_AI_AGENT_NAME), str) or isinstance(
         attrs.get(PYDANTIC_AI_LEGACY_AGENT_NAME_ATTR), str
     ):
         return LOG_TYPE_AGENT
-
-    operation_name = attrs.get(GEN_AI_OPERATION_NAME)
-    if isinstance(operation_name, str):
-        return _PYDANTIC_AI_OPERATION_TO_LOG_TYPE.get(operation_name)
 
     if span.name == PYDANTIC_AI_RUNNING_TOOLS_SPAN_NAME and _extract_tool_names(attrs):
         return LOG_TYPE_TASK
@@ -267,7 +376,10 @@ def _set_if_missing(attrs: dict[str, Any], key: str, value: Any) -> None:
         attrs[key] = value
 
 
-def enrich_pydantic_ai_span(span: ReadableSpan) -> None:
+def enrich_pydantic_ai_span(
+    span: ReadableSpan,
+    suppress_nested_provider_usage: bool = False,
+) -> None:
     original_attrs = getattr(span, "_attributes", None)
     if original_attrs is None:
         return
@@ -288,21 +400,25 @@ def enrich_pydantic_ai_span(span: ReadableSpan) -> None:
         _set_if_missing(attrs, LLM_REQUEST_MODEL, model)
         _set_if_missing(attrs, RESPAN_OVERRIDE_MODEL_ATTR, model)
 
-    prompt_tokens, completion_tokens = _extract_usage(attrs)
-    if prompt_tokens is not None:
-        _set_if_missing(attrs, LLM_USAGE_PROMPT_TOKENS, prompt_tokens)
-        _set_if_missing(attrs, RESPAN_OVERRIDE_PROMPT_TOKENS_ATTR, prompt_tokens)
-    if completion_tokens is not None:
-        _set_if_missing(attrs, LLM_USAGE_COMPLETION_TOKENS, completion_tokens)
-        _set_if_missing(
-            attrs, RESPAN_OVERRIDE_COMPLETION_TOKENS_ATTR, completion_tokens
-        )
-    if prompt_tokens is not None or completion_tokens is not None:
-        _set_if_missing(
-            attrs,
-            RESPAN_OVERRIDE_TOTAL_REQUEST_TOKENS_ATTR,
-            (prompt_tokens or 0) + (completion_tokens or 0),
-        )
+    if _should_map_usage_fields(
+        log_type,
+        suppress_nested_provider_usage=suppress_nested_provider_usage,
+    ):
+        prompt_tokens, completion_tokens = _extract_usage(attrs)
+        if prompt_tokens is not None:
+            _set_if_missing(attrs, LLM_USAGE_PROMPT_TOKENS, prompt_tokens)
+            _set_if_missing(attrs, RESPAN_OVERRIDE_PROMPT_TOKENS_ATTR, prompt_tokens)
+        if completion_tokens is not None:
+            _set_if_missing(attrs, LLM_USAGE_COMPLETION_TOKENS, completion_tokens)
+            _set_if_missing(
+                attrs, RESPAN_OVERRIDE_COMPLETION_TOKENS_ATTR, completion_tokens
+            )
+        if prompt_tokens is not None or completion_tokens is not None:
+            _set_if_missing(
+                attrs,
+                RESPAN_OVERRIDE_TOTAL_REQUEST_TOKENS_ATTR,
+                (prompt_tokens or 0) + (completion_tokens or 0),
+            )
 
     response_format = _extract_response_format(attrs)
     if response_format is not None:
@@ -398,14 +514,37 @@ def enrich_pydantic_ai_span(span: ReadableSpan) -> None:
 class PydanticAISpanProcessor(SpanProcessor):
     """Normalize raw PydanticAI spans into Respan's OTLP conventions."""
 
+    def __init__(self) -> None:
+        self._nested_provider_usage_parent_keys: set[tuple[int, int]] = set()
+
     def on_start(self, span: Any, parent_context: Any = None) -> None:
         pass
 
     def on_end(self, span: ReadableSpan) -> None:
+        attrs = dict(getattr(span, "_attributes", None) or {})
+        _enrich_nested_provider_span(span, attrs)
+        span._attributes = attrs
+        if (
+            not is_pydantic_ai_span(span, attrs)
+            and _span_has_raw_usage_attributes(attrs)
+        ):
+            parent_span_key = _get_parent_span_key(span)
+            if parent_span_key is not None:
+                self._nested_provider_usage_parent_keys.add(parent_span_key)
+
+        span_key = _get_span_key(span)
         try:
-            enrich_pydantic_ai_span(span)
+            enrich_pydantic_ai_span(
+                span,
+                suppress_nested_provider_usage=(
+                    span_key in self._nested_provider_usage_parent_keys
+                ),
+            )
         except Exception:
             logger.exception("Failed to enrich PydanticAI span")
+        finally:
+            if span_key is not None:
+                self._nested_provider_usage_parent_keys.discard(span_key)
 
     def shutdown(self) -> None:
         pass
