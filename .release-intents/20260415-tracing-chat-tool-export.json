@@ -1,6 +1,0 @@
-{
-  "summary": "Patch @respan/tracing to export direct tracing chat tool metadata in structured top-level fields.",
-  "packages": {
-    "@respan/tracing": "patch"
-  }
-}
