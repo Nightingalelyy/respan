@@ -792,7 +792,6 @@ export function emitAgentSpan(state: QueryState): void {
     attrs[GEN_AI_COMPLETION_ROLE] = "assistant";
     attrs[GEN_AI_COMPLETION_CONTENT] = formattedOutput;
     attrs[GEN_AI_COMPLETION_TOOL_CALLS] = dedupedToolCalls;
-    addIndexedToolCallAttrs(attrs, dedupedToolCalls);
     attrs.has_tool_calls = true;
     if (dedupedToolCalls.length > 1) {
       attrs.parallel_tool_calls = true;
@@ -920,41 +919,6 @@ function normalizeToolCall(block: unknown): Record<string, unknown> | null {
 
 function addToolCall(state: QueryState, toolCall: Record<string, unknown>): void {
   state.toolCalls.push(toolCall);
-}
-
-function addIndexedToolCallAttrs(
-  attrs: Record<string, unknown>,
-  toolCalls: Record<string, unknown>[],
-): void {
-  toolCalls.forEach((toolCall, index) => {
-    const prefix = `${GEN_AI_COMPLETION_TOOL_CALLS}.${index}`;
-    if (typeof toolCall.id === "string" && toolCall.id) {
-      attrs[`${prefix}.id`] = toolCall.id;
-    }
-    if (typeof toolCall.type === "string" && toolCall.type) {
-      attrs[`${prefix}.type`] = toolCall.type;
-    }
-
-    const functionPayload =
-      toolCall.function &&
-      typeof toolCall.function === "object" &&
-      !Array.isArray(toolCall.function)
-        ? (toolCall.function as Record<string, unknown>)
-        : undefined;
-    if (!functionPayload) {
-      return;
-    }
-
-    if (typeof functionPayload.name === "string" && functionPayload.name) {
-      attrs[`${prefix}.function.name`] = functionPayload.name;
-    }
-    if (functionPayload.arguments !== undefined) {
-      attrs[`${prefix}.function.arguments`] =
-        typeof functionPayload.arguments === "string"
-          ? functionPayload.arguments
-          : safeJson(functionPayload.arguments);
-    }
-  });
 }
 
 function dedupeToolDefinitions(

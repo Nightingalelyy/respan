@@ -239,11 +239,11 @@ test("instrumentor patches query, merges hooks, and emits tool + agent spans", a
   ]);
   assert.equal(
     agentSpan.attributes["gen_ai.completion.0.tool_calls.0.function.name"],
-    "get_weather",
+    undefined,
   );
   assert.equal(
     agentSpan.attributes["gen_ai.completion.0.tool_calls.0.function.arguments"],
-    "{\"city\":\"Tokyo\"}",
+    undefined,
   );
   assert.equal(agentSpan.attributes["has_tool_calls"], true);
   assert.deepEqual(
