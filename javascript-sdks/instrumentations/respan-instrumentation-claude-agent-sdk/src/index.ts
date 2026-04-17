@@ -46,6 +46,12 @@ type HookGroup = {
   hooks?: HookCallback[];
 };
 
+const HOOK_EVENT_USER_PROMPT_SUBMIT = "UserPromptSubmit";
+const HOOK_EVENT_PRE_TOOL_USE = "PreToolUse";
+const HOOK_EVENT_POST_TOOL_USE = "PostToolUse";
+const HOOK_EVENT_POST_TOOL_USE_FAILURE = "PostToolUseFailure";
+const INSTRUMENTOR_LOG_PREFIX = "[respan] ClaudeAgentSDKInstrumentor";
+
 export class ClaudeAgentSDKInstrumentor {
   public readonly name = "claude-agent-sdk";
 
@@ -155,39 +161,48 @@ export class ClaudeAgentSDKInstrumentor {
       hooks[eventName] = existingHooks;
     };
 
-    appendHook("UserPromptSubmit", async (input) => {
+    appendHook(HOOK_EVENT_USER_PROMPT_SUBMIT, async (input) => {
       try {
         registerPromptSubmit(state, input);
       } catch (error) {
-        console.warn("[respan] ClaudeAgentSDKInstrumentor UserPromptSubmit hook failed:", error);
+        console.warn(
+          `${INSTRUMENTOR_LOG_PREFIX} ${HOOK_EVENT_USER_PROMPT_SUBMIT} hook failed:`,
+          error,
+        );
       }
       return {};
     });
 
-    appendHook("PreToolUse", async (input, toolUseId) => {
+    appendHook(HOOK_EVENT_PRE_TOOL_USE, async (input, toolUseId) => {
       try {
         registerPendingTool(state, input, toolUseId);
       } catch (error) {
-        console.warn("[respan] ClaudeAgentSDKInstrumentor PreToolUse hook failed:", error);
+        console.warn(
+          `${INSTRUMENTOR_LOG_PREFIX} ${HOOK_EVENT_PRE_TOOL_USE} hook failed:`,
+          error,
+        );
       }
       return {};
     });
 
-    appendHook("PostToolUse", async (input, toolUseId) => {
-      try {
-        emitCompletedTool(state, input, toolUseId);
-      } catch (error) {
-        console.warn("[respan] ClaudeAgentSDKInstrumentor PostToolUse hook failed:", error);
-      }
-      return {};
-    });
-
-    appendHook("PostToolUseFailure", async (input, toolUseId) => {
+    appendHook(HOOK_EVENT_POST_TOOL_USE, async (input, toolUseId) => {
       try {
         emitCompletedTool(state, input, toolUseId);
       } catch (error) {
         console.warn(
-          "[respan] ClaudeAgentSDKInstrumentor PostToolUseFailure hook failed:",
+          `${INSTRUMENTOR_LOG_PREFIX} ${HOOK_EVENT_POST_TOOL_USE} hook failed:`,
+          error,
+        );
+      }
+      return {};
+    });
+
+    appendHook(HOOK_EVENT_POST_TOOL_USE_FAILURE, async (input, toolUseId) => {
+      try {
+        emitCompletedTool(state, input, toolUseId);
+      } catch (error) {
+        console.warn(
+          `${INSTRUMENTOR_LOG_PREFIX} ${HOOK_EVENT_POST_TOOL_USE_FAILURE} hook failed:`,
           error,
         );
       }

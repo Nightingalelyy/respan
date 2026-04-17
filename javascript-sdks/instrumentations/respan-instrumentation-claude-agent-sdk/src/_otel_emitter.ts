@@ -641,6 +641,29 @@ function updateUsageFromMessage(
   }
 }
 
+function resolveToolUseId(
+  input: Record<string, unknown>,
+  toolUseId?: string,
+  pendingTools?: Map<string, PendingToolState>,
+): string {
+  const directToolUseId = input.tool_use_id ?? toolUseId;
+  if (directToolUseId !== undefined && directToolUseId !== null) {
+    const normalizedToolUseId = String(directToolUseId);
+    if (normalizedToolUseId) {
+      return normalizedToolUseId;
+    }
+  }
+
+  if (pendingTools && pendingTools.size === 1) {
+    const pendingTool = pendingTools.keys().next().value;
+    if (pendingTool) {
+      return pendingTool;
+    }
+  }
+
+  return ensureSpanId();
+}
+
 export function registerPromptSubmit(
   state: QueryState,
   input: Record<string, unknown>,
@@ -654,7 +677,7 @@ export function registerPendingTool(
   toolUseId?: string,
 ): void {
   updateSessionId(state, input.session_id ?? input.sessionId);
-  const resolvedToolUseId = String(input.tool_use_id ?? toolUseId ?? ensureSpanId());
+  const resolvedToolUseId = resolveToolUseId(input, toolUseId);
   const toolName = String(input.tool_name ?? "tool");
   const toolInput = input.tool_input;
 
@@ -681,7 +704,11 @@ export function emitCompletedTool(
   toolUseId?: string,
 ): void {
   updateSessionId(state, input.session_id ?? input.sessionId);
-  const resolvedToolUseId = String(input.tool_use_id ?? toolUseId ?? ensureSpanId());
+  const resolvedToolUseId = resolveToolUseId(
+    input,
+    toolUseId,
+    state.pendingTools,
+  );
   const pendingTool =
     state.pendingTools.get(resolvedToolUseId) ?? {
       spanId: ensureSpanId(),
