@@ -1,0 +1,6 @@
+{
+  "summary": "Publish an updated respan-tracing README that explains how to filter non-Respan child spans out of exported traces",
+  "packages": {
+    "respan-tracing": "patch"
+  }
+}

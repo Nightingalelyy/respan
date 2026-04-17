@@ -142,6 +142,8 @@ def my_task():
 
 **This ensures backward compatibility** - existing code continues to work without changes.
 
+**Important:** the auto-added default processor is intentionally unfiltered. If you need to keep non-Respan child spans (for example SQLAlchemy/HTTP spans that inherited trace context) out of Respan storage entirely, do **not** rely on `api_key=...` alone. Initialize without `api_key`, then add a `RespanSpanExporter` manually with a `filter_fn` so those spans are never exported to Respan.
+
 ### Multiple Exporters (Advanced)
 
 For advanced use cases, you can route spans to **multiple destinations** using the `add_processor()` method:
@@ -994,6 +996,53 @@ kai.add_processor(
 )
 # Receives any span where name contains "error"
 ```
+
+#### Filtering non-Respan / UNKNOWN child spans from Respan
+
+If your trace contains auto-instrumented child spans that you do **not** want stored in Respan (for example SQLAlchemy spans), use a manual `RespanSpanExporter` plus an allowlist `filter_fn`.
+
+```python
+from opentelemetry.semconv_ai import SpanAttributes
+from respan_sdk.constants.span_attributes import (
+    GEN_AI_SYSTEM,
+    LLM_REQUEST_TYPE,
+    RESPAN_LOG_TYPE,
+)
+from respan_tracing import RespanTelemetry
+from respan_tracing.exporters import RespanSpanExporter
+
+
+def keep_respan_or_llm_spans(span):
+    attrs = span.attributes or {}
+    return bool(
+        attrs.get(SpanAttributes.TRACELOOP_SPAN_KIND)  # @workflow/@task/@agent/@tool
+        or attrs.get(RESPAN_LOG_TYPE)                  # plugin-enriched Respan spans
+        or attrs.get(LLM_REQUEST_TYPE)                 # OTEL LLM spans
+        or attrs.get(GEN_AI_SYSTEM)                    # OTEL GenAI spans
+    )
+
+
+telemetry = RespanTelemetry(app_name="my-app")  # No api_key here
+
+telemetry.add_processor(
+    exporter=RespanSpanExporter(
+        endpoint="https://api.respan.co/api",
+        api_key="your-key",
+    ),
+    name="production",
+    filter_fn=keep_respan_or_llm_spans,
+)
+
+
+@telemetry.workflow(name="my_pipeline", processors="production")
+def pipeline():
+    ...
+```
+
+**Why use an allowlist instead of only checking `respan.entity.log_type != "unknown"`?**
+- Some non-Respan child spans never get a `respan.entity.log_type` at all, so an allowlist is more reliable than checking for `"unknown"` only.
+- Filtered-out spans are **not exported to Respan**, so they do not appear in the UI **or** in trace/child-span API responses.
+- If you want an even stricter trace, keep only `TRACELOOP_SPAN_KIND` spans to export just the spans created by Respan decorators.
 
 #### Initialization Pattern
 
