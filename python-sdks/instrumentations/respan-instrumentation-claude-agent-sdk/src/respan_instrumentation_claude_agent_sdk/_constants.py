@@ -18,7 +18,6 @@ CLAUDE_AGENT_SDK_OUTPUT_MESSAGES_ATTR = "gen_ai.output.messages"
 CLAUDE_AGENT_SDK_SYSTEM_INSTRUCTIONS_ATTR = "gen_ai.system_instructions"
 CLAUDE_AGENT_SDK_TOOL_DEFINITIONS_ATTR = "gen_ai.tool.definitions"
 CLAUDE_AGENT_SDK_TOOL_CALL_ID_ATTR = "gen_ai.tool.call.id"
-CLAUDE_AGENT_SDK_TOOL_TYPE_ATTR = "gen_ai.tool.type"
 CLAUDE_AGENT_SDK_USAGE_CACHE_CREATION_INPUT_TOKENS_ATTR = (
     "gen_ai.usage.cache_creation_input_tokens"
 )
@@ -27,7 +26,6 @@ CLAUDE_AGENT_SDK_USAGE_CACHE_READ_INPUT_TOKENS_ATTR = (
 )
 CLAUDE_AGENT_SDK_USAGE_INPUT_TOKENS_ATTR = "gen_ai.usage.input_tokens"
 CLAUDE_AGENT_SDK_USAGE_OUTPUT_TOKENS_ATTR = "gen_ai.usage.output_tokens"
-ERROR_TYPE_ATTR = "error.type"
 INPUT_VALUE_ATTR = "input.value"
 OUTPUT_VALUE_ATTR = "output.value"
 
