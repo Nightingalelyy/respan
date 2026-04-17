@@ -1,12 +1,27 @@
-import { context, trace, SpanKind, SpanStatusCode, TraceFlags } from "@opentelemetry/api";
-import { hrTime, hrTimeDuration } from "@opentelemetry/core";
+import { context, trace } from "@opentelemetry/api";
+import { hrTime } from "@opentelemetry/core";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
-import { randomBytes } from "node:crypto";
-import { RespanLogType, RespanSpanAttributes } from "@respan/respan-sdk";
+import {
+  RespanLogType,
+  RespanSpanAttributes,
+  ToolCallSchema,
+} from "@respan/respan-sdk";
+import {
+  buildReadableSpan,
+  ensureSpanId,
+  ensureTraceId,
+  injectSpan,
+} from "@respan/tracing";
 import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
 
 const PACKAGE_VERSION = "1.0.0";
 const RESPAN_LOG_METHOD_TS_TRACING = "ts_tracing";
+const CLAUDE_AGENT_INSTRUMENTATION_NAME = "@respan/instrumentation-claude-agent-sdk";
+const LLM_REQUEST_FUNCTIONS = "llm.request.functions";
+const GEN_AI_COMPLETION_PREFIX = "gen_ai.completion.0";
+const GEN_AI_COMPLETION_ROLE = `${GEN_AI_COMPLETION_PREFIX}.role`;
+const GEN_AI_COMPLETION_CONTENT = `${GEN_AI_COMPLETION_PREFIX}.content`;
+const GEN_AI_COMPLETION_TOOL_CALLS = `${GEN_AI_COMPLETION_PREFIX}.tool_calls`;
 
 export interface PendingToolState {
   spanId: string;
@@ -37,25 +52,7 @@ export interface QueryState {
   toolDefinitions?: Record<string, unknown>[];
   totalCostUsd?: number;
   totalRequestTokens?: number;
-  traceFlags: number;
   traceId: string;
-}
-
-interface BuildSpanOptions {
-  name: string;
-  traceId: string;
-  spanId: string;
-  traceFlags?: number;
-  parentId?: string;
-  startTime: [number, number];
-  endTime: [number, number];
-  attributes: Record<string, unknown>;
-  statusCode?: number;
-  errorMessage?: string;
-}
-
-function randomHex(bytes: number): string {
-  return randomBytes(bytes).toString("hex");
 }
 
 export function createQueryState({
@@ -72,7 +69,7 @@ export function createQueryState({
 
   return {
     agentName: agentName?.trim() || inferAgentName(options) || "claude-agent-sdk",
-    agentSpanId: randomHex(8),
+    agentSpanId: ensureSpanId(),
     inputMessages: normalizeInputMessages(prompt, options),
     outputMessages: [],
     parentSpanId: activeSpanContext?.spanId,
@@ -82,8 +79,7 @@ export function createQueryState({
     statusCode: 200,
     toolCalls: [],
     toolDefinitions: normalizeConfiguredToolDefinitions(options),
-    traceFlags: activeSpanContext?.traceFlags ?? TraceFlags.SAMPLED,
-    traceId: activeSpanContext?.traceId ?? randomHex(16),
+    traceId: ensureTraceId(activeSpanContext?.traceId),
   };
 }
 
@@ -665,25 +661,25 @@ export function registerPendingTool(
   toolUseId?: string,
 ): void {
   updateSessionId(state, input.session_id ?? input.sessionId);
-  const resolvedToolUseId = String(input.tool_use_id ?? toolUseId ?? randomHex(8));
+  const resolvedToolUseId = String(input.tool_use_id ?? toolUseId ?? ensureSpanId());
   const toolName = String(input.tool_name ?? "tool");
   const toolInput = input.tool_input;
 
   state.pendingTools.set(resolvedToolUseId, {
-    spanId: randomHex(8),
+    spanId: ensureSpanId(),
     startTime: hrTime(),
     toolInput,
     toolName,
   });
 
-  addToolCall(state, {
-    id: resolvedToolUseId,
-    type: "function",
-    function: {
-      name: toolName,
-      arguments: safeJson(toolInput ?? {}),
-    },
-  });
+  addToolCall(
+    state,
+    createToolCall({
+      id: resolvedToolUseId,
+      toolName,
+      args: toolInput ?? {},
+    }),
+  );
 }
 
 export function emitCompletedTool(
@@ -692,10 +688,10 @@ export function emitCompletedTool(
   toolUseId?: string,
 ): void {
   updateSessionId(state, input.session_id ?? input.sessionId);
-  const resolvedToolUseId = String(input.tool_use_id ?? toolUseId ?? randomHex(8));
+  const resolvedToolUseId = String(input.tool_use_id ?? toolUseId ?? ensureSpanId());
   const pendingTool =
     state.pendingTools.get(resolvedToolUseId) ?? {
-      spanId: randomHex(8),
+      spanId: ensureSpanId(),
       startTime: hrTime(),
       toolInput: input.tool_input,
       toolName: String(input.tool_name ?? "tool"),
@@ -729,14 +725,13 @@ export function emitCompletedTool(
   }
 
   injectSpan(
-    buildReadableSpan({
+    buildClaudeReadableSpan({
       name: `${toolName}.tool`,
       traceId: state.traceId,
       spanId: pendingTool.spanId,
-      traceFlags: state.traceFlags,
       parentId: state.agentSpanId,
-      startTime: pendingTool.startTime,
-      endTime: hrTime(),
+      startTimeHr: pendingTool.startTime,
+      endTimeHr: hrTime(),
       attributes: attrs,
       statusCode: toolError ? 500 : undefined,
       errorMessage: toolError,
@@ -789,10 +784,15 @@ export function emitAgentSpan(state: QueryState): void {
     attrs[RespanSpanAttributes.RESPAN_SESSION_ID] = state.sessionId;
   }
   if (state.toolDefinitions && state.toolDefinitions.length > 0) {
-    attrs[RespanSpanAttributes.RESPAN_SPAN_TOOLS] = safeJson(state.toolDefinitions);
+    attrs.tools = state.toolDefinitions;
+    attrs[LLM_REQUEST_FUNCTIONS] = safeJson(state.toolDefinitions);
   }
   if (dedupedToolCalls.length > 0) {
-    attrs[RespanSpanAttributes.RESPAN_SPAN_TOOL_CALLS] = safeJson(dedupedToolCalls);
+    attrs.tool_calls = dedupedToolCalls;
+    attrs[GEN_AI_COMPLETION_ROLE] = "assistant";
+    attrs[GEN_AI_COMPLETION_CONTENT] = formattedOutput;
+    attrs[GEN_AI_COMPLETION_TOOL_CALLS] = dedupedToolCalls;
+    addIndexedToolCallAttrs(attrs, dedupedToolCalls);
     attrs.has_tool_calls = true;
     if (dedupedToolCalls.length > 1) {
       attrs.parallel_tool_calls = true;
@@ -800,14 +800,13 @@ export function emitAgentSpan(state: QueryState): void {
   }
 
   injectSpan(
-    buildReadableSpan({
+    buildClaudeReadableSpan({
       name: `${state.agentName}.agent`,
       traceId: state.traceId,
       spanId: state.agentSpanId,
-      traceFlags: state.traceFlags,
       parentId: state.parentSpanId,
-      startTime: state.startTime,
-      endTime: hrTime(),
+      startTimeHr: state.startTime,
+      endTimeHr: hrTime(),
       attributes: attrs,
       statusCode: state.statusCode,
       errorMessage: state.errorMessage,
@@ -863,6 +862,40 @@ function stringifyOutputValue(value: unknown): string {
   return String(value);
 }
 
+function createToolCall({
+  id,
+  toolName,
+  args,
+}: {
+  id: string;
+  toolName: string;
+  args: unknown;
+}): Record<string, unknown> {
+  const parsedToolCall = ToolCallSchema.safeParse({
+    type: "function",
+    id,
+    name: toolName,
+    args: toSerializableValue(args),
+  });
+  if (parsedToolCall.success) {
+    const normalizedToolCall = {
+      ...(parsedToolCall.data as Record<string, unknown>),
+    };
+    delete normalizedToolCall.name;
+    delete normalizedToolCall.args;
+    return normalizedToolCall;
+  }
+
+  return {
+    id,
+    type: "function",
+    function: {
+      name: toolName,
+      arguments: safeJson(args ?? {}),
+    },
+  };
+}
+
 function normalizeToolCall(block: unknown): Record<string, unknown> | null {
   if (!block || typeof block !== "object" || Array.isArray(block)) {
     return null;
@@ -878,18 +911,50 @@ function normalizeToolCall(block: unknown): Record<string, unknown> | null {
     return null;
   }
 
-  return {
+  return createToolCall({
     id: String(record.id ?? record.tool_use_id ?? ""),
-    type: "function",
-    function: {
-      name: toolName,
-      arguments: safeJson(record.input ?? {}),
-    },
-  };
+    toolName,
+    args: record.input ?? {},
+  });
 }
 
 function addToolCall(state: QueryState, toolCall: Record<string, unknown>): void {
   state.toolCalls.push(toolCall);
+}
+
+function addIndexedToolCallAttrs(
+  attrs: Record<string, unknown>,
+  toolCalls: Record<string, unknown>[],
+): void {
+  toolCalls.forEach((toolCall, index) => {
+    const prefix = `${GEN_AI_COMPLETION_TOOL_CALLS}.${index}`;
+    if (typeof toolCall.id === "string" && toolCall.id) {
+      attrs[`${prefix}.id`] = toolCall.id;
+    }
+    if (typeof toolCall.type === "string" && toolCall.type) {
+      attrs[`${prefix}.type`] = toolCall.type;
+    }
+
+    const functionPayload =
+      toolCall.function &&
+      typeof toolCall.function === "object" &&
+      !Array.isArray(toolCall.function)
+        ? (toolCall.function as Record<string, unknown>)
+        : undefined;
+    if (!functionPayload) {
+      return;
+    }
+
+    if (typeof functionPayload.name === "string" && functionPayload.name) {
+      attrs[`${prefix}.function.name`] = functionPayload.name;
+    }
+    if (functionPayload.arguments !== undefined) {
+      attrs[`${prefix}.function.arguments`] =
+        typeof functionPayload.arguments === "string"
+          ? functionPayload.arguments
+          : safeJson(functionPayload.arguments);
+    }
+  });
 }
 
 function dedupeToolDefinitions(
@@ -970,51 +1035,21 @@ function baseAttrs(
   };
 }
 
-function buildReadableSpan(opts: BuildSpanOptions): ReadableSpan {
-  const status =
-    opts.statusCode && opts.statusCode >= 400
-      ? { code: SpanStatusCode.ERROR, message: opts.errorMessage ?? "" }
-      : { code: SpanStatusCode.OK, message: "" };
+function buildClaudeReadableSpan(
+  options: Parameters<typeof buildReadableSpan>[0],
+): ReadableSpan {
+  const span = buildReadableSpan(options) as ReadableSpan & {
+    instrumentationLibrary?: {
+      name: string;
+      version?: string;
+    };
+  };
 
-  return {
-    name: opts.name,
-    kind: SpanKind.INTERNAL,
-    spanContext: () => ({
-      traceId: opts.traceId,
-      spanId: opts.spanId,
-      traceFlags: opts.traceFlags ?? TraceFlags.SAMPLED,
-      isRemote: false,
-    }),
-    parentSpanId: opts.parentId,
-    startTime: opts.startTime,
-    endTime: opts.endTime,
-    duration: hrTimeDuration(opts.startTime, opts.endTime),
-    status,
-    attributes: opts.attributes,
-    links: [],
-    events: [],
-    resource: { attributes: {} } as any,
-    instrumentationLibrary: {
-      name: "@respan/instrumentation-claude-agent-sdk",
-      version: PACKAGE_VERSION,
-    },
-    ended: true,
-    droppedAttributesCount: 0,
-    droppedEventsCount: 0,
-    droppedLinksCount: 0,
-  } as unknown as ReadableSpan;
-}
-
-function injectSpan(span: ReadableSpan): void {
-  const tracerProvider = trace.getTracerProvider() as any;
-  const processor =
-    tracerProvider?.activeSpanProcessor ??
-    tracerProvider?._delegate?.activeSpanProcessor ??
-    tracerProvider?._delegate?._tracerProvider?.activeSpanProcessor;
-
-  if (processor && typeof processor.onEnd === "function") {
-    processor.onEnd(span);
-  }
+  span.instrumentationLibrary = {
+    name: CLAUDE_AGENT_INSTRUMENTATION_NAME,
+    version: PACKAGE_VERSION,
+  };
+  return span;
 }
 
 function safeJson(value: unknown): string {

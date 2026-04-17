@@ -7,7 +7,6 @@ import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 import { RespanOptions, ProcessorConfig } from "../types/clientTypes.js";
 import { MultiProcessorManager } from "../processor/manager.js";
 import { RespanCompositeProcessor } from "../processor/composite.js";
-import { RespanHybridSpanExporter } from "../exporters/respanHybridExporter.js";
 import { 
   getInstrumentations, 
   initInstrumentations, 
@@ -217,17 +216,12 @@ export const startTracing = async (options: RespanOptions) => {
   // Create exporter with enhanced error handling
   const traceExporter =
     exporter ||
-    new RespanHybridSpanExporter({
-      apiKey,
-      baseURL: resolvedBaseURL,
-      headers,
-      otlpExporter: new OTLPTraceExporter({
-        url: exporterUrl,
-        headers: exporterHeaders,
-      }),
+    new OTLPTraceExporter({
+      url: exporterUrl,
+      headers: exporterHeaders,
     });
 
-  console.debug("[Respan Debug] Created Respan trace exporter");
+  console.debug("[Respan Debug] Created OTLP trace exporter");
 
   // Initialize multi-processor manager
   const processorManager = new MultiProcessorManager();
