@@ -804,11 +804,15 @@ export function emitAgentSpan(state: QueryState): void {
     attrs[RespanSpanAttributes.RESPAN_SESSION_ID] = state.sessionId;
   }
   if (state.toolDefinitions && state.toolDefinitions.length > 0) {
-    attrs.tools = state.toolDefinitions;
+    attrs[RespanSpanAttributes.RESPAN_SPAN_TOOLS] = safeJson(
+      state.toolDefinitions,
+    );
     attrs[LLM_REQUEST_FUNCTIONS] = safeJson(state.toolDefinitions);
   }
   if (dedupedToolCalls.length > 0) {
-    attrs.tool_calls = dedupedToolCalls;
+    attrs[RespanSpanAttributes.RESPAN_SPAN_TOOL_CALLS] = safeJson(
+      dedupedToolCalls,
+    );
     attrs[GEN_AI_COMPLETION_ROLE] = "assistant";
     attrs[GEN_AI_COMPLETION_CONTENT] = formattedOutput;
     attrs[GEN_AI_COMPLETION_TOOL_CALLS] = dedupedToolCalls;

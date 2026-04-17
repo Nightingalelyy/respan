@@ -198,13 +198,13 @@ test("instrumentor patches query, merges hooks, and emits tool + agent spans", a
     agentSpan.attributes["respan.sessions.session_identifier"],
     "sess-123",
   );
-  assert.equal(agentSpan.attributes["respan.span.tools"], undefined);
-  assert.deepEqual(agentSpan.attributes.tools, [
+  assert.deepEqual(JSON.parse(agentSpan.attributes["respan.span.tools"]), [
     {
       type: "function",
       function: { name: "get_weather", parameters: { type: "object" } },
     },
   ]);
+  assert.equal(agentSpan.attributes.tools, undefined);
   assert.equal(
     agentSpan.attributes["llm.request.functions"],
     JSON.stringify([
@@ -214,8 +214,7 @@ test("instrumentor patches query, merges hooks, and emits tool + agent spans", a
       },
     ]),
   );
-  assert.equal(agentSpan.attributes["respan.span.tool_calls"], undefined);
-  assert.deepEqual(agentSpan.attributes.tool_calls, [
+  assert.deepEqual(JSON.parse(agentSpan.attributes["respan.span.tool_calls"]), [
     {
       id: "toolu_123",
       type: "function",
@@ -225,6 +224,7 @@ test("instrumentor patches query, merges hooks, and emits tool + agent spans", a
       },
     },
   ]);
+  assert.equal(agentSpan.attributes.tool_calls, undefined);
   assert.equal(agentSpan.attributes["gen_ai.completion.0.role"], "assistant");
   assert.equal(agentSpan.attributes["gen_ai.completion.0.content"], "Tokyo is sunny.");
   assert.deepEqual(agentSpan.attributes["gen_ai.completion.0.tool_calls"], [
@@ -348,7 +348,21 @@ test("instrumentor extracts SDK MCP server tool definitions", async () => {
   );
 
   assert.ok(agentSpan);
-  assert.equal(agentSpan.attributes["respan.span.tools"], undefined);
+  assert.deepEqual(JSON.parse(agentSpan.attributes["respan.span.tools"]), [
+    {
+      type: "function",
+      function: {
+        name: "mcp__demo__get_weather",
+        description: "Get weather",
+        parameters: {
+          type: "object",
+          properties: {
+            city: { type: "string" },
+          },
+        },
+      },
+    },
+  ]);
   assert.equal(
     agentSpan.attributes["llm.request.functions"],
     JSON.stringify([
@@ -367,23 +381,7 @@ test("instrumentor extracts SDK MCP server tool definitions", async () => {
       },
     ]),
   );
-  assert.equal(agentSpan.attributes["respan.span.tool_calls"], undefined);
-  assert.deepEqual(agentSpan.attributes.tools, [
-    {
-      type: "function",
-      function: {
-        name: "mcp__demo__get_weather",
-        description: "Get weather",
-        parameters: {
-          type: "object",
-          properties: {
-            city: { type: "string" },
-          },
-        },
-      },
-    },
-  ]);
-  assert.deepEqual(agentSpan.attributes.tool_calls, [
+  assert.deepEqual(JSON.parse(agentSpan.attributes["respan.span.tool_calls"]), [
     {
       id: "toolu_123",
       type: "function",
@@ -393,6 +391,8 @@ test("instrumentor extracts SDK MCP server tool definitions", async () => {
       },
     },
   ]);
+  assert.equal(agentSpan.attributes.tools, undefined);
+  assert.equal(agentSpan.attributes.tool_calls, undefined);
 });
 
 test("instrumentor normalizes Zod-like MCP server schemas", async () => {
@@ -459,7 +459,23 @@ test("instrumentor normalizes Zod-like MCP server schemas", async () => {
   );
 
   assert.ok(agentSpan);
-  assert.equal(agentSpan.attributes["respan.span.tools"], undefined);
+  assert.deepEqual(JSON.parse(agentSpan.attributes["respan.span.tools"]), [
+    {
+      type: "function",
+      function: {
+        name: "mcp__demo__get_weather",
+        description: "Get weather",
+        parameters: {
+          type: "object",
+          properties: {
+            city: { type: "string" },
+            unit: { type: "string" },
+          },
+          required: ["city"],
+        },
+      },
+    },
+  ]);
   assert.equal(
     agentSpan.attributes["llm.request.functions"],
     JSON.stringify([
@@ -480,21 +496,5 @@ test("instrumentor normalizes Zod-like MCP server schemas", async () => {
       },
     ]),
   );
-  assert.deepEqual(agentSpan.attributes.tools, [
-    {
-      type: "function",
-      function: {
-        name: "mcp__demo__get_weather",
-        description: "Get weather",
-        parameters: {
-          type: "object",
-          properties: {
-            city: { type: "string" },
-            unit: { type: "string" },
-          },
-          required: ["city"],
-        },
-      },
-    },
-  ]);
+  assert.equal(agentSpan.attributes.tools, undefined);
 });
