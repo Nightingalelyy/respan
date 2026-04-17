@@ -1,0 +1,6 @@
+{
+  "summary": "Sync respan-tracing manifest version to the already-published 2.16.4 release without triggering another publish",
+  "packages": {
+    "respan-tracing": "none"
+  }
+}
