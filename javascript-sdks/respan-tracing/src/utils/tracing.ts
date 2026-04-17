@@ -199,8 +199,7 @@ export const startTracing = async (options: RespanOptions) => {
 
   // Prepare exporter URL and configuration
   // Use /v2/traces with OTLP JSON — same format as the Python RespanSpanExporter.
-  const resolvedBaseURL = _resolveBaseURL(baseURL);
-  const exporterUrl = `${resolvedBaseURL}/api/v2/traces`;
+  const exporterUrl = `${_resolveBaseURL(baseURL)}/api/v2/traces`;
   const exporterHeaders = {
     Authorization: `Bearer ${apiKey}`,
     ...headers,
