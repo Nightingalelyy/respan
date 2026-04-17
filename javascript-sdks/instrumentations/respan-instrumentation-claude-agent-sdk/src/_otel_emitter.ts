@@ -636,13 +636,6 @@ function updateUsageFromMessage(
     state.promptCacheCreationTokens = cacheCreationTokens;
   }
 
-  if (promptTokens !== null || completionTokens !== null) {
-    state.totalRequestTokens =
-      (promptTokens ?? 0) +
-      (completionTokens ?? 0);
-    return;
-  }
-
   if (totalTokens !== null) {
     state.totalRequestTokens = totalTokens;
   }

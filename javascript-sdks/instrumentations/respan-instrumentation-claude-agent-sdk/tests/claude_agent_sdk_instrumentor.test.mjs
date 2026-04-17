@@ -190,7 +190,7 @@ test("instrumentor patches query, merges hooks, and emits tool + agent spans", a
   assert.equal(agentSpan.attributes.model, "claude-sonnet-4-5");
   assert.equal(agentSpan.attributes.prompt_tokens, 16);
   assert.equal(agentSpan.attributes.completion_tokens, 7);
-  assert.equal(agentSpan.attributes.total_request_tokens, 23);
+  assert.equal(agentSpan.attributes.total_request_tokens, undefined);
   assert.equal(agentSpan.attributes.prompt_cache_hit_tokens, 2);
   assert.equal(agentSpan.attributes.prompt_cache_creation_tokens, 1);
   assert.equal(agentSpan.attributes.cost, 0.04241955);
