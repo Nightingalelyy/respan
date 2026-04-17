@@ -5,7 +5,12 @@ import sys
 from types import ModuleType, SimpleNamespace
 
 from opentelemetry import trace
-from opentelemetry.semconv_ai import SpanAttributes, TraceloopSpanKindValues
+from opentelemetry.semconv_ai import (
+    LLMRequestTypeValues,
+    SpanAttributes,
+    TraceloopSpanKindValues,
+)
+from respan_tracing.exporters.respan import _prepare_spans_for_export
 
 from respan_instrumentation_claude_agent_sdk import (
     ClaudeAgentSDKInstrumentor,
@@ -19,6 +24,7 @@ from respan_sdk.constants.llm_logging import (
     LogMethodChoices,
 )
 from respan_sdk.constants.span_attributes import (
+    GEN_AI_SYSTEM,
     GEN_AI_TOOL_CALL_ARGUMENTS,
     GEN_AI_TOOL_CALL_RESULT,
     GEN_AI_TOOL_NAME,
@@ -219,6 +225,7 @@ def _make_span(
     span_id: int = 1,
     parent_span_id: int | None = None,
     start_time: int = 10,
+    scope_name: str | None = None,
 ) -> SimpleNamespace:
     attrs = dict(attributes or {})
     span_context = SimpleNamespace(trace_id=trace_id, span_id=span_id)
@@ -233,6 +240,11 @@ def _make_span(
         ),
         start_time=start_time,
         end_time=start_time + 1,
+        instrumentation_scope=(
+            SimpleNamespace(name=scope_name, version="1.0.0")
+            if scope_name is not None
+            else None
+        ),
         get_span_context=lambda: span_context,
     )
 
@@ -668,7 +680,7 @@ def test_enrich_claude_agent_sdk_span_maps_agent_fields():
 
 def test_enrich_claude_agent_sdk_span_maps_tool_fields():
     span = _make_span(
-        name="execute_tool calculator",
+        name="execute_tool mcp__demo__calculator",
         attributes={
             "gen_ai.operation.name": "execute_tool",
             "gen_ai.tool.name": "calculator",
@@ -685,23 +697,137 @@ def test_enrich_claude_agent_sdk_span_maps_tool_fields():
 
     assert span._attributes[RESPAN_LOG_TYPE] == LOG_TYPE_TOOL
     assert span._attributes[SpanAttributes.TRACELOOP_SPAN_KIND] == TraceloopSpanKindValues.TOOL.value
-    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "calculator"
+    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "mcp__demo__calculator"
+    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_PATH] == "mcp__demo__calculator"
     assert json.loads(span._attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT]) == {
         "expression": "120 * 0.15"
     }
     assert json.loads(span._attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == {
         "content": [{"type": "text", "text": "18"}]
     }
-    assert span._attributes["model"] == "claude-sonnet-4-5"
-    assert span._attributes["prompt_tokens"] == 6
-    assert span._attributes["completion_tokens"] == 2
     assert LLM_REQUEST_TYPE not in span._attributes
     assert span._attributes["tools"] == [
-        {"type": "function", "function": {"name": "calculator"}}
+        {"type": "function", "function": {"name": "mcp__demo__calculator"}}
     ]
+    assert span._attributes["span_tools"] == ["mcp__demo__calculator"]
+    assert "model" not in span._attributes
+    assert "prompt_tokens" not in span._attributes
+    assert "completion_tokens" not in span._attributes
+    assert "total_request_tokens" not in span._attributes
+    assert "cost" not in span._attributes
     assert GEN_AI_TOOL_NAME not in span._attributes
     assert GEN_AI_TOOL_CALL_ARGUMENTS not in span._attributes
     assert GEN_AI_TOOL_CALL_RESULT not in span._attributes
+
+
+def test_enrich_claude_agent_sdk_span_overrides_upstream_tool_chat_defaults():
+    span = _make_span(
+        name="execute_tool mcp__demo__get_weather",
+        attributes={
+            "gen_ai.operation.name": "execute_tool",
+            GEN_AI_SYSTEM: "anthropic",
+            "gen_ai.tool.name": "get_weather",
+            "gen_ai.tool.call.arguments": {"city": "Tokyo", "unit": "celsius"},
+            "gen_ai.tool.call.result": {"content": [{"type": "text", "text": "22C"}]},
+            "gen_ai.input.messages": '[{"role":"user","content":"{\\"city\\": \\"Tokyo\\", \\"unit\\": \\"celsius\\"}"}]',
+            "gen_ai.output.messages": '[{"role":"assistant","content":""}]',
+            "gen_ai.prompt.0.role": "user",
+            "gen_ai.prompt.0.content": '{"city": "Tokyo", "unit": "celsius"}',
+            "gen_ai.completion.0.role": "assistant",
+            "gen_ai.completion.0.content": "",
+            RESPAN_LOG_TYPE: LOG_TYPE_CHAT,
+            SpanAttributes.TRACELOOP_SPAN_KIND: LLMRequestTypeValues.CHAT.value,
+            SpanAttributes.TRACELOOP_ENTITY_NAME: "placeholder-chat",
+            SpanAttributes.TRACELOOP_ENTITY_PATH: "placeholder-chat",
+            SpanAttributes.TRACELOOP_ENTITY_INPUT: '[{"role":"user","content":"{\\"city\\": \\"Tokyo\\"}"}]',
+            SpanAttributes.TRACELOOP_ENTITY_OUTPUT: '{"_is_placeholder": true, "content": "", "role": "assistant"}',
+            LLM_REQUEST_TYPE: "chat",
+            "model": "gpt-4",
+            "prompt_tokens": 20,
+            "completion_tokens": 0,
+            "total_request_tokens": 20,
+            "cost": 0.0006,
+        },
+    )
+
+    _processor.enrich_claude_agent_sdk_span(span)
+
+    assert span._attributes[RESPAN_LOG_TYPE] == LOG_TYPE_TOOL
+    assert span._attributes[SpanAttributes.TRACELOOP_SPAN_KIND] == TraceloopSpanKindValues.TOOL.value
+    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "mcp__demo__get_weather"
+    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_PATH] == "mcp__demo__get_weather"
+    assert json.loads(span._attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT]) == {
+        "city": "Tokyo",
+        "unit": "celsius",
+    }
+    assert json.loads(span._attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == {
+        "content": [{"type": "text", "text": "22C"}]
+    }
+    assert span._attributes["tools"] == [
+        {"type": "function", "function": {"name": "mcp__demo__get_weather"}}
+    ]
+    assert "model" not in span._attributes
+    assert "prompt_tokens" not in span._attributes
+    assert "completion_tokens" not in span._attributes
+    assert "total_request_tokens" not in span._attributes
+    assert "cost" not in span._attributes
+    assert GEN_AI_SYSTEM not in span._attributes
+    assert "gen_ai.prompt.0.role" not in span._attributes
+    assert "gen_ai.prompt.0.content" not in span._attributes
+    assert "gen_ai.completion.0.role" not in span._attributes
+    assert "gen_ai.completion.0.content" not in span._attributes
+    assert RESPAN_SPAN_TOOL_CALLS not in span._attributes
+    assert "tool_calls" not in span._attributes
+
+
+def test_enrich_claude_agent_sdk_span_reconciles_tools_with_namespaced_tool_calls():
+    span = _make_span(
+        name="invoke_agent weather_agent",
+        attributes={
+            "gen_ai.operation.name": "invoke_agent",
+            "gen_ai.agent.name": "weather_agent",
+            "gen_ai.system": "anthropic",
+            "gen_ai.input.messages": '[{"role":"user","content":"weather?"}]',
+            "gen_ai.output.messages": json.dumps(
+                [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_123",
+                                "name": "mcp__demo__get_weather",
+                                "input": {"city": "Tokyo"},
+                            }
+                        ],
+                    }
+                ]
+            ),
+            "gen_ai.tool.definitions": json.dumps(
+                [
+                    {"name": "get_weather"},
+                    {"name": "calculator"},
+                ]
+            ),
+        },
+    )
+
+    _processor.enrich_claude_agent_sdk_span(span)
+
+    assert json.loads(span._attributes[RESPAN_SPAN_TOOLS]) == [
+        {"type": "function", "function": {"name": "mcp__demo__get_weather"}},
+        {"type": "function", "function": {"name": "mcp__demo__calculator"}},
+    ]
+    assert json.loads(span._attributes[RESPAN_SPAN_TOOL_CALLS]) == [
+        {
+            "id": "toolu_123",
+            "type": "function",
+            "function": {
+                "name": "mcp__demo__get_weather",
+                "arguments": '{"city": "Tokyo"}',
+            },
+        }
+    ]
 
 
 def test_enrich_claude_agent_sdk_span_leaves_unrelated_spans_untouched():
@@ -719,7 +845,7 @@ def test_span_processor_on_end_merges_pending_tool_calls_into_parent_agent_span(
     processor = _processor.ClaudeAgentSDKSpanProcessor()
 
     tool_span = _make_span(
-        name="execute_tool get_weather",
+        name="execute_tool mcp__demo__get_weather",
         trace_id=55,
         span_id=2,
         parent_span_id=1,
@@ -740,6 +866,7 @@ def test_span_processor_on_end_merges_pending_tool_calls_into_parent_agent_span(
         attributes={
             "gen_ai.operation.name": "invoke_agent",
             "gen_ai.agent.name": "weather_agent",
+            "gen_ai.tool.definitions": '[{"name":"get_weather"}]',
             "gen_ai.output.messages": json.dumps(
                 [
                     {
@@ -748,7 +875,7 @@ def test_span_processor_on_end_merges_pending_tool_calls_into_parent_agent_span(
                             {
                                 "type": "tool_use",
                                 "id": "toolu_123",
-                                "name": "get_weather",
+                                "name": "mcp__demo__get_weather",
                                 "input": {"city": "Tokyo"},
                             }
                         ],
@@ -767,35 +894,35 @@ def test_span_processor_on_end_merges_pending_tool_calls_into_parent_agent_span(
             "id": "toolu_123",
             "type": "function",
             "function": {
-                "name": "get_weather",
+                "name": "mcp__demo__get_weather",
                 "arguments": '{"city": "Tokyo"}',
             },
         }
     ]
+    assert agent_span._attributes["tool_calls"] == [
+        {
+            "id": "toolu_123",
+            "type": "function",
+            "function": {
+                "name": "mcp__demo__get_weather",
+                "arguments": '{"city": "Tokyo"}',
+            },
+        }
+    ]
+    assert agent_span._attributes["tools"] == [
+        {"type": "function", "function": {"name": "mcp__demo__get_weather"}}
+    ]
 
 
-def test_span_processor_on_end_injects_final_chat_child_for_tool_turn(monkeypatch):
+def test_span_processor_on_end_leaves_final_chat_child_to_shared_exporter():
     processor = _processor.ClaudeAgentSDKSpanProcessor()
-    built_span_call: dict[str, object] = {}
-    injected_spans: list[object] = []
-
-    def fake_build_readable_span(name: str, **kwargs):
-        built_span_call["name"] = name
-        built_span_call["kwargs"] = kwargs
-        return SimpleNamespace(name=name, **kwargs)
-
-    monkeypatch.setattr(_processor, "build_readable_span", fake_build_readable_span)
-    monkeypatch.setattr(
-        _processor,
-        "inject_span",
-        lambda span: injected_spans.append(span) or True,
-    )
 
     agent_span = _make_span(
-        name="invoke_agent weather_agent",
+        name="ClaudeAgentSDK.query",
         trace_id=88,
         span_id=7,
         start_time=100,
+        scope_name="openinference.instrumentation.claude_agent_sdk",
         attributes={
             "gen_ai.operation.name": "invoke_agent",
             "gen_ai.agent.name": "weather_agent",
@@ -825,6 +952,7 @@ def test_span_processor_on_end_injects_final_chat_child_for_tool_turn(monkeypatc
     )
 
     processor.on_end(agent_span)
+    agent_span.attributes = agent_span._attributes
 
     assert json.loads(agent_span._attributes[RESPAN_SPAN_TOOL_CALLS]) == [
         {
@@ -836,28 +964,31 @@ def test_span_processor_on_end_injects_final_chat_child_for_tool_turn(monkeypatc
             },
         }
     ]
-    assert built_span_call["name"] == "assistant_message"
+    assert agent_span._attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] == json.dumps(
+        [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_123",
+                        "name": "get_weather",
+                        "input": {"city": "Tokyo"},
+                    }
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Tokyo is sunny."}],
+            },
+        ]
+    )
 
-    child_span_kwargs = built_span_call["kwargs"]
-    child_attrs = child_span_kwargs["attributes"]
-    assert child_span_kwargs["trace_id"] == format(88, "032x")
-    assert child_span_kwargs["parent_id"] == format(7, "016x")
-    assert child_attrs[RESPAN_LOG_TYPE] == LOG_TYPE_CHAT
-    assert child_attrs[LLM_REQUEST_TYPE] == "chat"
-    assert child_attrs[SpanAttributes.TRACELOOP_ENTITY_NAME] == "assistant_message"
-    assert child_attrs[SpanAttributes.TRACELOOP_ENTITY_PATH] == "assistant_message"
-    assert child_attrs["gen_ai.completion.0.role"] == "assistant"
-    assert child_attrs["gen_ai.completion.0.content"] == "Tokyo is sunny."
-    assert child_attrs["gen_ai.request.model"] == "claude-sonnet-4-5"
-    assert child_attrs["gen_ai.system"] == "anthropic"
-    assert json.loads(child_attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT]) == [
-        {"role": "user", "content": "weather?"}
+    prepared_spans = _prepare_spans_for_export(spans=[agent_span])
+    assert [span.name for span in prepared_spans] == [
+        "ClaudeAgentSDK.query",
+        "assistant_message",
     ]
-    assert json.loads(child_attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == {
-        "role": "assistant",
-        "content": [{"type": "text", "text": "Tokyo is sunny."}],
-    }
-    assert injected_spans and injected_spans[0].name == "assistant_message"
 
 
 def test_span_processor_shutdown_clears_pending_calls_and_force_flush_returns_true():
