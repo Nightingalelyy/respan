@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import logging
 import threading
 from typing import Any, Mapping
 
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
-from opentelemetry.semconv_ai import SpanAttributes, TraceloopSpanKindValues
+from opentelemetry.semconv_ai import (
+    LLMRequestTypeValues,
+    SpanAttributes,
+    TraceloopSpanKindValues,
+)
 
 from respan_instrumentation_claude_agent_sdk._constants import (
     CLAUDE_AGENT_SDK_CONVERSATION_ID_ATTR,
@@ -41,12 +46,14 @@ from respan_instrumentation_claude_agent_sdk._constants import (
 )
 from respan_sdk.constants.llm_logging import (
     LOG_TYPE_AGENT,
+    LOG_TYPE_CHAT,
     LOG_TYPE_TOOL,
     LogMethodChoices,
 )
 from respan_sdk.constants.span_attributes import (
     GEN_AI_AGENT_NAME,
     GEN_AI_OPERATION_NAME,
+    GEN_AI_SYSTEM,
     GEN_AI_TOOL_CALL_ARGUMENTS,
     GEN_AI_TOOL_CALL_RESULT,
     GEN_AI_TOOL_NAME,
@@ -60,11 +67,14 @@ from respan_sdk.constants.span_attributes import (
     RESPAN_SPAN_TOOL_CALLS,
     RESPAN_SPAN_TOOLS,
 )
+from respan_tracing.utils.span_factory import build_readable_span, inject_span
 
 logger = logging.getLogger(__name__)
 
 _CLAUDE_AGENT_OPERATION_NAME = "invoke_agent"
 _CLAUDE_TOOL_OPERATION_NAME = "execute_tool"
+_ASSISTANT_MESSAGE_SPAN_NAME = "assistant_message"
+_GEN_AI_PROMPT_PREFIX = "gen_ai.prompt."
 
 
 def _safe_json_loads(value: Any) -> Any:
@@ -414,6 +424,170 @@ def _merge_tool_calls(
     return merged_tool_calls or None
 
 
+def _extract_text_from_content(content: Any) -> str | None:
+    if content is None:
+        return None
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+
+    text_segments: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            text_segments.append(item)
+            continue
+        if not isinstance(item, Mapping):
+            continue
+
+        text_value = item.get("text")
+        if isinstance(text_value, str):
+            text_segments.append(text_value)
+            continue
+
+        content_value = item.get("content")
+        if isinstance(content_value, str):
+            text_segments.append(content_value)
+
+    if not text_segments:
+        return ""
+    return "\n".join(text_segments)
+
+
+def _extract_text_from_message(message: Any) -> str | None:
+    if not isinstance(message, Mapping):
+        return None
+    return _extract_text_from_content(message.get("content"))
+
+
+def _coerce_output_to_completion_message(raw_output_payload: Any) -> dict[str, Any] | None:
+    if isinstance(raw_output_payload, str):
+        return {
+            "role": "assistant",
+            "content": raw_output_payload,
+        }
+
+    if isinstance(raw_output_payload, Mapping):
+        role = raw_output_payload.get("role")
+        content = raw_output_payload.get("content")
+        tool_calls = raw_output_payload.get("tool_calls")
+        if role is not None or content is not None or tool_calls is not None:
+            return dict(raw_output_payload)
+
+    if isinstance(raw_output_payload, list):
+        candidates = [
+            candidate
+            for item in raw_output_payload
+            if (candidate := _coerce_output_to_completion_message(item)) is not None
+        ]
+        if not candidates:
+            return None
+        for candidate in reversed(candidates):
+            candidate_text = _extract_text_from_message(candidate)
+            if candidate_text not in {None, ""}:
+                return candidate
+        return candidates[-1]
+
+    return None
+
+
+def _select_primary_completion_from_attrs(
+    attrs: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    raw_output_payload = _safe_json_loads(
+        attrs.get(SpanAttributes.TRACELOOP_ENTITY_OUTPUT)
+    )
+    return _coerce_output_to_completion_message(raw_output_payload)
+
+
+def _derive_synthetic_span_id(*parts: Any) -> int:
+    digest = hashlib.sha256(
+        "|".join(str(part) for part in parts).encode("utf-8")
+    ).digest()
+    span_id = int.from_bytes(digest[:8], byteorder="big", signed=False)
+    if span_id == 0:
+        return 1
+    return span_id
+
+
+def _build_final_chat_child_span(
+    span: ReadableSpan,
+    attrs: Mapping[str, Any],
+) -> ReadableSpan | None:
+    tool_calls = _extract_existing_tool_calls(attrs)
+    if not tool_calls:
+        return None
+
+    primary_completion_message = _select_primary_completion_from_attrs(attrs)
+    completion_text = _extract_text_from_message(primary_completion_message)
+    if completion_text in {None, ""}:
+        return None
+
+    span_context = span.get_span_context()
+    if span_context is None:
+        return None
+
+    child_attributes: dict[str, Any] = {
+        RESPAN_LOG_TYPE: LOG_TYPE_CHAT,
+        LLM_REQUEST_TYPE: LLMRequestTypeValues.CHAT.value,
+        SpanAttributes.TRACELOOP_ENTITY_NAME: _ASSISTANT_MESSAGE_SPAN_NAME,
+        SpanAttributes.TRACELOOP_ENTITY_PATH: _ASSISTANT_MESSAGE_SPAN_NAME,
+        "gen_ai.completion.0.role": "assistant",
+        "gen_ai.completion.0.content": completion_text,
+        SpanAttributes.TRACELOOP_ENTITY_OUTPUT: json.dumps(
+            primary_completion_message,
+            default=str,
+        ),
+    }
+
+    input_value = attrs.get(SpanAttributes.TRACELOOP_ENTITY_INPUT)
+    if input_value is not None:
+        child_attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT] = input_value
+
+    model = _extract_first(
+        attrs,
+        (
+            LLM_REQUEST_MODEL,
+            RESPAN_OVERRIDE_MODEL_ATTR,
+        ),
+    )
+    if model is not None:
+        child_attributes[LLM_REQUEST_MODEL] = model
+
+    system = attrs.get(GEN_AI_SYSTEM)
+    if system is not None:
+        child_attributes[GEN_AI_SYSTEM] = system
+
+    child_attributes.update({
+        key: value
+        for key, value in attrs.items()
+        if key.startswith(_GEN_AI_PROMPT_PREFIX)
+    })
+
+    child_end_time = getattr(span, "end_time", None)
+    child_start_time = getattr(span, "start_time", None)
+    if child_end_time and child_start_time:
+        child_start_time = max(child_start_time, child_end_time - 1_000_000)
+
+    child_span_id = _derive_synthetic_span_id(
+        span_context.trace_id,
+        span_context.span_id,
+        _ASSISTANT_MESSAGE_SPAN_NAME,
+    )
+    if child_span_id == span_context.span_id:
+        child_span_id = (child_span_id + 1) % (1 << 64) or 1
+
+    return build_readable_span(
+        name=_ASSISTANT_MESSAGE_SPAN_NAME,
+        trace_id=format(span_context.trace_id, "032x"),
+        span_id=format(child_span_id, "016x"),
+        parent_id=format(span_context.span_id, "016x"),
+        start_time_ns=child_start_time,
+        end_time_ns=child_end_time,
+        attributes=child_attributes,
+    )
+
+
 def _get_span_key(span: ReadableSpan) -> tuple[int, int] | None:
     span_context = span.get_span_context()
     if span_context is None:
@@ -651,6 +825,13 @@ class ClaudeAgentSDKSpanProcessor(SpanProcessor):
             )
             updated_attrs[RESPAN_OVERRIDE_TOOL_CALLS_ATTR] = merged_tool_calls
             span._attributes = updated_attrs
+
+            final_chat_child_span = _build_final_chat_child_span(
+                span=span,
+                attrs=updated_attrs,
+            )
+            if final_chat_child_span is not None:
+                inject_span(final_chat_child_span)
         except Exception:
             logger.exception("Failed to enrich Claude Agent SDK span")
 

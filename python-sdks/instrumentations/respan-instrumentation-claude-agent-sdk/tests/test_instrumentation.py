@@ -14,6 +14,7 @@ from respan_instrumentation_claude_agent_sdk import (
 )
 from respan_sdk.constants.llm_logging import (
     LOG_TYPE_AGENT,
+    LOG_TYPE_CHAT,
     LOG_TYPE_TOOL,
     LogMethodChoices,
 )
@@ -771,6 +772,92 @@ def test_span_processor_on_end_merges_pending_tool_calls_into_parent_agent_span(
             },
         }
     ]
+
+
+def test_span_processor_on_end_injects_final_chat_child_for_tool_turn(monkeypatch):
+    processor = _processor.ClaudeAgentSDKSpanProcessor()
+    built_span_call: dict[str, object] = {}
+    injected_spans: list[object] = []
+
+    def fake_build_readable_span(name: str, **kwargs):
+        built_span_call["name"] = name
+        built_span_call["kwargs"] = kwargs
+        return SimpleNamespace(name=name, **kwargs)
+
+    monkeypatch.setattr(_processor, "build_readable_span", fake_build_readable_span)
+    monkeypatch.setattr(
+        _processor,
+        "inject_span",
+        lambda span: injected_spans.append(span) or True,
+    )
+
+    agent_span = _make_span(
+        name="invoke_agent weather_agent",
+        trace_id=88,
+        span_id=7,
+        start_time=100,
+        attributes={
+            "gen_ai.operation.name": "invoke_agent",
+            "gen_ai.agent.name": "weather_agent",
+            "gen_ai.system": "anthropic",
+            "gen_ai.input.messages": '[{"role":"user","content":"weather?"}]',
+            "gen_ai.output.messages": json.dumps(
+                [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_123",
+                                "name": "get_weather",
+                                "input": {"city": "Tokyo"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "Tokyo is sunny."}],
+                    },
+                ]
+            ),
+            "gen_ai.response.model": "claude-sonnet-4-5",
+        },
+    )
+
+    processor.on_end(agent_span)
+
+    assert json.loads(agent_span._attributes[RESPAN_SPAN_TOOL_CALLS]) == [
+        {
+            "id": "toolu_123",
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "arguments": '{"city": "Tokyo"}',
+            },
+        }
+    ]
+    assert built_span_call["name"] == "assistant_message"
+
+    child_span_kwargs = built_span_call["kwargs"]
+    child_attrs = child_span_kwargs["attributes"]
+    assert child_span_kwargs["trace_id"] == format(88, "032x")
+    assert child_span_kwargs["parent_id"] == format(7, "016x")
+    assert child_attrs[RESPAN_LOG_TYPE] == LOG_TYPE_CHAT
+    assert child_attrs[LLM_REQUEST_TYPE] == "chat"
+    assert child_attrs[SpanAttributes.TRACELOOP_ENTITY_NAME] == "assistant_message"
+    assert child_attrs[SpanAttributes.TRACELOOP_ENTITY_PATH] == "assistant_message"
+    assert child_attrs["gen_ai.completion.0.role"] == "assistant"
+    assert child_attrs["gen_ai.completion.0.content"] == "Tokyo is sunny."
+    assert child_attrs["gen_ai.request.model"] == "claude-sonnet-4-5"
+    assert child_attrs["gen_ai.system"] == "anthropic"
+    assert json.loads(child_attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT]) == [
+        {"role": "user", "content": "weather?"}
+    ]
+    assert json.loads(child_attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "Tokyo is sunny."}],
+    }
+    assert injected_spans and injected_spans[0].name == "assistant_message"
 
 
 def test_span_processor_shutdown_clears_pending_calls_and_force_flush_returns_true():
