@@ -914,6 +914,74 @@ def test_span_processor_on_end_merges_pending_tool_calls_into_parent_agent_span(
     ]
 
 
+def test_span_processor_on_end_discards_pending_tool_calls_for_unrelated_parent_span():
+    processor = _processor.ClaudeAgentSDKSpanProcessor()
+
+    tool_span = _make_span(
+        name="execute_tool calculator",
+        trace_id=56,
+        span_id=2,
+        parent_span_id=1,
+        start_time=20,
+        attributes={
+            "gen_ai.operation.name": "execute_tool",
+            "gen_ai.tool.name": "calculator",
+            "gen_ai.tool.call.arguments": {"expression": "2 + 2"},
+        },
+    )
+    parent_span = _make_span(
+        name="POST /chat",
+        trace_id=56,
+        span_id=1,
+        start_time=10,
+        attributes={"http.method": "POST"},
+    )
+
+    processor.on_end(tool_span)
+
+    assert processor._pending_tool_calls_by_parent
+
+    processor.on_end(parent_span)
+
+    assert parent_span._attributes == {"http.method": "POST"}
+    assert processor._pending_tool_calls_by_parent == {}
+
+
+def test_span_processor_on_end_discards_pending_tool_calls_for_tool_parent_span():
+    processor = _processor.ClaudeAgentSDKSpanProcessor()
+
+    child_tool_span = _make_span(
+        name="execute_tool sub_task",
+        trace_id=57,
+        span_id=3,
+        parent_span_id=2,
+        start_time=30,
+        attributes={
+            "gen_ai.operation.name": "execute_tool",
+            "gen_ai.tool.name": "sub_task",
+            "gen_ai.tool.call.arguments": {"step": 1},
+        },
+    )
+    parent_tool_span = _make_span(
+        name="execute_tool workflow_tool",
+        trace_id=57,
+        span_id=2,
+        parent_span_id=1,
+        start_time=20,
+        attributes={
+            "gen_ai.operation.name": "execute_tool",
+            "gen_ai.tool.name": "workflow_tool",
+            "gen_ai.tool.call.arguments": {"step": 0},
+        },
+    )
+
+    processor.on_end(child_tool_span)
+    processor.on_end(parent_tool_span)
+
+    assert (57, 2) not in processor._pending_tool_calls_by_parent
+    assert (57, 1) in processor._pending_tool_calls_by_parent
+
+
 def test_span_processor_on_end_leaves_final_chat_child_to_shared_exporter():
     processor = _processor.ClaudeAgentSDKSpanProcessor()
 

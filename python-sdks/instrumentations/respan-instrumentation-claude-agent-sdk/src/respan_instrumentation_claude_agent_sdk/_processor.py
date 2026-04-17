@@ -456,18 +456,8 @@ def _merge_tool_calls(
     return merged_tool_calls or None
 
 
-def _extract_tool_definition_name(tool_definition: Mapping[str, Any]) -> str | None:
-    function_payload = tool_definition.get("function")
-    if not isinstance(function_payload, Mapping):
-        return None
-    tool_name = function_payload.get("name")
-    if isinstance(tool_name, str) and tool_name:
-        return tool_name
-    return None
-
-
-def _extract_tool_call_name(tool_call: Mapping[str, Any]) -> str | None:
-    function_payload = tool_call.get("function")
+def _extract_function_name(payload: Mapping[str, Any]) -> str | None:
+    function_payload = payload.get("function")
     if not isinstance(function_payload, Mapping):
         return None
     tool_name = function_payload.get("name")
@@ -503,14 +493,14 @@ def _reconcile_tools_with_tool_calls(
         tool_call_name
         for tool_call in tool_calls
         if isinstance(tool_call, Mapping)
-        and (tool_call_name := _extract_tool_call_name(tool_call)) is not None
+        and (tool_call_name := _extract_function_name(tool_call)) is not None
     }
     if not tool_call_names:
         return normalized_tools
 
     inferred_prefixes = set()
     for tool_definition in normalized_tools:
-        tool_name = _extract_tool_definition_name(tool_definition)
+        tool_name = _extract_function_name(tool_definition)
         if not tool_name:
             continue
         for tool_call_name in tool_call_names:
@@ -523,7 +513,7 @@ def _reconcile_tools_with_tool_calls(
 
     reconciled_tools = []
     for tool_definition in normalized_tools:
-        tool_name = _extract_tool_definition_name(tool_definition)
+        tool_name = _extract_function_name(tool_definition)
         if not tool_name:
             reconciled_tools.append(tool_definition)
             continue
@@ -668,7 +658,6 @@ def enrich_claude_agent_sdk_span(span: ReadableSpan) -> None:
             _pop_attrs(attrs, SpanAttributes.TRACELOOP_ENTITY_OUTPUT, RESPAN_OVERRIDE_OUTPUT_ATTR)
         if tool_input is None:
             _pop_attrs(attrs, SpanAttributes.TRACELOOP_ENTITY_INPUT, RESPAN_OVERRIDE_INPUT_ATTR)
-        attrs.pop(LLM_REQUEST_TYPE, None)
     else:
         agent_name = _extract_agent_name(span, attrs)
         input_value, output_value = _extract_input_output(attrs)
@@ -807,13 +796,18 @@ class ClaudeAgentSDKSpanProcessor(SpanProcessor):
 
             attrs = getattr(span, "_attributes", None)
             if not isinstance(attrs, Mapping):
+                self._consume_pending_tool_calls(span)
                 return
 
             if attrs.get(RESPAN_LOG_TYPE) == LOG_TYPE_TOOL:
                 self._store_pending_tool_call(span)
+                # Only agent spans merge queued tool calls into their final attrs.
+                # Drop any child calls queued against non-agent parents on span end.
+                self._consume_pending_tool_calls(span)
                 return
 
             if attrs.get(RESPAN_LOG_TYPE) != LOG_TYPE_AGENT:
+                self._consume_pending_tool_calls(span)
                 return
 
             pending_tool_calls = self._consume_pending_tool_calls(span)
