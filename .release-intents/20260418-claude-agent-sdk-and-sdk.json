@@ -2,6 +2,6 @@
   "summary": "Publish new Claude Agent SDK instrumentation packages for Python and JavaScript",
   "packages": {
     "respan-instrumentation-claude-agent-sdk": "new",
-    "@respan/instrumentation-claude-agent-sdk": "new"
+    "@respan/instrumentation-claude-agent-sdk": "patch"
   }
 }
