@@ -32,7 +32,11 @@ test.after(() => {
   });
 });
 
-function createFakeSdk({ toolFailure = false, toolName = "get_weather" } = {}) {
+function createFakeSdk({
+  toolFailure = false,
+  toolName = "get_weather",
+  resultUsage,
+} = {}) {
   const calls = [];
 
   return {
@@ -113,12 +117,13 @@ function createFakeSdk({ toolFailure = false, toolName = "get_weather" } = {}) {
           session_id: "sess-123",
           result: "Tokyo is sunny.",
           total_cost_usd: 0.04241955,
-          usage: {
-            input_tokens: 19,
-            output_tokens: 7,
-            cache_read_input_tokens: 2,
-            cache_creation_input_tokens: 1,
-          },
+          usage:
+            resultUsage ?? {
+              input_tokens: 19,
+              output_tokens: 7,
+              cache_read_input_tokens: 2,
+              cache_creation_input_tokens: 1,
+            },
         };
       })();
     },
@@ -190,7 +195,7 @@ test("instrumentor patches query, merges hooks, and emits tool + agent spans", a
   assert.equal(agentSpan.attributes.model, "claude-sonnet-4-5");
   assert.equal(agentSpan.attributes.prompt_tokens, 16);
   assert.equal(agentSpan.attributes.completion_tokens, 7);
-  assert.equal(agentSpan.attributes.total_request_tokens, undefined);
+  assert.equal(agentSpan.attributes.total_request_tokens, 26);
   assert.equal(agentSpan.attributes.prompt_cache_hit_tokens, 2);
   assert.equal(agentSpan.attributes.prompt_cache_creation_tokens, 1);
   assert.equal(agentSpan.attributes.cost, 0.04241955);
@@ -295,6 +300,49 @@ test("instrumentor emits errored tool spans for PostToolUseFailure", async () =>
     "Tool execution failed",
   );
   assert.equal(toolSpan.parentSpanId, agentSpan.spanContext().spanId);
+});
+
+test("instrumentor derives total_request_tokens from raw prompt usage details", async () => {
+  captureState.spans = [];
+  const sdk = createFakeSdk({
+    resultUsage: {
+      prompt_tokens: 19,
+      completion_tokens: 7,
+      prompt_tokens_details: {
+        cached_tokens: 2,
+        cache_creation_tokens: 1,
+      },
+    },
+  });
+
+  const instrumentor = new ClaudeAgentSDKInstrumentor({
+    sdkModule: sdk,
+    agentName: "weather_agent",
+  });
+
+  await instrumentor.activate();
+
+  const iterator = await sdk.query({
+    prompt: "What is the weather in Tokyo?",
+    options: {},
+  });
+
+  for await (const _item of iterator) {
+    // Drain the stream so spans are emitted.
+  }
+
+  const agentSpan = captureState.spans.find(
+    (span) => span.attributes["respan.entity.log_type"] === "agent",
+  );
+
+  assert.ok(agentSpan);
+  assert.equal(agentSpan.attributes.prompt_tokens, 16);
+  assert.equal(agentSpan.attributes.completion_tokens, 7);
+  assert.equal(agentSpan.attributes.total_request_tokens, 26);
+  assert.equal(agentSpan.attributes.prompt_cache_hit_tokens, 2);
+  assert.equal(agentSpan.attributes.prompt_cache_creation_tokens, 1);
+
+  instrumentor.deactivate();
 });
 
 test("instrumentor extracts SDK MCP server tool definitions", async () => {

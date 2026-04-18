@@ -436,9 +436,6 @@ export function trackClaudeMessage(state: QueryState, message: unknown): void {
     case "result":
       handleResultMessage(state, record);
       break;
-    case "stream_event":
-      updateSessionId(state, record.session_id ?? record.sessionId);
-      break;
     default:
       break;
   }
@@ -469,9 +466,7 @@ function handleAssistantMessage(state: QueryState, message: Record<string, unkno
   );
 
   const rawContent = payload.content ?? message.content;
-  const content = Array.isArray(rawContent)
-    ? toSerializableValue(rawContent)
-    : toSerializableValue(rawContent);
+  const content = toSerializableValue(rawContent);
   if (hasMeaningfulContent(content)) {
     state.outputMessages.push({
       role: "assistant",
@@ -599,16 +594,38 @@ function updateUsageFromMessage(
     return;
   }
 
+  const promptTokenDetails =
+    usage.prompt_tokens_details &&
+    typeof usage.prompt_tokens_details === "object" &&
+    !Array.isArray(usage.prompt_tokens_details)
+      ? (usage.prompt_tokens_details as Record<string, unknown>)
+      : usage.promptTokensDetails &&
+          typeof usage.promptTokensDetails === "object" &&
+          !Array.isArray(usage.promptTokensDetails)
+        ? (usage.promptTokensDetails as Record<string, unknown>)
+        : undefined;
   const rawPromptTokens = coerceInteger(usage.input_tokens ?? usage.prompt_tokens);
   const completionTokens = coerceInteger(
     usage.output_tokens ?? usage.completion_tokens,
   );
-  const cacheHitTokens = coerceInteger(usage.cache_read_input_tokens);
-  const cacheCreationTokens = coerceInteger(usage.cache_creation_input_tokens);
+  const cacheHitTokens = coerceInteger(
+    usage.cache_read_input_tokens ??
+      promptTokenDetails?.cached_tokens ??
+      promptTokenDetails?.cache_read_tokens,
+  );
+  const cacheCreationTokens = coerceInteger(
+    usage.cache_creation_input_tokens ??
+      promptTokenDetails?.cache_creation_tokens,
+  );
   const totalTokens = coerceInteger(
     usage.total_tokens ??
       usage.totalTokens,
   );
+  const resolvedTotalTokens =
+    totalTokens ??
+    (rawPromptTokens !== null && completionTokens !== null
+      ? rawPromptTokens + completionTokens
+      : null);
   let promptTokens = rawPromptTokens;
 
   if (
@@ -636,8 +653,8 @@ function updateUsageFromMessage(
     state.promptCacheCreationTokens = cacheCreationTokens;
   }
 
-  if (totalTokens !== null) {
-    state.totalRequestTokens = totalTokens;
+  if (resolvedTotalTokens !== null) {
+    state.totalRequestTokens = resolvedTotalTokens;
   }
 }
 
