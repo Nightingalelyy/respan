@@ -20,6 +20,12 @@
     },
     {
       "ecosystem": "javascript",
+      "name": "@respan/instrumentation-claude-agent-sdk",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-claude-agent-sdk",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
       "name": "@respan/instrumentation-openai",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-openai",
       "registry": "npm"
@@ -76,6 +82,12 @@
       "ecosystem": "python",
       "name": "respan-instrumentation-anthropic",
       "path": "python-sdks/instrumentations/respan-instrumentation-anthropic",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-claude-agent-sdk",
+      "path": "python-sdks/instrumentations/respan-instrumentation-claude-agent-sdk",
       "registry": "pypi"
     },
     {
