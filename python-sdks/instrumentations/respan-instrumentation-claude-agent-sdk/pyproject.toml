@@ -1,0 +1,30 @@
+[tool.poetry]
+name = "respan-instrumentation-claude-agent-sdk"
+version = "0.1.0"
+description = "Respan instrumentation plugin for the Claude Agent SDK"
+authors = ["Respan <team@respan.ai>"]
+license = "Apache 2.0"
+readme = "README.md"
+packages = [
+    { include = "respan_instrumentation_claude_agent_sdk", from = "./src" },
+]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.14"
+respan-tracing = "^2.16.1"
+respan-sdk = ">=2.5.0"
+claude-agent-sdk = ">=0.1.58"
+opentelemetry-claude-agent-sdk = ">=0.1.4"
+opentelemetry-semantic-conventions-ai = ">=0.4.1"
+
+[tool.poetry.plugins."respan.instrumentations"]
+claude-agent-sdk = "respan_instrumentation_claude_agent_sdk:ClaudeAgentSDKInstrumentor"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: live network tests (requires API keys)",
+]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
