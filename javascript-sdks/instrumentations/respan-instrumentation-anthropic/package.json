@@ -22,6 +22,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "test": "yarn build && node --test tests/*.test.mjs",
     "publish:package": "yarn npm publish",
     "release": "yarn build && yarn version patch && yarn publish:package"
   },
@@ -31,6 +32,7 @@
     "@opentelemetry/core": "^1.26.0",
     "@opentelemetry/sdk-trace-base": "^1.26.0",
     "@respan/respan-sdk": "^1.1.7",
+    "@respan/tracing": "^1.1.4",
     "@traceloop/ai-semantic-conventions": "^0.13.0"
   },
   "peerDependencies": {
