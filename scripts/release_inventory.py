@@ -158,7 +158,7 @@ def changed_files(base: str, head: str) -> set[str]:
             for path in REPO_ROOT.rglob("*")
             if path.is_file() and ".git" not in path.parts
         }
-    output = git_stdout_or_none("diff", "--name-only", base, head)
+    output = git_stdout_or_none("diff", "--name-only", f"{base}...{head}")
     if output is None:
         return set()
     return {line.strip() for line in output.splitlines() if line.strip()}
