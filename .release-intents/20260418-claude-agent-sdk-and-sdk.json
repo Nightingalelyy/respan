@@ -1,6 +1,6 @@
 {
   "summary": "Patch the Python SDK and publish the new Claude Agent SDK instrumentation package",
   "packages": {
-    "respan-sdk": "patch"
+    "respan-instrumentation-claude-agent-sdk": "new"
   }
 }
