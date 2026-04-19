@@ -39,11 +39,13 @@ export class Respan {
   private _instrumentations: Map<string, RespanInstrumentation> = new Map();
   private _pendingInstrumentations: RespanInstrumentation[];
   private _hasExplicitInstrumentations: boolean;
+  private _disabledInstrumentations: string[];
   private _initialized = false;
 
   constructor(options: RespanOptions = {}) {
     this._pendingInstrumentations = options.instrumentations ?? [];
     this._hasExplicitInstrumentations = options.instrumentations !== undefined;
+    this._disabledInstrumentations = options.disabledInstrumentations ?? [];
 
     // Always disable Traceloop auto-discovery — we use Respan's own
     // instrumentation packages which are auto-discovered in initialize().
@@ -104,6 +106,14 @@ export class Respan {
     ];
 
     for (const { pkg, className } of discoveries) {
+      // Respect user's disabledInstrumentations — match against package name
+      const shortName = pkg.replace('@respan/instrumentation-', '');
+      if (this._disabledInstrumentations.some(d =>
+        d === shortName || d === pkg || d === className
+      )) {
+        continue;
+      }
+
       try {
         const mod = await import(pkg);
         const InstrumentorClass = mod[className];
