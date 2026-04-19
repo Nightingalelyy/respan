@@ -92,8 +92,7 @@ export class Respan {
   private async _autoDiscoverInstrumentations(): Promise<void> {
     const discoveries: Array<{ pkg: string; className: string }> = [
       { pkg: "@respan/instrumentation-openai-agents", className: "OpenAIAgentsInstrumentor" },
-      { pkg: "@respan/instrumentation-vercel", className: "VercelInstrumentor" },
-      { pkg: "@respan/instrumentation-claude-agent-sdk", className: "ClaudeAgentSDKInstrumentor" },
+      { pkg: "@respan/instrumentation-vercel", className: "VercelAIInstrumentor" },
       { pkg: "@respan/instrumentation-anthropic", className: "AnthropicInstrumentor" },
       { pkg: "@respan/instrumentation-openai", className: "OpenAIInstrumentor" },
     ];
