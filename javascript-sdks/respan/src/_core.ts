@@ -38,9 +38,12 @@ export class Respan {
   public readonly telemetry: RespanTelemetry;
   private _instrumentations: Map<string, RespanInstrumentation> = new Map();
   private _pendingInstrumentations: RespanInstrumentation[];
+  private _hasExplicitInstrumentations: boolean;
+  private _initialized = false;
 
   constructor(options: RespanOptions = {}) {
     this._pendingInstrumentations = options.instrumentations ?? [];
+    this._hasExplicitInstrumentations = options.instrumentations !== undefined;
 
     // Always disable Traceloop auto-discovery — we use Respan's own
     // instrumentation packages which are auto-discovered in initialize().
@@ -67,6 +70,9 @@ export class Respan {
    * Must be called (and awaited) before tracing begins.
    */
   async initialize(): Promise<void> {
+    if (this._initialized) return;
+    this._initialized = true;
+
     await this.telemetry.initialize();
 
     // Activate explicit instrumentation plugins
@@ -76,9 +82,9 @@ export class Respan {
     }
 
     // Auto-discover Respan instrumentation packages.
-    // Only runs when no explicit instrumentations were provided —
-    // if user passed their own, they control what's active.
-    if (this._pendingInstrumentations.length === 0) {
+    // Only runs when user did NOT pass instrumentations option at all.
+    // Passing `instrumentations: []` explicitly disables auto-discovery.
+    if (!this._hasExplicitInstrumentations) {
       await this._autoDiscoverInstrumentations();
     }
     this._pendingInstrumentations = [];
