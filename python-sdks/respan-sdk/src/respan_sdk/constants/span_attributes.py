@@ -47,6 +47,9 @@ class RespanSpanAttributes(str, Enum):
     # Metadata
     RESPAN_METADATA = "respan.metadata"
     RESPAN_PROPERTIES = "respan.properties"
+    RESPAN_METADATA_INTERNAL_TRACING_SDK_VERSION = (
+        "respan.metadata._tracing_sdk_version"
+    )
 
     # Prompt & environment
     RESPAN_PROMPT = "respan.prompt"
@@ -91,6 +94,9 @@ RESPAN_TRACE_GROUP_ID = RespanSpanAttributes.RESPAN_TRACE_GROUP_ID.value
 # Metadata (pattern: "respan.metadata.<key>" where key is customizable)
 RESPAN_METADATA = RespanSpanAttributes.RESPAN_METADATA.value
 RESPAN_PROPERTIES = RespanSpanAttributes.RESPAN_PROPERTIES.value
+RESPAN_METADATA_INTERNAL_TRACING_SDK_VERSION = (
+    RespanSpanAttributes.RESPAN_METADATA_INTERNAL_TRACING_SDK_VERSION.value
+)
 
 # Prompt & environment
 RESPAN_PROMPT = RespanSpanAttributes.RESPAN_PROMPT.value
