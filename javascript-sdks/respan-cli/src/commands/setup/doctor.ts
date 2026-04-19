@@ -106,40 +106,40 @@ export default class SetupDoctor extends BaseCommand {
         name: 'Claude Code',
         globalConfigs: ['~/.claude/settings.json'],
         localConfigs: ['.claude/settings.local.json'],
-        globalSkills: ['~/.claude/skills/respan-setup.md'],
-        localSkills: ['.claude/skills/respan-setup.md'],
+        globalSkills: ['~/.claude/skills/respan/SKILL.md', '~/.agents/skills/respan/SKILL.md'],
+        localSkills: ['.claude/skills/respan/SKILL.md', '.agents/skills/respan/SKILL.md'],
       },
       'cursor': {
         binary: 'cursor',
         name: 'Cursor',
         globalConfigs: ['~/.cursor/rules'],
         localConfigs: ['.cursor/rules'],
-        globalSkills: ['~/.cursor/rules/respan-setup.mdc'],
-        localSkills: ['.cursor/rules/respan-setup.mdc'],
+        globalSkills: ['~/.cursor/skills/respan/SKILL.md', '~/.agents/skills/respan/SKILL.md'],
+        localSkills: ['.cursor/skills/respan/SKILL.md', '.agents/skills/respan/SKILL.md'],
       },
       'codex-cli': {
         binary: 'codex',
         name: 'Codex CLI',
         globalConfigs: ['~/.codex/config.toml'],
         localConfigs: ['.codex/respan.json'],
-        globalSkills: ['~/.codex/skills/respan-setup.md'],
-        localSkills: ['.codex/skills/respan-setup.md'],
+        globalSkills: ['~/.codex/skills/respan/SKILL.md', '~/.agents/skills/respan/SKILL.md'],
+        localSkills: ['.codex/skills/respan/SKILL.md', '.agents/skills/respan/SKILL.md'],
       },
       'gemini-cli': {
         binary: 'gemini',
         name: 'Gemini CLI',
         globalConfigs: ['~/.gemini/settings.json'],
         localConfigs: ['.gemini/settings.json'],
-        globalSkills: ['~/.gemini/skills/respan-setup.md'],
-        localSkills: ['.gemini/skills/respan-setup.md'],
+        globalSkills: ['~/.gemini/skills/respan/SKILL.md', '~/.agents/skills/respan/SKILL.md'],
+        localSkills: ['.gemini/skills/respan/SKILL.md', '.agents/skills/respan/SKILL.md'],
       },
       'opencode': {
         binary: 'opencode',
         name: 'OpenCode',
         globalConfigs: ['~/.config/opencode'],
         localConfigs: ['.opencode'],
-        globalSkills: ['~/.config/opencode/skills/respan-setup.md'],
-        localSkills: ['.opencode/skills/respan-setup.md'],
+        globalSkills: ['~/.config/opencode/skills/respan/SKILL.md', '~/.agents/skills/respan/SKILL.md'],
+        localSkills: ['.opencode/skills/respan/SKILL.md', '.agents/skills/respan/SKILL.md'],
       },
     };
 
@@ -233,11 +233,11 @@ export default class SetupDoctor extends BaseCommand {
       const files = fs.readdirSync(globalFetchedDocs);
       this.log(`    ${GREEN}\u2713${RESET} Global: ${DIM}${globalFetchedDocs}${RESET} (${files.length} pages)`);
     }
-    if (
-      (checkLocal && !fs.existsSync(localFetchedDocs)) &&
-      (checkGlobal && !fs.existsSync(globalFetchedDocs))
-    ) {
-      this.log(`    ${DIM}\u2013${RESET} No docs fetched. Run ${DIM}respan setup${RESET} to fetch them.`);
+    if (checkLocal && !fs.existsSync(localFetchedDocs)) {
+      this.log(`    ${DIM}\u2013${RESET} No local docs`);
+    }
+    if (checkGlobal && !fs.existsSync(globalFetchedDocs)) {
+      this.log(`    ${DIM}\u2013${RESET} No global docs`);
     }
     this.log('');
   }
