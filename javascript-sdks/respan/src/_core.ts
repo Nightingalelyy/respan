@@ -42,16 +42,12 @@ export class Respan {
   constructor(options: RespanOptions = {}) {
     this._pendingInstrumentations = options.instrumentations ?? [];
 
-    // When instrumentations are provided, disable auto-discovery by default
-    // to avoid duplicate spans (plugins handle tracing themselves).
-    // Matches Python: is_auto_instrument defaults to False when plugins given.
-    const hasPlugins = this._pendingInstrumentations.length > 0;
+    // Always disable Traceloop auto-discovery — we use Respan's own
+    // instrumentation packages which are auto-discovered in initialize().
     const disabledInstrumentations = options.disabledInstrumentations ??
-      (hasPlugins
-        ? ["openAI", "anthropic", "azureOpenAI", "cohere", "bedrock",
-           "googleVertexAI", "googleAIPlatform", "pinecone", "together",
-           "langChain", "llamaIndex", "chromaDB", "qdrant"] as any
-        : undefined);
+      ["openAI", "anthropic", "azureOpenAI", "cohere", "bedrock",
+       "googleVertexAI", "googleAIPlatform", "pinecone", "together",
+       "langChain", "llamaIndex", "chromaDB", "qdrant"] as any;
 
     // Create RespanTelemetry (the OTEL engine)
     this.telemetry = new RespanTelemetry({
@@ -72,12 +68,46 @@ export class Respan {
   async initialize(): Promise<void> {
     await this.telemetry.initialize();
 
-    // Activate instrumentation plugins
+    // Activate explicit instrumentation plugins
     // (must happen after telemetry init so TracerProvider exists)
     for (const inst of this._pendingInstrumentations) {
       await this._activate(inst);
     }
+
+    // Auto-discover Respan instrumentation packages.
+    // Only runs when no explicit instrumentations were provided —
+    // if user passed their own, they control what's active.
+    if (this._pendingInstrumentations.length === 0) {
+      await this._autoDiscoverInstrumentations();
+    }
     this._pendingInstrumentations = [];
+  }
+
+  /**
+   * Try to dynamically import and activate Respan instrumentation packages.
+   * Each import is wrapped in try/catch — if the underlying SDK isn't installed,
+   * the import fails silently.
+   */
+  private async _autoDiscoverInstrumentations(): Promise<void> {
+    const discoveries: Array<{ pkg: string; className: string }> = [
+      { pkg: "@respan/instrumentation-openai-agents", className: "OpenAIAgentsInstrumentor" },
+      { pkg: "@respan/instrumentation-vercel", className: "VercelInstrumentor" },
+      { pkg: "@respan/instrumentation-claude-agent-sdk", className: "ClaudeAgentSDKInstrumentor" },
+      { pkg: "@respan/instrumentation-anthropic", className: "AnthropicInstrumentor" },
+      { pkg: "@respan/instrumentation-openai", className: "OpenAIInstrumentor" },
+    ];
+
+    for (const { pkg, className } of discoveries) {
+      try {
+        const mod = await import(pkg);
+        const InstrumentorClass = mod[className];
+        if (InstrumentorClass) {
+          await this._activate(new InstrumentorClass());
+        }
+      } catch {
+        // Package not installed — skip silently
+      }
+    }
   }
 
   // ── Re-exported decorator methods from telemetry ──────────────────────
