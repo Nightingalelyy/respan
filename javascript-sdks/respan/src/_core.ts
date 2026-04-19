@@ -44,10 +44,11 @@ export class Respan {
 
     // Always disable Traceloop auto-discovery — we use Respan's own
     // instrumentation packages which are auto-discovered in initialize().
-    const disabledInstrumentations = options.disabledInstrumentations ??
-      ["openAI", "anthropic", "azureOpenAI", "cohere", "bedrock",
+    const traceloopNames = ["openAI", "anthropic", "azureOpenAI", "cohere", "bedrock",
        "googleVertexAI", "googleAIPlatform", "pinecone", "together",
-       "langChain", "llamaIndex", "chromaDB", "qdrant"] as any;
+       "langChain", "llamaIndex", "chromaDB", "qdrant"];
+    const userDisabled = options.disabledInstrumentations ?? [];
+    const disabledInstrumentations = [...new Set([...traceloopNames, ...userDisabled])] as any;
 
     // Create RespanTelemetry (the OTEL engine)
     this.telemetry = new RespanTelemetry({

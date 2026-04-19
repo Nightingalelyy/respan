@@ -130,7 +130,7 @@ export const startTracing = async (options: RespanOptions) => {
       console.debug(
         "[Respan Debug] Using automatic instrumentation discovery"
       );
-      await initInstrumentations(disabledInstrumentations, false); // false = don't show warnings for auto-discovery
+      await initInstrumentations(disabledInstrumentations);
     }
     
     const instrumentationsList = getInstrumentations();
@@ -158,16 +158,6 @@ export const startTracing = async (options: RespanOptions) => {
       "[Respan Debug] Trace content enabled - input/output data will be captured"
     );
   }
-
-  // Set log level using proper DiagLogLevel
-  const diagLogLevel =
-    logLevel === "debug"
-      ? DiagLogLevel.DEBUG
-      : logLevel === "info"
-      ? DiagLogLevel.INFO
-      : logLevel === "warn"
-      ? DiagLogLevel.WARN
-      : DiagLogLevel.ERROR;
 
   // Only surface errors from OTEL internals — suppress info/debug
   // which includes noisy "exported XX spans" messages from exporters

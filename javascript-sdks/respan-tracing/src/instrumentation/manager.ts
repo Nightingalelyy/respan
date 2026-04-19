@@ -76,14 +76,9 @@ export const configureTraceContent = (enabled: boolean): void => {
  */
 export const initInstrumentations = async (
   disabledInstrumentations: InstrumentationName[] = [],
-  showInstallWarnings: boolean = true
 ): Promise<void> => {
   const exceptionLogger = (e: Error) =>
     console.error("Instrumentation error:", e);
-
-
-  // Track instrumentation loading results
-  const loadingResults: InstrumentationLoadResult[] = [];
 
   // Clear the instrumentations array
   instrumentations.length = 0;
@@ -248,16 +243,14 @@ export const initInstrumentations = async (
   // Load each instrumentation
   for (const { name, description, loadFunction } of instrumentationsToLoad) {
     if (disabledInstrumentations.includes(name)) {
-      loadingResults.push({ name, status: "disabled", description });
       continue;
     }
 
     try {
       const instrumentation = await loadFunction();
       instrumentations.push(instrumentation);
-      loadingResults.push({ name, status: "success", description });
-    } catch (error) {
-      loadingResults.push({ name, status: "failed", description, error });
+    } catch {
+      // Package not installed — skip silently
     }
   }
 };
@@ -276,8 +269,6 @@ export const manuallyInitInstrumentations = async (
 
 
   // Track instrumentation loading results (using string for name to allow custom modules)
-  const loadingResults: InstrumentationLoadResult[] = [];
-
   // Clear the instrumentations array
   instrumentations.length = 0;
 
@@ -503,20 +494,17 @@ export const manuallyInitInstrumentations = async (
     processedModuleKeys.add(moduleKey);
 
     if (disabledInstrumentations.includes(name)) {
-      loadingResults.push({ name, status: "disabled", description });
       continue;
     }
 
     if (!module) {
-      loadingResults.push({ name, status: "not-provided", description });
       continue;
     }
 
     try {
       await initFunction(module);
-      loadingResults.push({ name, status: "success", description });
-    } catch (error) {
-      loadingResults.push({ name, status: "failed", description, error });
+    } catch {
+      // failed to init — skip silently
     }
   }
 
@@ -532,18 +520,14 @@ export const manuallyInitInstrumentations = async (
     try {
       if (typeof module.manuallyInstrument === "function") {
         module.manuallyInstrument(module);
-        loadingResults.push({ name: customName, status: "success", description: customDescription });
       } else if (
         typeof module.setTracerProvider === "function" &&
         typeof module.getConfig === "function"
       ) {
         instrumentations.push(module);
-        loadingResults.push({ name: customName, status: "success", description: customDescription });
-      } else {
-        loadingResults.push({ name: customName, status: "failed", description: customDescription, error: "Not a valid instrumentation" });
       }
-    } catch (error) {
-      loadingResults.push({ name: customName, status: "failed", description: customDescription, error });
+    } catch {
+      // failed to init custom module — skip silently
     }
   }
 
