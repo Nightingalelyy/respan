@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import importlib.metadata
 import json
 from collections.abc import Mapping
 from types import SimpleNamespace
@@ -52,7 +53,6 @@ from respan_sdk.constants.otlp_constants import (
     OTEL_STATUS_CODE_KEY,
     OTEL_STATUS_MESSAGE_KEY,
     OTEL_SPAN_PARENT_FIELD,
-    OTEL_SPAN_PARENT_PRIVATE_FIELD,
     OTEL_SPAN_ATTRIBUTES_FIELD,
 )
 
@@ -64,6 +64,7 @@ from respan_sdk.constants.span_attributes import (
     LLM_REQUEST_MODEL,
     LLM_REQUEST_TYPE,
     RESPAN_LOG_TYPE,
+    RESPAN_METADATA_INTERNAL_TRACING_SDK_VERSION,
     RESPAN_SPAN_TOOL_CALLS,
     RESPAN_SPAN_TOOLS,
 )
@@ -71,6 +72,11 @@ from respan_tracing.utils.logging import get_respan_logger, build_spans_export_p
 from respan_tracing.constants.generic_constants import LOGGER_NAME_EXPORTER
 
 logger = get_respan_logger(LOGGER_NAME_EXPORTER)
+
+try:
+    _RESPAN_TRACING_SDK_VERSION = importlib.metadata.version("respan-tracing")
+except importlib.metadata.PackageNotFoundError:
+    _RESPAN_TRACING_SDK_VERSION = ""
 
 
 def _resolve_traces_endpoint(endpoint: str) -> str:
@@ -702,6 +708,13 @@ def _get_enrichment_attrs(span: ReadableSpan) -> Dict[str, Any]:
     """
     attrs = span.attributes or {}
     extra: Dict[str, Any] = {}
+
+    if _RESPAN_TRACING_SDK_VERSION and not attrs.get(
+        RESPAN_METADATA_INTERNAL_TRACING_SDK_VERSION
+    ):
+        extra[RESPAN_METADATA_INTERNAL_TRACING_SDK_VERSION] = (
+            _RESPAN_TRACING_SDK_VERSION
+        )
 
     if attrs.get(GEN_AI_SYSTEM) and not attrs.get(LLM_REQUEST_TYPE):
         extra[LLM_REQUEST_TYPE] = LLMRequestTypeValues.CHAT.value

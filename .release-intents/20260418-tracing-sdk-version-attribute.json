@@ -1,0 +1,7 @@
+{
+  "summary": "Add tracing SDK version metadata to exported spans",
+  "packages": {
+    "respan-sdk": "patch",
+    "respan-tracing": "patch"
+  }
+}

@@ -17,6 +17,7 @@ from respan_sdk.constants.otlp_constants import (
     OTLP_STRING_VALUE,
 )
 from respan_sdk.constants.span_attributes import (
+    RESPAN_METADATA_INTERNAL_TRACING_SDK_VERSION,
     RESPAN_SPAN_TOOL_CALLS,
     RESPAN_SPAN_TOOLS,
 )
@@ -131,6 +132,40 @@ def test_prepare_spans_preserves_parent_relationships():
 
     assert [s.name for s in prepared] == ["chat gpt-4o", "http.request"]
     assert prepared[1].parent.span_id == wrapper_context.span_id
+
+
+def test_get_enrichment_attrs_adds_internal_tracing_sdk_version(monkeypatch):
+    span = _make_span(name="chat gpt-4o", span_id=2004)
+    monkeypatch.setattr(
+        "respan_tracing.exporters.respan._RESPAN_TRACING_SDK_VERSION",
+        "2.16.4-test",
+    )
+
+    extra = _get_enrichment_attrs(span)
+
+    assert (
+        extra[RESPAN_METADATA_INTERNAL_TRACING_SDK_VERSION] == "2.16.4-test"
+    )
+
+
+def test_get_enrichment_attrs_preserves_existing_internal_tracing_sdk_version(
+    monkeypatch,
+):
+    span = _make_span(
+        name="chat gpt-4o",
+        span_id=2005,
+        attributes={
+            RESPAN_METADATA_INTERNAL_TRACING_SDK_VERSION: "existing-version"
+        },
+    )
+    monkeypatch.setattr(
+        "respan_tracing.exporters.respan._RESPAN_TRACING_SDK_VERSION",
+        "2.16.4-test",
+    )
+
+    extra = _get_enrichment_attrs(span)
+
+    assert RESPAN_METADATA_INTERNAL_TRACING_SDK_VERSION not in extra
 
 
 def test_prepare_spans_keeps_all_provider_spans():
