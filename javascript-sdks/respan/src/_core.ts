@@ -119,9 +119,10 @@ export class Respan {
     for (const { pkg, className } of discoveries) {
       // Respect user's disabledInstrumentations — match against package name
       const shortName = pkg.replace('@respan/instrumentation-', '');
-      if (this._disabledInstrumentations.some(d =>
-        d === shortName || d === pkg || d === className
-      )) {
+      if (this._disabledInstrumentations.some(d => {
+        const dl = d.toLowerCase();
+        return dl === shortName.toLowerCase() || dl === pkg.toLowerCase() || dl === className.toLowerCase();
+      })) {
         continue;
       }
 
