@@ -269,13 +269,19 @@ If a Priority 1 framework is found, use its instrumentation. Do NOT also add Pri
 
 **Priority 2 — Direct LLM SDKs** (only if no P1 framework covers this provider):
 
-| Library | Python package | JS/TS package | Respan instrumentation (Python) | Respan instrumentation (JS/TS) | Docs |
-|---------|---------------|---------------|--------------------------------|-------------------------------|------|
-| OpenAI SDK | \`openai\` | \`openai\` | \`respan-instrumentation-openai\` | \`@respan/instrumentation-openai\` | [docs](https://respan.ai/docs/integrations/openai-sdk.md) |
-| Anthropic SDK | \`anthropic\` | \`@anthropic-ai/sdk\` | \`respan-instrumentation-anthropic\` | \`@respan/instrumentation-anthropic\` | [docs](https://respan.ai/docs/integrations/anthropic.md) |
-| Google Gen AI | \`google-genai\` | — | via OpenInference | — | [docs](https://respan.ai/docs/integrations/google-genai.md) |
-| LiteLLM | \`litellm\` | — | via exporter | — | [docs](https://respan.ai/docs/integrations/litellm.md) |
-| Amazon Bedrock | \`boto3\` | — | via OpenInference | — | [docs](https://respan.ai/docs/integrations/aws-bedrock.md) |
+These are **auto-instrumented** — just \`Respan()\` / \`new Respan()\`, no extra packages needed:
+
+| Library | Python package | JS/TS package | Docs |
+|---------|---------------|---------------|------|
+| OpenAI SDK | \`openai\` | \`openai\` | [docs](https://respan.ai/docs/integrations/openai-sdk.md) |
+| Anthropic SDK | \`anthropic\` | \`@anthropic-ai/sdk\` | [docs](https://respan.ai/docs/integrations/anthropic.md) |
+| Azure OpenAI | \`openai\` (azure config) | \`openai\` | [docs](https://respan.ai/docs/integrations/providers/azure.md) |
+| Google Vertex AI | \`google-cloud-aiplatform\` | — | [docs](https://respan.ai/docs/integrations/vertex-ai.md) |
+| AWS Bedrock | \`boto3\` | — | [docs](https://respan.ai/docs/integrations/aws-bedrock.md) |
+| Cohere | \`cohere\` | — | [docs](https://respan.ai/docs/integrations/providers/cohere.md) |
+| Together AI | \`together\` | — | [docs](https://respan.ai/docs/integrations/together-ai.md) |
+
+**Note:** LiteLLM in JS uses the OpenAI-compatible API, so the OpenAI auto-instrument covers it. For Python LiteLLM, see [LiteLLM guide](https://respan.ai/docs/integrations/litellm.md). For Google GenAI (\`@google/genai\`), see [Google GenAI guide](https://respan.ai/docs/integrations/google-genai.md).
 
 **1c. Read the actual code and understand the workflow:**
 
@@ -360,36 +366,50 @@ Wait for user confirmation before proceeding.
 
 ### 3. Implement
 
-**a) Install packages** — run the install command with exact versions.
+**a) Install packages:**
+
+For direct LLM SDKs (Priority 2) — just the core SDK:
+\`\`\`bash
+# Python
+pip install respan-ai
+
+# TypeScript
+npm install @respan/respan
+\`\`\`
+
+For agent frameworks (Priority 1) — also install the instrumentor. Check the docs link in the table above for the exact packages.
 
 **b) Add initialization code** — at the top of the entrypoint, before any LLM client is created:
 
-TypeScript:
+For **direct LLM SDKs** (auto-instrumented):
+\`\`\`python
+# Python
+from respan import Respan
+Respan()
+\`\`\`
 \`\`\`typescript
+// TypeScript
 import { Respan } from "@respan/respan";
-import { OpenAIInstrumentor } from "@respan/instrumentation-openai";
-
-const respan = new Respan({
-  appName: "<project-name>",
-  instrumentations: [new OpenAIInstrumentor()],
-});
+const respan = new Respan();
 await respan.initialize();
 \`\`\`
 
-Python:
+For **agent frameworks** (explicit instrumentor — fetch the docs URL from the table for the exact pattern):
 \`\`\`python
+# Python example (OpenAI Agents)
 from respan import Respan
-from respan_instrumentation_openai import OpenAIInstrumentor
-
-respan = Respan(
-    app_name="<project-name>",
-    instrumentations=[OpenAIInstrumentor()],
-)
+from respan_instrumentation_openai_agents import OpenAIAgentsInstrumentor
+Respan(instrumentations=[OpenAIAgentsInstrumentor()])
+\`\`\`
+\`\`\`typescript
+// TypeScript example (OpenAI Agents)
+import { Respan } from "@respan/respan";
+import { OpenAIAgentsInstrumentor } from "@respan/instrumentation-openai-agents";
+const respan = new Respan({ instrumentations: [new OpenAIAgentsInstrumentor()] });
+await respan.initialize();
 \`\`\`
 
-**c) Add workflow wrappers** — if the user approved them in the plan.
-
-For integration-specific init patterns, fetch the docs URL from the table above.
+**c) Add workflow wrappers** — if the user chose structured traces in the plan.
 
 ### 4. Verify
 
