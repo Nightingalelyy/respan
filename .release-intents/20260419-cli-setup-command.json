@@ -1,5 +1,5 @@
 {
-  "summary": "Add `respan setup` command with interactive wizard, agent skills, demo trace verification, and `respan setup doctor` diagnostics",
+  "summary": "Add `respan setup` command with interactive wizard, agent skills, demo trace verification, `respan setup doctor` diagnostics, and auto-instrument skill updates",
   "packages": {
     "@respan/cli": "minor"
   }

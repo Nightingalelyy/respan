@@ -281,6 +281,8 @@ These are **auto-instrumented** — just \`Respan()\` / \`new Respan()\`, no ext
 | Cohere | \`cohere\` | — | [docs](https://respan.ai/docs/integrations/providers/cohere.md) |
 | Together AI | \`together\` | — | [docs](https://respan.ai/docs/integrations/together-ai.md) |
 
+**Note:** LiteLLM in JS uses the OpenAI-compatible API, so the OpenAI auto-instrument covers it. For Python LiteLLM, see [LiteLLM guide](https://respan.ai/docs/integrations/litellm.md). For Google GenAI (\`@google/genai\`), see [Google GenAI guide](https://respan.ai/docs/integrations/google-genai.md).
+
 **1c. Read the actual code and understand the workflow:**
 
 This is the most important step. Read the entrypoint and all files that make LLM calls. Map out:
