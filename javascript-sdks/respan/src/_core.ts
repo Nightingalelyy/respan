@@ -47,12 +47,14 @@ export class Respan {
     this._hasExplicitInstrumentations = options.instrumentations !== undefined;
     this._disabledInstrumentations = options.disabledInstrumentations ?? [];
 
-    // Disable Traceloop auto-discovery for:
-    // - Frameworks (LangChain, LlamaIndex) — they wrap LLM calls, would cause duplicates
-    // - Vector DBs — not LLM calls
-    // - OpenAI/Anthropic — we use our own @respan/instrumentation-* instead
-    // Keep enabled: azureOpenAI, cohere, bedrock, googleVertexAI, googleAIPlatform, together
-    const alwaysDisabled = [
+    // When explicit instrumentations are provided, disable ALL Traceloop
+    // auto-discovery to avoid duplicates (explicit means exclusive).
+    // When no instrumentations provided, only disable the ones we replace
+    // or don't want (frameworks, vector DBs, OpenAI/Anthropic).
+    const allTraceloop = ["openAI", "anthropic", "azureOpenAI", "cohere", "bedrock",
+      "googleVertexAI", "googleAIPlatform", "pinecone", "together",
+      "langChain", "llamaIndex", "chromaDB", "qdrant"];
+    const partialDisabled = [
       "openAI",       // covered by @respan/instrumentation-openai
       "anthropic",    // covered by @respan/instrumentation-anthropic
       "langChain",    // framework — would duplicate LLM spans
@@ -62,7 +64,8 @@ export class Respan {
       "qdrant",       // vector DB
     ];
     const userDisabled = options.disabledInstrumentations ?? [];
-    const disabledInstrumentations = [...new Set([...alwaysDisabled, ...userDisabled])] as any;
+    const baseDisabled = this._hasExplicitInstrumentations ? allTraceloop : partialDisabled;
+    const disabledInstrumentations = [...new Set([...baseDisabled, ...userDisabled])] as any;
 
     // Create RespanTelemetry (the OTEL engine)
     this.telemetry = new RespanTelemetry({
