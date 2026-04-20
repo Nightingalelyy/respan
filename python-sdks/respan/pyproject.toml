@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "respan-ai"
-version = "3.0.0"
+version = "4.1.0"
 description = "Unified entry point for Respan tracing and instrumentation plugins"
 authors = ["Respan <team@respan.ai>"]
 license = "Apache 2.0"

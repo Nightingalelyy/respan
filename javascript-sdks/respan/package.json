@@ -1,8 +1,8 @@
 {
   "name": "@respan/respan",
   "type": "module",
-  "version": "1.0.0",
-  "description": "Respan unified SDK — entry point with plugin system for OTEL & OpenInference instrumentors",
+  "version": "2.1.0",
+  "description": "Respan unified SDK \u2014 entry point with plugin system for OTEL & OpenInference instrumentors",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "author": "Respan <team@respan.ai>",
