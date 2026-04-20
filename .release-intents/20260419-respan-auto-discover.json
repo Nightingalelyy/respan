@@ -2,6 +2,7 @@
   "summary": "Auto-discover Respan instrumentation packages instead of Traceloop auto-discovery",
   "packages": {
     "@respan/respan": "minor",
-    "@respan/tracing": "patch"
+    "@respan/tracing": "patch",
+    "respan-ai": "minor"
   }
 }
