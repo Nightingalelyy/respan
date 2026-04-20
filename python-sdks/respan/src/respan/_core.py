@@ -92,12 +92,11 @@ class Respan:
         if environment:
             default_attributes["environment"] = environment
 
-        # Explicit plugin pattern: is_auto_instrument defaults to False.
-        # Users must pass instrumentations=[...] for SDK-specific tracing.
-        # Set is_auto_instrument=True to enable respan-tracing's built-in
-        # auto-instrumentation (OpenAI, Anthropic, etc.) alongside plugins.
+        # When no explicit instrumentations provided, auto-instrument LLM SDKs.
+        # When instrumentations=[...] is passed, disable auto-instrumentation
+        # to avoid duplicate spans (plugins handle tracing themselves).
         if is_auto_instrument is None:
-            is_auto_instrument = False
+            is_auto_instrument = instrumentations is None
 
         # 1. OTEL TracerProvider + optional auto-instrumentation
         self.telemetry = RespanTelemetry(
