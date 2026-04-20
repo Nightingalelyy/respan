@@ -30,9 +30,7 @@
     "@respan/respan-sdk": "^1.0.0",
     "@respan/tracing": "^1.0.0",
     "@respan/instrumentation-openai": "^1.0.0",
-    "@respan/instrumentation-anthropic": "^1.0.0",
-    "@respan/instrumentation-openai-agents": "^1.0.0",
-    "@respan/instrumentation-vercel": "^1.0.0"
+    "@respan/instrumentation-anthropic": "^1.0.0"
   },
   "devDependencies": {
     "@types/node": "^24.2.1",

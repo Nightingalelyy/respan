@@ -98,11 +98,13 @@ export class Respan {
    * the import fails silently.
    */
   private async _autoDiscoverInstrumentations(): Promise<void> {
+    // Only auto-discover direct LLM SDK instrumentors.
+    // Framework instrumentors (OpenAI Agents, Vercel AI, Claude Agent SDK)
+    // are NOT auto-discovered to avoid duplicate spans — they already
+    // capture LLM calls internally. Users add them explicitly.
     const discoveries: Array<{ pkg: string; className: string }> = [
-      { pkg: "@respan/instrumentation-openai-agents", className: "OpenAIAgentsInstrumentor" },
-      { pkg: "@respan/instrumentation-vercel", className: "VercelAIInstrumentor" },
-      { pkg: "@respan/instrumentation-anthropic", className: "AnthropicInstrumentor" },
       { pkg: "@respan/instrumentation-openai", className: "OpenAIInstrumentor" },
+      { pkg: "@respan/instrumentation-anthropic", className: "AnthropicInstrumentor" },
     ];
 
     for (const { pkg, className } of discoveries) {
