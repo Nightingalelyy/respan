@@ -514,9 +514,6 @@ export const manuallyInitInstrumentations = async (
       continue; // Skip already processed or null modules
     }
 
-    const customName = moduleKey;
-    const customDescription = `Custom ${moduleKey} instrumentation`;
-
     try {
       if (typeof module.manuallyInstrument === "function") {
         module.manuallyInstrument(module);
