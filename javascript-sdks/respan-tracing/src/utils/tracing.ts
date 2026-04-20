@@ -130,7 +130,7 @@ export const startTracing = async (options: RespanOptions) => {
       console.debug(
         "[Respan Debug] Using automatic instrumentation discovery"
       );
-      await initInstrumentations(disabledInstrumentations, false); // false = don't show warnings for auto-discovery
+      await initInstrumentations(disabledInstrumentations);
     }
     
     const instrumentationsList = getInstrumentations();
@@ -159,30 +159,17 @@ export const startTracing = async (options: RespanOptions) => {
     );
   }
 
-  // Set log level using proper DiagLogLevel
-  const diagLogLevel =
-    logLevel === "debug"
-      ? DiagLogLevel.DEBUG
-      : logLevel === "info"
-      ? DiagLogLevel.INFO
-      : logLevel === "warn"
-      ? DiagLogLevel.WARN
-      : DiagLogLevel.ERROR;
-
-  console.debug(
-    `[Respan Debug] Setting OpenTelemetry diagnostic log level to: ${logLevel}`
-  );
-
+  // Only surface errors from OTEL internals — suppress info/debug
+  // which includes noisy "exported XX spans" messages from exporters
   diag.setLogger(
     {
-      error: (...args) => console.error("[Respan OpenTelemetry]", ...args),
-      warn: (...args) => console.warn("[Respan OpenTelemetry]", ...args),
-      info: (...args) => console.info("[Respan OpenTelemetry]", ...args),
-      debug: (...args) => console.debug("[Respan OpenTelemetry]", ...args),
-      verbose: (...args) =>
-        console.debug("[Respan OpenTelemetry Verbose]", ...args),
+      error: (...args) => console.error("[Respan]", ...args),
+      warn: () => {},
+      info: () => {},
+      debug: () => {},
+      verbose: () => {},
     },
-    diagLogLevel
+    DiagLogLevel.ERROR
   );
 
   // Create resource with custom attributes

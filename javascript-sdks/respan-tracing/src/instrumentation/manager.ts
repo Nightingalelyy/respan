@@ -59,10 +59,6 @@ export const getInstrumentationInstance = (name: InstrumentationName): any => {
 export const configureTraceContent = (enabled: boolean): void => {
   const traceContent = enabled;
   
-  console.debug(
-    `[Respan Debug] Configuring trace content: ${enabled ? 'enabled' : 'disabled'}`
-  );
-
   openAIInstrumentation?.setConfig?.({ traceContent });
   anthropicInstrumentation?.setConfig?.({ traceContent });
   azureOpenAIInstrumentation?.setConfig?.({ traceContent });
@@ -80,17 +76,9 @@ export const configureTraceContent = (enabled: boolean): void => {
  */
 export const initInstrumentations = async (
   disabledInstrumentations: InstrumentationName[] = [],
-  showInstallWarnings: boolean = true
 ): Promise<void> => {
   const exceptionLogger = (e: Error) =>
     console.error("Instrumentation error:", e);
-
-  console.info(
-    "[Respan] Initializing automatic instrumentation discovery..."
-  );
-
-  // Track instrumentation loading results
-  const loadingResults: InstrumentationLoadResult[] = [];
 
   // Clear the instrumentations array
   instrumentations.length = 0;
@@ -255,66 +243,15 @@ export const initInstrumentations = async (
   // Load each instrumentation
   for (const { name, description, loadFunction } of instrumentationsToLoad) {
     if (disabledInstrumentations.includes(name)) {
-      loadingResults.push({ name, status: "disabled", description });
-      console.debug(
-        `[Respan Debug] Skipping ${description} (disabled by configuration)`
-      );
       continue;
     }
 
     try {
-      console.debug(`[Respan Debug] Attempting to load ${description}...`);
       const instrumentation = await loadFunction();
       instrumentations.push(instrumentation);
-      loadingResults.push({ name, status: "success", description });
-      console.debug(`[Respan Debug] Successfully loaded ${description}`);
-    } catch (error) {
-      loadingResults.push({ name, status: "failed", description, error });
-
-      // Provide installation instructions for failed instrumentations (only if showInstallWarnings is true)
-      if (showInstallWarnings) {
-        const info = INSTRUMENTATION_INFO[name];
-        if (info) {
-          console.info(
-            `[Respan] ${description} is not available. To enable it, install the required package:\n   ${info.installCommand}`
-          );
-        }
-      }
-      console.debug(`[Respan Debug] Failed to load ${description}:`, error);
+    } catch {
+      // Package not installed — skip silently
     }
-  }
-
-  // Print summary
-  const successful = loadingResults.filter((r) => r.status === "success");
-  const failed = loadingResults.filter((r) => r.status === "failed");
-  const disabled = loadingResults.filter((r) => r.status === "disabled");
-
-  console.info(
-    `[Respan] Instrumentation loading complete: ${successful.length} loaded, ${failed.length} failed, ${disabled.length} disabled`
-  );
-
-  if (successful.length > 0) {
-    console.info(
-      `[Respan] Successfully loaded: ${successful
-        .map((r) => r.name)
-        .join(", ")}`
-    );
-  }
-
-  if (disabled.length > 0) {
-    console.info(
-      `[Respan] Disabled instrumentations: ${disabled
-        .map((r) => r.name)
-        .join(", ")}`
-    );
-  }
-
-  if (failed.length > 0) {
-    console.debug(
-      `[Respan Debug] Failed to load: ${failed
-        .map((r) => r.name)
-        .join(", ")}`
-    );
   }
 };
 
@@ -330,17 +267,8 @@ export const manuallyInitInstrumentations = async (
   const exceptionLogger = (e: Error) =>
     console.error("Instrumentation error:", e);
 
-  console.info(
-    "[Respan] Initializing manual instrumentation with provided modules..."
-  );
-  console.debug(
-    "[Respan Debug] Provided modules:",
-    Object.keys(instrumentModules)
-  );
 
   // Track instrumentation loading results (using string for name to allow custom modules)
-  const loadingResults: InstrumentationLoadResult[] = [];
-
   // Clear the instrumentations array
   instrumentations.length = 0;
 
@@ -566,42 +494,17 @@ export const manuallyInitInstrumentations = async (
     processedModuleKeys.add(moduleKey);
 
     if (disabledInstrumentations.includes(name)) {
-      loadingResults.push({ name, status: "disabled", description });
-      console.debug(
-        `[Respan Debug] Skipping ${description} (disabled by configuration)`
-      );
       continue;
     }
 
     if (!module) {
-      loadingResults.push({ name, status: "not-provided", description });
-      console.debug(`[Respan Debug] No module provided for ${description}`);
       continue;
     }
 
     try {
-      console.debug(
-        `[Respan Debug] Attempting to manually initialize ${description}...`
-      );
       await initFunction(module);
-      loadingResults.push({ name, status: "success", description });
-      console.debug(
-        `[Respan Debug] Successfully initialized ${description}`
-      );
-    } catch (error) {
-      loadingResults.push({ name, status: "failed", description, error });
-
-      // Provide installation instructions for failed instrumentations (always show for manual instrumentation)
-      const info = INSTRUMENTATION_INFO[name];
-      if (info) {
-        console.info(
-          `[Respan] ${description} failed to initialize. Make sure you have the required package installed:\n   ${info.installCommand}`
-        );
-      }
-      console.debug(
-        `[Respan Debug] Failed to initialize ${description}:`,
-        error
-      );
+    } catch {
+      // failed to init — skip silently
     }
   }
 
@@ -611,112 +514,20 @@ export const manuallyInitInstrumentations = async (
       continue; // Skip already processed or null modules
     }
 
-    const customName = moduleKey; // Use the actual module key name
-    const customDescription = `Custom ${moduleKey} instrumentation`;
-
-    console.debug(
-      `[Respan Debug] Found custom module: ${moduleKey}, attempting generic instrumentation...`
-    );
-
     try {
-      // Generic approach: try to call manuallyInstrument if it exists
       if (typeof module.manuallyInstrument === "function") {
-        console.debug(
-          `[Respan Debug] Attempting generic manual instrumentation for ${customDescription}...`
-        );
         module.manuallyInstrument(module);
-        loadingResults.push({
-          name: customName,
-          status: "success",
-          description: customDescription,
-        });
-        console.debug(
-          `[Respan Debug] Successfully initialized ${customDescription}`
-        );
-      } else {
-        // Check if it's a valid instrumentation instance (has required OpenTelemetry methods)
-        if (
-          typeof module.setTracerProvider === "function" &&
-          typeof module.getConfig === "function"
-        ) {
-          console.debug(
-            `[Respan Debug] Module ${moduleKey} appears to be an instrumentation instance, adding it...`
-          );
-          instrumentations.push(module);
-          loadingResults.push({
-            name: customName,
-            status: "success",
-            description: customDescription,
-          });
-          console.debug(
-            `[Respan Debug] Successfully added ${customDescription} as instrumentation instance`
-          );
-        } else {
-          // Not a valid instrumentation, skip it with a helpful message
-          console.debug(
-            `[Respan Debug] Module ${moduleKey} is not a valid OpenTelemetry instrumentation (missing required methods)`
-          );
-          loadingResults.push({
-            name: customName,
-            status: "failed",
-            description: customDescription,
-            error: "Not a valid instrumentation",
-          });
-          console.info(
-            `[Respan] Custom module '${moduleKey}' is not a valid OpenTelemetry instrumentation. It should either have a manuallyInstrument() method or be an Instrumentation instance.`
-          );
-        }
+      } else if (
+        typeof module.setTracerProvider === "function" &&
+        typeof module.getConfig === "function"
+      ) {
+        instrumentations.push(module);
       }
-    } catch (error) {
-      loadingResults.push({
-        name: customName,
-        status: "failed",
-        description: customDescription,
-        error,
-      });
-      console.info(
-        `[Respan] Failed to initialize custom module '${moduleKey}'. Make sure it's a valid OpenTelemetry instrumentation.`
-      );
-      console.debug(
-        `[Respan Debug] Failed to initialize ${customDescription}:`,
-        error
-      );
+    } catch {
+      // failed to init custom module — skip silently
     }
   }
 
-  // Print summary
-  const successful = loadingResults.filter((r) => r.status === "success");
-  const failed = loadingResults.filter((r) => r.status === "failed");
-  const disabled = loadingResults.filter((r) => r.status === "disabled");
-  const notProvided = loadingResults.filter((r) => r.status === "not-provided");
-
-  console.info(
-    `[Respan] Manual instrumentation complete: ${successful.length} initialized, ${failed.length} failed, ${disabled.length} disabled, ${notProvided.length} not provided`
-  );
-
-  if (successful.length > 0) {
-    console.info(
-      `[Respan] Successfully initialized: ${successful
-        .map((r) => r.name)
-        .join(", ")}`
-    );
-  }
-
-  if (disabled.length > 0) {
-    console.info(
-      `[Respan] Disabled instrumentations: ${disabled
-        .map((r) => r.name)
-        .join(", ")}`
-    );
-  }
-
-  if (failed.length > 0) {
-    console.debug(
-      `[Respan Debug] Failed to initialize: ${failed
-        .map((r) => r.name)
-        .join(", ")}`
-    );
-  }
 };
 
 /**
@@ -726,6 +537,5 @@ export const enableInstrumentation = async (name: string): Promise<void> => {
   const instrumentation = await loadInstrumentation(name);
   if (instrumentation) {
     instrumentations.push(instrumentation);
-    console.log(`Enabled ${name} instrumentation`);
   }
 }; 

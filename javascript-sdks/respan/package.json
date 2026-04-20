@@ -30,6 +30,10 @@
     "@respan/respan-sdk": "^1.0.0",
     "@respan/tracing": "^1.0.0"
   },
+  "optionalDependencies": {
+    "@respan/instrumentation-openai": "^1.0.0",
+    "@respan/instrumentation-anthropic": "^1.0.0"
+  },
   "devDependencies": {
     "@types/node": "^24.2.1",
     "typescript": "^5.7.3"

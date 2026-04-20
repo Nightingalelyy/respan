@@ -38,20 +38,34 @@ export class Respan {
   public readonly telemetry: RespanTelemetry;
   private _instrumentations: Map<string, RespanInstrumentation> = new Map();
   private _pendingInstrumentations: RespanInstrumentation[];
+  private _hasExplicitInstrumentations: boolean;
+  private _disabledInstrumentations: string[];
+  private _initialized = false;
 
   constructor(options: RespanOptions = {}) {
     this._pendingInstrumentations = options.instrumentations ?? [];
+    this._hasExplicitInstrumentations = options.instrumentations !== undefined;
+    this._disabledInstrumentations = options.disabledInstrumentations ?? [];
 
-    // When instrumentations are provided, disable auto-discovery by default
-    // to avoid duplicate spans (plugins handle tracing themselves).
-    // Matches Python: is_auto_instrument defaults to False when plugins given.
-    const hasPlugins = this._pendingInstrumentations.length > 0;
-    const disabledInstrumentations = options.disabledInstrumentations ??
-      (hasPlugins
-        ? ["openAI", "anthropic", "azureOpenAI", "cohere", "bedrock",
-           "googleVertexAI", "googleAIPlatform", "pinecone", "together",
-           "langChain", "llamaIndex", "chromaDB", "qdrant"] as any
-        : undefined);
+    // When explicit instrumentations are provided, disable ALL Traceloop
+    // auto-discovery to avoid duplicates (explicit means exclusive).
+    // When no instrumentations provided, only disable the ones we replace
+    // or don't want (frameworks, vector DBs, OpenAI/Anthropic).
+    const allTraceloop = ["openAI", "anthropic", "azureOpenAI", "cohere", "bedrock",
+      "googleVertexAI", "googleAIPlatform", "pinecone", "together",
+      "langChain", "llamaIndex", "chromaDB", "qdrant"];
+    const partialDisabled = [
+      "openAI",       // covered by @respan/instrumentation-openai
+      "anthropic",    // covered by @respan/instrumentation-anthropic
+      "langChain",    // framework — would duplicate LLM spans
+      "llamaIndex",   // framework — would duplicate LLM spans
+      "pinecone",     // vector DB
+      "chromaDB",     // vector DB
+      "qdrant",       // vector DB
+    ];
+    const userDisabled = options.disabledInstrumentations ?? [];
+    const baseDisabled = this._hasExplicitInstrumentations ? allTraceloop : partialDisabled;
+    const disabledInstrumentations = [...new Set([...baseDisabled, ...userDisabled])] as any;
 
     // Create RespanTelemetry (the OTEL engine)
     this.telemetry = new RespanTelemetry({
@@ -70,14 +84,61 @@ export class Respan {
    * Must be called (and awaited) before tracing begins.
    */
   async initialize(): Promise<void> {
+    if (this._initialized) return;
+    this._initialized = true;
+
     await this.telemetry.initialize();
 
-    // Activate instrumentation plugins
+    // Activate explicit instrumentation plugins
     // (must happen after telemetry init so TracerProvider exists)
     for (const inst of this._pendingInstrumentations) {
       await this._activate(inst);
     }
+
+    // Auto-discover Respan instrumentation packages.
+    // Only runs when user did NOT pass instrumentations option at all.
+    // Passing `instrumentations: []` explicitly disables auto-discovery.
+    if (!this._hasExplicitInstrumentations) {
+      await this._autoDiscoverInstrumentations();
+    }
     this._pendingInstrumentations = [];
+  }
+
+  /**
+   * Try to dynamically import and activate Respan instrumentation packages.
+   * Each import is wrapped in try/catch — if the underlying SDK isn't installed,
+   * the import fails silently.
+   */
+  private async _autoDiscoverInstrumentations(): Promise<void> {
+    // Only auto-discover direct LLM SDK instrumentors.
+    // Framework instrumentors (OpenAI Agents, Vercel AI, Claude Agent SDK)
+    // are NOT auto-discovered to avoid duplicate spans — they already
+    // capture LLM calls internally. Users add them explicitly.
+    const discoveries: Array<{ pkg: string; className: string }> = [
+      { pkg: "@respan/instrumentation-openai", className: "OpenAIInstrumentor" },
+      { pkg: "@respan/instrumentation-anthropic", className: "AnthropicInstrumentor" },
+    ];
+
+    for (const { pkg, className } of discoveries) {
+      // Respect user's disabledInstrumentations — match against package name
+      const shortName = pkg.replace('@respan/instrumentation-', '');
+      if (this._disabledInstrumentations.some(d => {
+        const dl = d.toLowerCase();
+        return dl === shortName.toLowerCase() || dl === pkg.toLowerCase() || dl === className.toLowerCase();
+      })) {
+        continue;
+      }
+
+      try {
+        const mod = await import(pkg);
+        const InstrumentorClass = mod[className];
+        if (InstrumentorClass) {
+          await this._activate(new InstrumentorClass());
+        }
+      } catch {
+        // Package not installed — skip silently
+      }
+    }
   }
 
   // ── Re-exported decorator methods from telemetry ──────────────────────

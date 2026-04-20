@@ -2,193 +2,113 @@ import { Instrumentation } from "@opentelemetry/instrumentation";
 import { INSTRUMENTATION_INFO } from "../types/index.js";
 
 /**
- * Dynamic instrumentation loading with enhanced logging and installation hints
+ * Dynamic instrumentation loading — silently loads available instrumentations.
  */
 export const loadInstrumentation = async (
   name: string
 ): Promise<Instrumentation | null> => {
-  console.debug(
-    `[Respan Debug] Attempting to load instrumentation: ${name}`
-  );
-
   const info = INSTRUMENTATION_INFO[name];
   if (!info) {
-    console.warn(`[Respan] Unknown instrumentation: ${name}`);
     return null;
   }
 
   try {
-    console.debug(`[Respan Debug] Loading ${info.description}...`);
-
     switch (name) {
-      case "openAI":
+      case "openAI": {
         const { OpenAIInstrumentation } = await import(
           "@traceloop/instrumentation-openai"
         );
-        console.debug(
-          `[Respan Debug] Successfully imported ${info.description}`
-        );
-        return new OpenAIInstrumentation({
-          exceptionLogger: (e: Error) =>
-            console.error("OpenAI instrumentation error:", e),
-        });
+        return new OpenAIInstrumentation({});
+      }
 
-      case "anthropic":
+      case "anthropic": {
         const { AnthropicInstrumentation } = await import(
           "@traceloop/instrumentation-anthropic"
         );
-        console.debug(
-          `[Respan Debug] Successfully imported ${info.description}`
-        );
-        return new AnthropicInstrumentation({
-          exceptionLogger: (e: Error) =>
-            console.error("Anthropic instrumentation error:", e),
-        });
+        return new AnthropicInstrumentation({});
+      }
 
-      case "azureOpenAI":
+      case "azureOpenAI": {
         const { AzureOpenAIInstrumentation } = await import(
           "@traceloop/instrumentation-azure"
         );
-        console.debug(
-          `[Respan Debug] Successfully imported ${info.description}`
-        );
-        return new AzureOpenAIInstrumentation({
-          exceptionLogger: (e: Error) =>
-            console.error("Azure instrumentation error:", e),
-        });
+        return new AzureOpenAIInstrumentation({});
+      }
 
-      case "bedrock":
+      case "bedrock": {
         const { BedrockInstrumentation } = await import(
           "@traceloop/instrumentation-bedrock"
         );
-        console.debug(
-          `[Respan Debug] Successfully imported ${info.description}`
-        );
-        return new BedrockInstrumentation({
-          exceptionLogger: (e: Error) =>
-            console.error("Bedrock instrumentation error:", e),
-        });
+        return new BedrockInstrumentation({});
+      }
 
-      case "cohere":
+      case "cohere": {
         const { CohereInstrumentation } = await import(
           "@traceloop/instrumentation-cohere"
         );
-        console.debug(
-          `[Respan Debug] Successfully imported ${info.description}`
-        );
-        return new CohereInstrumentation({
-          exceptionLogger: (e: Error) =>
-            console.error("Cohere instrumentation error:", e),
-        });
+        return new CohereInstrumentation({});
+      }
 
-      case "langChain":
+      case "langChain": {
         const { LangChainInstrumentation } = await import(
           "@traceloop/instrumentation-langchain"
         );
-        console.debug(
-          `[Respan Debug] Successfully imported ${info.description}`
-        );
-        return new LangChainInstrumentation({
-          exceptionLogger: (e: Error) =>
-            console.error("LangChain instrumentation error:", e),
-        });
+        return new LangChainInstrumentation({});
+      }
 
-      case "llamaIndex":
+      case "llamaIndex": {
         const { LlamaIndexInstrumentation } = await import(
           "@traceloop/instrumentation-llamaindex"
         );
-        console.debug(
-          `[Respan Debug] Successfully imported ${info.description}`
-        );
-        return new LlamaIndexInstrumentation({
-          exceptionLogger: (e: Error) =>
-            console.error("LlamaIndex instrumentation error:", e),
-        });
+        return new LlamaIndexInstrumentation({});
+      }
 
-      case "pinecone":
+      case "pinecone": {
         const { PineconeInstrumentation } = await import(
           "@traceloop/instrumentation-pinecone"
         );
-        console.debug(
-          `[Respan Debug] Successfully imported ${info.description}`
-        );
-        return new PineconeInstrumentation({
-          exceptionLogger: (e: Error) =>
-            console.error("Pinecone instrumentation error:", e),
-        });
+        return new PineconeInstrumentation({});
+      }
 
-      case "chromaDB":
+      case "chromaDB": {
         const { ChromaDBInstrumentation } = await import(
           "@traceloop/instrumentation-chromadb"
         );
-        console.debug(
-          `[Respan Debug] Successfully imported ${info.description}`
-        );
-        return new ChromaDBInstrumentation({
-          exceptionLogger: (e: Error) =>
-            console.error("ChromaDB instrumentation error:", e),
-        });
+        return new ChromaDBInstrumentation({});
+      }
 
-      case "qdrant":
+      case "qdrant": {
         const { QdrantInstrumentation } = await import(
           "@traceloop/instrumentation-qdrant"
         );
-        console.debug(
-          `[Respan Debug] Successfully imported ${info.description}`
-        );
-        return new QdrantInstrumentation({
-          exceptionLogger: (e: Error) =>
-            console.error("Qdrant instrumentation error:", e),
-        });
+        return new QdrantInstrumentation({});
+      }
 
-      case "together":
+      case "together": {
         const { TogetherInstrumentation } = await import(
           "@traceloop/instrumentation-together"
         );
-        console.debug(
-          `[Respan Debug] Successfully imported ${info.description}`
-        );
-        return new TogetherInstrumentation({
-          exceptionLogger: (e: Error) =>
-            console.error("Together instrumentation error:", e),
-        });
+        return new TogetherInstrumentation({});
+      }
 
-      case "googleVertexAI":
+      case "googleVertexAI": {
         const { VertexAIInstrumentation } = await import(
           "@traceloop/instrumentation-vertexai"
         );
-        console.debug(
-          `[Respan Debug] Successfully imported ${info.description}`
-        );
-        return new VertexAIInstrumentation({
-          exceptionLogger: (e: Error) =>
-            console.error("VertexAI instrumentation error:", e),
-        });
+        return new VertexAIInstrumentation({});
+      }
 
-      case "googleAIPlatform":
+      case "googleAIPlatform": {
         const { AIPlatformInstrumentation } = await import(
           "@traceloop/instrumentation-vertexai"
         );
-        console.debug(
-          `[Respan Debug] Successfully imported ${info.description}`
-        );
-        return new AIPlatformInstrumentation({
-          exceptionLogger: (e: Error) =>
-            console.error("AI Platform instrumentation error:", e),
-        });
+        return new AIPlatformInstrumentation({});
+      }
 
       default:
-        console.warn(`[Respan] Unknown instrumentation: ${name}`);
         return null;
     }
-  } catch (error) {
-    console.info(
-      `[Respan] ${info.description} is not available. To enable it, install the required package:\n   ${info.installCommand}`
-    );
-    console.debug(
-      `[Respan Debug] Failed to load ${name} instrumentation:`,
-      error
-    );
+  } catch {
     return null;
   }
-}; 
+};
