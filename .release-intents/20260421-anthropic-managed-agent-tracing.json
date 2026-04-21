@@ -1,0 +1,6 @@
+{
+  "summary": "Patch respan-instrumentation-anthropic, fix serveral problems",
+  "packages": {
+    "respan-instrumentation-anthropic": "patch"
+  }
+}
