@@ -381,10 +381,37 @@ class SpanBuffer:
         # Inject trace context so all spans in this buffer share the
         # caller's trace ID. Without this, the OTel SDK generates a
         # random trace ID that diverges from the caller's trace_id.
-        if self._parent_trace_id and self._parent_span_id:
+        #
+        # We MUST NOT inject when an active recording span already exists
+        # in the current context — doing so would overwrite the real
+        # parent with a NonRecordingSpan(span_id=0x1), and every span
+        # created in this buffer would be parented to the sentinel
+        # instead of the real caller span. That's how nested
+        # workflow.workflow and evaluator_workflow.workflow spans ended
+        # up as orphan siblings of experiment_trace.workflow.
+        #
+        # Resume (parent_trace_id + parent_span_id) is the only case that
+        # intentionally replaces the active context — the pre-pause trace
+        # is on a different executor and must be rejoined explicitly.
+        current_span = trace.get_current_span()
+        has_active_recording_span = (
+            current_span is not None
+            and current_span.get_span_context().is_valid
+            and current_span.is_recording()
+        )
+        is_resume = bool(self._parent_trace_id and self._parent_span_id)
+
+        if is_resume:
             # Resume path: continue an existing trace under a specific parent.
             inject_trace_id = int(self._parent_trace_id, 16)
             inject_span_id = int(self._parent_span_id, 16)
+        elif has_active_recording_span:
+            # Nested path: a real parent span is already active. Inherit
+            # from it instead of clobbering — the buffer still routes
+            # spans through its local queue, but their parent_span_id
+            # comes from OTel's existing context propagation.
+            inject_trace_id = None
+            inject_span_id = None
         elif self.trace_id:
             # Initial path: use the caller's trace_id as the OTel trace.
             # A synthetic root span ID seeds the trace context — the real
@@ -408,6 +435,12 @@ class SpanBuffer:
             logger.debug(
                 f"[SpanBuffer] Injected trace context: "
                 f"trace_id={format(inject_trace_id, '032x')}"
+            )
+        elif has_active_recording_span and not is_resume:
+            logger.debug(
+                "[SpanBuffer] Skipped trace-context injection — "
+                "an active recording span is already on the context; "
+                "inheriting its trace and parent span id."
             )
 
         # Mark as buffering

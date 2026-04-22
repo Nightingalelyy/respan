@@ -1,0 +1,6 @@
+{
+  "summary": "SpanBuffer preserves active parent — stop clobbering OTel context when opening with only a trace_id",
+  "packages": {
+    "respan-tracing": "patch"
+  }
+}
