@@ -1,0 +1,28 @@
+[tool.poetry]
+name = "respan-instrumentation-crewai"
+version = "0.1.0"
+description = "Respan instrumentation plugin for CrewAI"
+authors = ["Respan <team@respan.ai>"]
+license = "Apache 2.0"
+readme = "README.md"
+packages = [
+    { include = "respan_instrumentation_crewai", from = "./src" },
+]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.14"
+respan-tracing = "^2.15.2"
+crewai = ">=0.80.0"
+opentelemetry-instrumentation-crewai = ">=0.40.0"
+
+[tool.poetry.plugins."respan.instrumentations"]
+crewai = "respan_instrumentation_crewai:CrewAIInstrumentor"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: live network tests (requires API keys)",
+]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
