@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "respan-instrumentation-anthropic"
-version = "1.0.0"
+version = "1.0.1"
 description = "Respan instrumentation plugin for the Anthropic SDK"
 authors = ["Respan <team@respan.ai>"]
 license = "Apache 2.0"
