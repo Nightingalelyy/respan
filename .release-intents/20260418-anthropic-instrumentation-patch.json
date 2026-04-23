@@ -1,0 +1,6 @@
+{
+  "summary": "Patch @respan/instrumentation-anthropic for Anthropic SDK instrumentation cleanup and tool metadata fixes",
+  "packages": {
+    "@respan/instrumentation-anthropic": "patch"
+  }
+}
