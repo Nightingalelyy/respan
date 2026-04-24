@@ -62,8 +62,10 @@ from respan_sdk.constants.span_attributes import (
     LLM_USAGE_PROMPT_TOKENS,
     RESPAN_LOG_METHOD,
     RESPAN_LOG_TYPE,
+    RESPAN_SPAN_TOOL_CALLS,
     RESPAN_SPAN_TOOLS,
 )
+from respan_sdk.utils.serialization import serialize_value
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +115,7 @@ def _json_string(value: Any) -> str | None:
         return None
     if isinstance(value, str):
         return value
-    return json.dumps(value, default=str)
+    return json.dumps(serialize_value(value), default=str)
 
 
 def _extract_request_parameters(attrs: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -126,8 +128,143 @@ def _extract_request_parameters(attrs: Mapping[str, Any]) -> dict[str, Any] | No
 def _extract_messages(attrs: Mapping[str, Any], attr_name: str) -> list[Any] | None:
     value = _safe_json_loads(attrs.get(attr_name))
     if isinstance(value, list):
-        return value
+        return _normalize_messages(value)
     return None
+
+
+def _normalize_tool_call(
+    part: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    tool_name = part.get("name")
+    if not isinstance(tool_name, str) or not tool_name:
+        return None
+
+    normalized_tool_call: dict[str, Any] = {
+        "type": "function",
+        "function": {
+            "name": tool_name,
+            "arguments": _json_string(part.get("arguments")) or "",
+        },
+    }
+    tool_call_id = part.get("id") or part.get("tool_call_id")
+    if isinstance(tool_call_id, str) and tool_call_id:
+        normalized_tool_call["id"] = tool_call_id
+    return normalized_tool_call
+
+
+def _normalize_tool_response_content(part: Mapping[str, Any]) -> str | None:
+    for key in ("result", "content", "return_value"):
+        value = part.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            return value
+        return json.dumps(serialize_value(value), default=str)
+    return None
+
+
+def _stringify_message_part(part: Mapping[str, Any]) -> str | None:
+    for key in ("content", "text"):
+        value = part.get(key)
+        if value in (None, ""):
+            continue
+        if isinstance(value, str):
+            return value
+        return json.dumps(serialize_value(value), default=str)
+
+    part_type = part.get("type")
+    if part_type in {"tool_call", "tool_call_response"}:
+        return None
+
+    return json.dumps(serialize_value(part), default=str)
+
+
+def _convert_parts_message_to_standard(message: Mapping[str, Any]) -> dict[str, Any]:
+    parts = message.get("parts")
+    if not isinstance(parts, list):
+        normalized_message = dict(message)
+        if (
+            normalized_message.get("role") == "assistant"
+            and "content" not in normalized_message
+            and "tool_calls" in normalized_message
+        ):
+            normalized_message["content"] = ""
+        return normalized_message
+
+    normalized_message: dict[str, Any] = {
+        "role": message.get("role", "user"),
+    }
+    text_segments: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+
+    for raw_part in parts:
+        if not isinstance(raw_part, Mapping):
+            continue
+
+        part_type = raw_part.get("type")
+        if part_type == "tool_call":
+            normalized_tool_call = _normalize_tool_call(raw_part)
+            if normalized_tool_call is not None:
+                tool_calls.append(normalized_tool_call)
+            continue
+
+        if part_type == "tool_call_response":
+            normalized_message["role"] = "tool"
+            tool_call_id = raw_part.get("id") or raw_part.get("tool_call_id")
+            if isinstance(tool_call_id, str) and tool_call_id:
+                normalized_message["tool_call_id"] = tool_call_id
+            tool_name = raw_part.get("name") or raw_part.get("tool_name")
+            if isinstance(tool_name, str) and tool_name:
+                normalized_message["name"] = tool_name
+            tool_response_content = _normalize_tool_response_content(raw_part)
+            if tool_response_content is not None:
+                text_segments.append(tool_response_content)
+            continue
+
+        stringified_part = _stringify_message_part(raw_part)
+        if stringified_part:
+            text_segments.append(stringified_part)
+
+    if text_segments:
+        normalized_message["content"] = (
+            "\n".join(text_segments) if len(text_segments) > 1 else text_segments[0]
+        )
+    elif tool_calls or normalized_message.get("role") == "assistant":
+        normalized_message["content"] = ""
+
+    if tool_calls:
+        normalized_message["tool_calls"] = tool_calls
+
+    return normalized_message
+
+
+def _normalize_messages(messages: list[Any]) -> list[dict[str, Any]]:
+    normalized_messages: list[dict[str, Any]] = []
+    for message in messages:
+        if isinstance(message, Mapping):
+            normalized_messages.append(_convert_parts_message_to_standard(message))
+    return normalized_messages
+
+
+def _extract_primary_completion_message(
+    messages: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    if not messages:
+        return None
+
+    assistant_messages = [
+        message
+        for message in messages
+        if isinstance(message, Mapping) and message.get("role") == "assistant"
+    ]
+    candidate_messages = assistant_messages or messages
+
+    for message in reversed(candidate_messages):
+        content = message.get("content")
+        if content not in (None, "", [], {}) or message.get("tool_calls"):
+            return dict(message)
+
+    return dict(candidate_messages[-1])
 
 
 def _extract_tool_names(attrs: Mapping[str, Any]) -> list[str] | None:
@@ -471,17 +608,42 @@ def enrich_pydantic_ai_span(
         input_messages = _extract_messages(attrs, PYDANTIC_AI_INPUT_MESSAGES_ATTR)
         output_messages = _extract_messages(attrs, PYDANTIC_AI_OUTPUT_MESSAGES_ATTR)
         if input_messages is not None:
+            normalized_input_value = json.dumps(
+                serialize_value(input_messages),
+                default=str,
+            )
             _set_if_missing(
                 attrs,
                 SpanAttributes.TRACELOOP_ENTITY_INPUT,
-                json.dumps(input_messages, default=str),
+                normalized_input_value,
             )
+            _set_if_missing(attrs, RESPAN_OVERRIDE_INPUT_ATTR, normalized_input_value)
         if output_messages is not None:
+            normalized_output_value = json.dumps(
+                serialize_value(output_messages),
+                default=str,
+            )
             _set_if_missing(
                 attrs,
                 SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
-                json.dumps(output_messages, default=str),
+                normalized_output_value,
             )
+            primary_completion_message = _extract_primary_completion_message(output_messages)
+            if primary_completion_message is not None:
+                _set_if_missing(
+                    attrs,
+                    RESPAN_OVERRIDE_OUTPUT_ATTR,
+                    json.dumps(serialize_value(primary_completion_message), default=str),
+                )
+                tool_calls = primary_completion_message.get("tool_calls")
+                if isinstance(tool_calls, list) and tool_calls:
+                    _set_if_missing(
+                        attrs,
+                        RESPAN_SPAN_TOOL_CALLS,
+                        json.dumps(serialize_value(tool_calls), default=str),
+                    )
+            else:
+                _set_if_missing(attrs, RESPAN_OVERRIDE_OUTPUT_ATTR, normalized_output_value)
 
     if log_type == LOG_TYPE_AGENT and agent_name is not None:
         _set_if_missing(

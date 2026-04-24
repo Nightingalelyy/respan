@@ -1,3 +1,5 @@
+import builtins
+import json
 import logging
 import sys
 from types import ModuleType, SimpleNamespace
@@ -197,6 +199,86 @@ def test_enrich_pydantic_ai_chat_span_maps_messages():
     assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] == (
         '[{"role": "assistant", "content": "hello"}]'
     )
+    assert span._attributes["input"] == '[{"role": "user", "content": "hi"}]'
+    assert span._attributes["output"] == '{"role": "assistant", "content": "hello"}'
+
+
+def test_enrich_pydantic_ai_chat_span_normalizes_parts_messages():
+    span = SimpleNamespace(
+        name="chat completion",
+        _attributes={
+            "gen_ai.system": "openai",
+            "gen_ai.operation.name": "chat",
+            "gen_ai.input.messages": (
+                '[{"role":"user","parts":[{"type":"text","content":"hi"}]},'
+                '{"role":"tool","parts":[{"type":"tool_call_response","id":"call_1","name":"lookup_weather","result":{"forecast":"sunny"}}]}]'
+            ),
+            "gen_ai.output.messages": (
+                '[{"role":"assistant","parts":[{"type":"tool_call","id":"call_1","name":"lookup_weather","arguments":{"city":"Paris"}}]}]'
+            ),
+        },
+    )
+
+    enrich_pydantic_ai_span(span)
+
+    assert json.loads(span._attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT]) == [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "name": "lookup_weather",
+            "content": '{"forecast": "sunny"}',
+        },
+    ]
+    assert json.loads(span._attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "lookup_weather",
+                        "arguments": '{"city": "Paris"}',
+                    },
+                }
+            ],
+        }
+    ]
+    assert json.loads(span._attributes["input"]) == [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "name": "lookup_weather",
+            "content": '{"forecast": "sunny"}',
+        },
+    ]
+    assert json.loads(span._attributes["output"]) == {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "lookup_weather",
+                    "arguments": '{"city": "Paris"}',
+                },
+            }
+        ],
+    }
+    assert json.loads(span._attributes["respan.span.tool_calls"]) == [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "lookup_weather",
+                "arguments": '{"city": "Paris"}',
+            },
+        }
+    ]
 
 
 def test_enrich_pydantic_ai_running_tools_span_maps_task_fields():
@@ -217,8 +299,19 @@ def test_enrich_pydantic_ai_running_tools_span_maps_task_fields():
     assert span._attributes["span_tools"] == ["add", "multiply"]
 
 
-def test_activate_logs_warning_when_dependencies_are_missing(caplog):
+def test_activate_logs_warning_when_dependencies_are_missing(monkeypatch, caplog):
     instrumentor = PydanticAIInstrumentor()
+    original_import = builtins.__import__
+
+    def _mock_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name in {
+            "pydantic_ai.agent",
+            "pydantic_ai.models.instrumented",
+        }:
+            raise ImportError("mock missing dependency")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _mock_import)
 
     with caplog.at_level(logging.WARNING):
         instrumentor.activate()
