@@ -1,0 +1,6 @@
+{
+  "summary": "Fix PydanticAI instrumentation to normalize parts-based chat messages, restore chat input/output payloads, and capture tool call metadata.",
+  "packages": {
+    "respan-instrumentation-pydantic-ai": "patch"
+  }
+}
