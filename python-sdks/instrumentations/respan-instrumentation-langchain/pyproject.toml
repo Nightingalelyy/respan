@@ -1,0 +1,39 @@
+[tool.poetry]
+name = "respan-instrumentation-langchain"
+version = "0.1.0"
+description = "Respan instrumentation plugin for LangChain, LangGraph, and Langflow"
+authors = ["Respan <team@respan.ai>"]
+license = "Apache 2.0"
+readme = "README.md"
+packages = [
+    { include = "respan_instrumentation_langchain", from = "./src" },
+]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.14"
+respan-tracing = "^2.16.6"
+respan-sdk = ">=2.6.1"
+langchain-core = ">=0.3.0"
+langgraph = { version = ">=0.2.0", optional = true }
+langflow = { version = ">=1.0.0", optional = true }
+opentelemetry-semantic-conventions-ai = ">=0.4.1"
+
+[tool.poetry.extras]
+langgraph = ["langgraph"]
+langflow = ["langflow"]
+all = ["langgraph", "langflow"]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.4.1"
+
+[tool.poetry.plugins."respan.instrumentations"]
+langchain = "respan_instrumentation_langchain:LangChainInstrumentor"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: live network tests (requires API keys)",
+]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

@@ -1,0 +1,21 @@
+"""Constants for LangChain callback span normalization."""
+
+LANGCHAIN_RUN_ID_ATTR = "langchain.run_id"
+LANGCHAIN_PARENT_RUN_ID_ATTR = "langchain.parent_run_id"
+LANGCHAIN_TAGS_ATTR = "langchain.tags"
+LANGCHAIN_METADATA_ATTR = "langchain.metadata"
+LANGCHAIN_SERIALIZED_ATTR = "langchain.serialized"
+LANGCHAIN_FRAMEWORK_ATTR = "respan.metadata.framework"
+
+GEN_AI_PROMPT_PREFIX = "gen_ai.prompt"
+GEN_AI_COMPLETION_PREFIX = "gen_ai.completion"
+GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
+GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
+GEN_AI_USAGE_TOTAL_TOKENS = "llm.usage.total_tokens"
+
+RESPAN_OVERRIDE_INPUT_ATTR = "input"
+RESPAN_OVERRIDE_OUTPUT_ATTR = "output"
+RESPAN_OVERRIDE_MODEL_ATTR = "model"
+RESPAN_OVERRIDE_PROMPT_TOKENS_ATTR = "prompt_tokens"
+RESPAN_OVERRIDE_COMPLETION_TOKENS_ATTR = "completion_tokens"
+RESPAN_OVERRIDE_TOTAL_REQUEST_TOKENS_ATTR = "total_request_tokens"
