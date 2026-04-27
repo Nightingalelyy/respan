@@ -119,6 +119,18 @@
       "name": "respan-instrumentation-pydantic-ai",
       "path": "python-sdks/instrumentations/respan-instrumentation-pydantic-ai",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-crewai",
+      "path": "python-sdks/instrumentations/respan-instrumentation-crewai",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-haystack",
+      "path": "python-sdks/instrumentations/respan-instrumentation-haystack",
+      "registry": "pypi"
     }
   ]
 }

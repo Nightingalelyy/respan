@@ -1,0 +1,28 @@
+[tool.poetry]
+name = "respan-instrumentation-haystack"
+version = "0.1.0"
+description = "Respan instrumentation plugin for Haystack"
+authors = ["Respan <team@respan.ai>"]
+license = "Apache 2.0"
+readme = "README.md"
+packages = [
+    { include = "respan_instrumentation_haystack", from = "./src" },
+]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.14"
+respan-tracing = "^2.15.2"
+haystack-ai = ">=2.0.0"
+opentelemetry-instrumentation-haystack = ">=0.40.0"
+
+[tool.poetry.plugins."respan.instrumentations"]
+haystack = "respan_instrumentation_haystack:HaystackInstrumentor"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: live network tests (requires API keys)",
+]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
