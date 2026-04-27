@@ -16,15 +16,22 @@ pip install respan-instrumentation-crewai
 |----------|----------|-------------|
 | `RESPAN_API_KEY` | Yes | Your Respan API key. |
 | `RESPAN_BASE_URL` | No | Defaults to `https://api.respan.ai`. |
+| `OPENAI_API_KEY` | Yes | Required by CrewAI's default LLM provider. Set to your Respan API key to route through the Respan gateway. |
+| `OPENAI_BASE_URL` | No | Set to `https://api.respan.ai/api` to route OpenAI traffic through the Respan gateway. |
 
 ## Quickstart
 
 ### 3. Run Script
 
 ```python
+import os
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Route OpenAI traffic through the Respan gateway (no separate OpenAI key needed)
+os.environ["OPENAI_API_KEY"] = os.environ["RESPAN_API_KEY"]
+os.environ["OPENAI_BASE_URL"] = os.getenv("RESPAN_BASE_URL", "https://api.respan.ai/api")
 
 from respan import Respan
 from respan_instrumentation_crewai import CrewAIInstrumentor
@@ -37,6 +44,7 @@ agent = Agent(
     role="Poet",
     goal="Write a short haiku about recursion in programming",
     backstory="You are a programmer who writes haikus.",
+    llm="gpt-4o-mini",
 )
 
 task = Task(
@@ -58,4 +66,4 @@ After running the script, traces appear on your [Respan dashboard](https://platf
 
 ## Further Reading
 
-See the [examples/crewai/](../../examples/crewai/) directory for runnable examples.
+See the [examples/](./examples/) directory for runnable examples.

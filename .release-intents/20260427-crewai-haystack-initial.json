@@ -1,0 +1,7 @@
+{
+  "summary": "Initial release of CrewAI and Haystack instrumentation packages (0.1.0 published manually; CI bumps to 0.1.1)",
+  "packages": {
+    "respan-instrumentation-crewai": "patch",
+    "respan-instrumentation-haystack": "patch"
+  }
+}
