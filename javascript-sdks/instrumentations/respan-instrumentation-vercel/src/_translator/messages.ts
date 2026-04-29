@@ -182,7 +182,7 @@ function isMessageLike(value: unknown): value is MessagePayload {
 }
 
 function isMessageArray(value: unknown): value is MessagePayload[] {
-  return Array.isArray(value) && value.every((item) => isMessageLike(item));
+  return Array.isArray(value) && value.length > 0 && value.every((item) => isMessageLike(item));
 }
 
 function unwrapKnownResponseWrapper(value: unknown): unknown {
@@ -388,20 +388,50 @@ function collapseSingleMessagePayload(messages: MessagePayload[]): unknown {
   return messages.length === 1 ? messages[0] : messages;
 }
 
+function buildToolResultMessage(attrs: SpanAttributes): MessagePayload | undefined {
+  if (!attrs[AI_TOOL_CALL_RESULT]) {
+    return undefined;
+  }
+
+  return {
+    role: "tool",
+    tool_call_id: String(attrs[AI_TOOL_CALL_ID] || ""),
+    content: String(attrs[AI_TOOL_CALL_RESULT] || ""),
+  };
+}
+
+function hasToolResultMessage(payload: unknown, toolResult: MessagePayload): boolean {
+  const messages = Array.isArray(payload) ? payload : [payload];
+  return messages.some((message) => {
+    if (!isRecord(message) || message.role !== "tool") {
+      return false;
+    }
+
+    if (toolResult.tool_call_id) {
+      return message.tool_call_id === toolResult.tool_call_id || message.toolCallId === toolResult.tool_call_id;
+    }
+
+    return message.content === toolResult.content;
+  });
+}
+
+function appendToolResultMessage(payload: unknown, attrs: SpanAttributes): unknown {
+  const toolResult = buildToolResultMessage(attrs);
+  if (!toolResult || hasToolResultMessage(payload, toolResult)) {
+    return payload;
+  }
+
+  return Array.isArray(payload) ? [...payload, toolResult] : [payload, toolResult];
+}
+
 function selectPrimaryAssistantMessage(value: unknown): MessagePayload | undefined {
   if (isMessageLike(value)) {
-    return value;
+    return value.role === "assistant" ? value : undefined;
   }
 
   if (Array.isArray(value)) {
     for (const item of value) {
       if (isMessageLike(item) && item.role === "assistant") {
-        return item;
-      }
-    }
-
-    for (const item of value) {
-      if (isMessageLike(item)) {
         return item;
       }
     }
@@ -416,7 +446,7 @@ function enrichCompletionAttrs(attrs: SpanAttributes, payload: unknown): void {
     return;
   }
 
-  attrs["gen_ai.completion.0.role"] = String(message.role || "assistant");
+  attrs["gen_ai.completion.0.role"] = "assistant";
   attrs["gen_ai.completion.0.content"] =
     typeof message.content === "string"
       ? message.content
@@ -430,7 +460,6 @@ function enrichCompletionAttrs(attrs: SpanAttributes, payload: unknown): void {
     parseToolCalls(attrs);
   if (toolCalls && toolCalls.length > 0) {
     attrs["gen_ai.completion.0.tool_calls"] = toolCalls;
-    attrs["tool_calls"] = toolCalls;
     attrs[RESPAN_SPAN_TOOL_CALLS] = safeJsonStr(toolCalls);
     attrs["has_tool_calls"] = true;
     attrs["parallel_tool_calls"] = toolCalls.length > 1;
@@ -457,28 +486,24 @@ export function formatPromptInput(attrs: SpanAttributes): string | undefined {
 }
 
 export function formatCompletionOutput(attrs: SpanAttributes): string | undefined {
-  // `ai.response.object` may contain arbitrary structured JSON from generateObject().
-  // Preserve that payload as-is in the fallback path instead of collapsing nested
-  // `message` fields into a synthetic assistant reply.
+  // `ai.response.text` may itself be a JSON-encoded chat message. Normalize that
+  // shape first so assistant messages and tool calls are preserved for the backend.
   const existingPayload = extractMessagePayload(attrs[AI_RESPONSE_TEXT]);
   if (existingPayload !== undefined) {
     const normalizedMessages = normalizeMessageCollection(collapseNestedMessageWrapper(existingPayload));
     const normalizedPayload = normalizedMessages
       ? collapseSingleMessagePayload(normalizedMessages)
       : collapseNestedMessageWrapper(existingPayload);
-    enrichCompletionAttrs(attrs, normalizedPayload);
-    return safeJsonStr(normalizedPayload);
+    const outputPayload = appendToolResultMessage(normalizedPayload, attrs);
+    enrichCompletionAttrs(attrs, outputPayload);
+    return safeJsonStr(outputPayload);
   }
 
   let content = "";
 
   if (attrs[AI_RESPONSE_OBJECT]) {
-    try {
-      const parsed = unwrapKnownResponseWrapper(safeJsonParse(attrs[AI_RESPONSE_OBJECT]));
-      content = safeJsonStr(parsed);
-    } catch {
-      content = String(attrs[AI_RESPONSE_TEXT] ?? "");
-    }
+    const parsed = unwrapKnownResponseWrapper(safeJsonParse(attrs[AI_RESPONSE_OBJECT]));
+    content = safeJsonStr(parsed);
   } else {
     content = String(attrs[AI_RESPONSE_TEXT] ?? "");
   }
@@ -493,16 +518,7 @@ export function formatCompletionOutput(attrs: SpanAttributes): string | undefine
     message.tool_calls = toolCalls;
   }
 
-  const messages: Record<string, any>[] = [message];
-  if (attrs[AI_TOOL_CALL_RESULT]) {
-    messages.push({
-      role: "tool",
-      tool_call_id: String(attrs[AI_TOOL_CALL_ID] || ""),
-      content: String(attrs[AI_TOOL_CALL_RESULT] || ""),
-    });
-  }
-
-  const normalizedPayload = messages.length === 1 ? message : messages;
+  const normalizedPayload = appendToolResultMessage(message, attrs);
   enrichCompletionAttrs(attrs, normalizedPayload);
   return safeJsonStr(normalizedPayload);
 }

@@ -116,7 +116,6 @@ export class VercelAITranslator implements SpanProcessor {
           const tools = safeJsonStr(toolsValue);
           attrs[RESPAN_SPAN_TOOLS] = tools;
           attrs[TL_REQUEST_FUNCTIONS] = tools;
-          attrs.tools = toolsValue;
         }
 
         const toolChoice = parseToolChoice(attrs);
