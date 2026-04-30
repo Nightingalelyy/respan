@@ -1,0 +1,6 @@
+{
+  "summary": "Publish the new Python LangChain instrumentation package for LangChain, LangGraph, and Langflow callback tracing",
+  "packages": {
+    "respan-instrumentation-langchain": "new"
+  }
+}
