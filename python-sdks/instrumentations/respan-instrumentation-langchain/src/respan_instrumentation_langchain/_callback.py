@@ -931,7 +931,6 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
         run_hex = _run_id_to_hex(run_id)
         record = self._runs.get(run_hex)
         output_payload, completion_messages = _extract_llm_output(response)
-        output_payload = _normalize_output_for_logging(output_payload)
         completion_messages = _normalize_output_for_logging(completion_messages)
         extra_attrs: dict[str, Any] = {}
         if record is not None:
