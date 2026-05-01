@@ -1,0 +1,6 @@
+{
+  "summary": "Initial release of the LangChain instrumentation package for LangChain, LangGraph, and Langflow tracing",
+  "packages": {
+    "@respan/instrumentation-langchain": "new"
+  }
+}
