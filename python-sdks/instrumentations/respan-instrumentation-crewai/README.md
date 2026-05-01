@@ -1,6 +1,6 @@
 # respan-instrumentation-crewai
 
-Respan instrumentation plugin for CrewAI. Wraps `opentelemetry-instrumentation-crewai` to automatically trace agent runs, task executions, and tool calls.
+Respan instrumentation plugin for CrewAI. Wraps OpenInference's CrewAI instrumentor and translates spans into the Respan tracing shape automatically.
 
 ## Configuration
 
@@ -14,10 +14,8 @@ pip install respan-instrumentation-crewai
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `RESPAN_API_KEY` | Yes | Your Respan API key. |
-| `RESPAN_BASE_URL` | No | Defaults to `https://api.respan.ai`. |
-| `OPENAI_API_KEY` | Yes | Required by CrewAI's default LLM provider. Set to your Respan API key to route through the Respan gateway. |
-| `OPENAI_BASE_URL` | No | Set to `https://api.respan.ai/api` to route OpenAI traffic through the Respan gateway. |
+| `RESPAN_API_KEY` | Yes | Your Respan API key. Authenticates both proxy and tracing. |
+| `RESPAN_BASE_URL` | No | Defaults to `https://api.respan.ai/api`. |
 
 ## Quickstart
 
@@ -36,7 +34,11 @@ os.environ["OPENAI_BASE_URL"] = os.getenv("RESPAN_BASE_URL", "https://api.respan
 from respan import Respan
 from respan_instrumentation_crewai import CrewAIInstrumentor
 
-respan = Respan(instrumentations=[CrewAIInstrumentor()])
+respan = Respan(
+    api_key=os.environ["RESPAN_API_KEY"],
+    base_url=os.getenv("RESPAN_BASE_URL", "https://api.respan.ai/api"),
+    instrumentations=[CrewAIInstrumentor()],
+)
 
 from crewai import Agent, Task, Crew
 
@@ -66,4 +68,4 @@ After running the script, traces appear on your [Respan dashboard](https://platf
 
 ## Further Reading
 
-See the [examples/](./examples/) directory for runnable examples.
+See the [Respan example projects](https://github.com/respanai/respan-example-projects) for runnable scripts.

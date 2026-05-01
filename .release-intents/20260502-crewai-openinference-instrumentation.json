@@ -1,0 +1,7 @@
+{
+  "summary": "Patch CrewAI and OpenInference instrumentation span translation for backend ingestion",
+  "packages": {
+    "respan-instrumentation-crewai": "patch",
+    "respan-instrumentation-openinference": "patch"
+  }
+}

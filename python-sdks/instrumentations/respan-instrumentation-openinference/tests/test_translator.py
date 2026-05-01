@@ -96,15 +96,23 @@ def test_chain_span_maps_to_workflow(translator):
 
 
 # ------------------------------------------------------------------
-# 3. LLM → task + llm.request.type=chat
+# 3. LLM → chat + llm.request.type=chat
 # ------------------------------------------------------------------
 
-def test_llm_span_maps_to_task_with_chat(translator):
+def test_llm_span_maps_to_chat(translator):
     span = _make_span({"openinference.span.kind": "LLM"})
     translator.on_end(span)
-    assert span._attributes["traceloop.span.kind"] == "task"
+    assert span._attributes["traceloop.span.kind"] == "chat"
     assert span._attributes["llm.request.type"] == "chat"
     assert span._attributes["respan.entity.log_type"] == "chat"
+
+
+def test_embedding_span_maps_to_embedding(translator):
+    span = _make_span({"openinference.span.kind": "EMBEDDING"})
+    translator.on_end(span)
+    assert span._attributes["traceloop.span.kind"] == "embedding"
+    assert span._attributes["llm.request.type"] == "embedding"
+    assert span._attributes["respan.entity.log_type"] == "embedding"
 
 
 # ------------------------------------------------------------------
@@ -155,6 +163,7 @@ def test_model_name_mapped(translator):
     })
     translator.on_end(span)
     assert span._attributes["gen_ai.request.model"] == "gpt-4o"
+    assert span._attributes["model"] == "gpt-4o"
 
 
 # ------------------------------------------------------------------
@@ -176,6 +185,21 @@ def test_token_counts_mapped(translator):
     assert span._attributes["gen_ai.usage.output_tokens"] == 50
     assert span._attributes["llm.usage.total_tokens"] == 150
     assert span._attributes["llm.usage.cache_read_input_tokens"] == 20
+    assert span._attributes["prompt_tokens"] == 100
+    assert span._attributes["completion_tokens"] == 50
+    assert span._attributes["total_request_tokens"] == 150
+
+
+def test_non_llm_token_count_does_not_emit_backend_accounting_alias(translator):
+    span = _make_span({
+        "openinference.span.kind": "CHAIN",
+        "llm.token_count.total": 150,
+    })
+
+    translator.on_end(span)
+
+    assert span._attributes["llm.usage.total_tokens"] == 150
+    assert "total_request_tokens" not in span._attributes
 
 
 # ------------------------------------------------------------------
@@ -401,8 +425,8 @@ def test_tools_and_tool_calls_promoted(translator):
         span._attributes["gen_ai.completion.0.tool_calls.0.function.name"]
         == "get_weather"
     )
-    assert "tools" not in span._attributes
-    assert "tool_calls" not in span._attributes
+    assert span._attributes["tools"] == tools
+    assert span._attributes["tool_calls"] == expected_tool_calls
 
 
 def test_indexed_anthropic_tools_promoted_from_bounded_attrs(translator):
@@ -445,6 +469,8 @@ def test_indexed_anthropic_tools_promoted_from_bounded_attrs(translator):
     assert json.loads(span._attributes[RESPAN_SPAN_TOOL_CALLS]) == expected_tool_calls
     assert span._attributes["gen_ai.completion.0.tool_calls"] == expected_tool_calls
     assert span._attributes["llm.request.functions"] == json.dumps(tools)
+    assert span._attributes["tools"] == tools
+    assert span._attributes["tool_calls"] == expected_tool_calls
     assert "llm.tools.0.tool.json_schema" not in span._attributes
     assert (
         "llm.output_messages.0.message.tool_calls.0.tool_call.function.name"
@@ -476,7 +502,7 @@ def test_legacy_function_call_fields_promoted_as_tool_calls(translator):
     ]
     assert json.loads(span._attributes[RESPAN_SPAN_TOOL_CALLS]) == expected_tool_calls
     assert span._attributes["gen_ai.completion.0.tool_calls"] == expected_tool_calls
-    assert "tool_calls" not in span._attributes
+    assert span._attributes["tool_calls"] == expected_tool_calls
 
 
 def test_mixed_modern_and_legacy_tool_call_fields_deduplicate(translator):
@@ -501,9 +527,10 @@ def test_mixed_modern_and_legacy_tool_call_fields_deduplicate(translator):
     ]
     assert json.loads(span._attributes[RESPAN_SPAN_TOOL_CALLS]) == expected_tool_calls
     assert span._attributes["gen_ai.completion.0.tool_calls"] == expected_tool_calls
+    assert span._attributes["tool_calls"] == expected_tool_calls
 
 
-def test_input_history_tool_calls_do_not_become_top_level_tool_calls(translator):
+def test_input_history_tool_calls_become_backend_tool_call_override(translator):
     span = _make_span({
         "openinference.span.kind": "LLM",
         "llm.input_messages.0.message.role": "assistant",
@@ -516,7 +543,18 @@ def test_input_history_tool_calls_do_not_become_top_level_tool_calls(translator)
 
     translator.on_end(span)
 
-    assert RESPAN_SPAN_TOOL_CALLS not in span._attributes
+    expected_tool_calls = [
+        {
+            "id": "call_history",
+            "function": {
+                "name": "lookup_weather",
+                "arguments": '{"city":"Tokyo"}',
+            },
+            "type": "function",
+        }
+    ]
+    assert json.loads(span._attributes[RESPAN_SPAN_TOOL_CALLS]) == expected_tool_calls
+    assert span._attributes["tool_calls"] == expected_tool_calls
     assert span._attributes["gen_ai.prompt.0.tool_calls"] == [
         {
             "id": "call_history",

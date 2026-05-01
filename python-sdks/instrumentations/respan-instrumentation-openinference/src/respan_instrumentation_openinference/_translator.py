@@ -106,6 +106,12 @@ _GEN_AI_PROVIDER_NAME = "gen_ai.provider.name"
 _GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
 _GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
 _LLM_USAGE_CACHE_READ_INPUT_TOKENS = "llm.usage.cache_read_input_tokens"
+_RESPAN_MODEL = "model"
+_RESPAN_PROMPT_TOKENS = "prompt_tokens"
+_RESPAN_COMPLETION_TOKENS = "completion_tokens"
+_RESPAN_TOTAL_REQUEST_TOKENS = "total_request_tokens"
+_RESPAN_TOOLS = "tools"
+_RESPAN_TOOL_CALLS = "tool_calls"
 
 _OI_INPUT_MESSAGES_PREFIX = "llm.input_messages."
 _OI_OUTPUT_MESSAGES_PREFIX = "llm.output_messages."
@@ -130,11 +136,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _OI_KIND_TO_TRACELOOP: Dict[str, str] = {
     "CHAIN": "workflow",
-    "LLM": "task",
+    "LLM": LOG_TYPE_CHAT,
     "TOOL": "tool",
     "AGENT": "agent",
     "RETRIEVER": "task",
-    "EMBEDDING": "task",
+    "EMBEDDING": LOG_TYPE_EMBEDDING,
     "RERANKER": "task",
     "GUARDRAIL": "task",
     "EVALUATOR": "task",
@@ -608,6 +614,7 @@ class OpenInferenceTranslator(SpanProcessor):
             return
 
         oi_kind_upper = str(oi_kind).upper()
+        is_llm_kind = oi_kind_upper in _LLM_KINDS
         logger.debug("[OI→TL] Translating %s span: %s", oi_kind_upper, span.name)
 
         # --- Span kind (reverse of Arize _SPAN_KIND_MAPPING) ---
@@ -635,6 +642,8 @@ class OpenInferenceTranslator(SpanProcessor):
         model = attrs.get(OI_LLM_MODEL_NAME)
         if model:
             attrs.setdefault(LLM_REQUEST_MODEL, model)
+            if is_llm_kind:
+                attrs.setdefault(_RESPAN_MODEL, model)
 
         # --- System / provider (reverse of Arize _extract_llm_provider_and_system) ---
         system = attrs.get(OI_LLM_SYSTEM)
@@ -652,15 +661,28 @@ class OpenInferenceTranslator(SpanProcessor):
         if prompt_tokens is not None:
             attrs.setdefault(LLM_USAGE_PROMPT_TOKENS, prompt_tokens)
             attrs.setdefault(_GEN_AI_USAGE_INPUT_TOKENS, prompt_tokens)
+            if is_llm_kind:
+                attrs.setdefault(_RESPAN_PROMPT_TOKENS, prompt_tokens)
 
         completion_tokens = attrs.get(OI_LLM_TOKEN_COUNT_COMPLETION)
         if completion_tokens is not None:
             attrs.setdefault(LLM_USAGE_COMPLETION_TOKENS, completion_tokens)
             attrs.setdefault(_GEN_AI_USAGE_OUTPUT_TOKENS, completion_tokens)
+            if is_llm_kind:
+                attrs.setdefault(_RESPAN_COMPLETION_TOKENS, completion_tokens)
 
         total_tokens = attrs.get(OI_LLM_TOKEN_COUNT_TOTAL)
         if total_tokens is not None:
             attrs.setdefault(TL_LLM_USAGE_TOTAL_TOKENS, total_tokens)
+            if is_llm_kind:
+                attrs.setdefault(_RESPAN_TOTAL_REQUEST_TOKENS, total_tokens)
+        elif is_llm_kind and (
+            prompt_tokens is not None or completion_tokens is not None
+        ):
+            attrs.setdefault(
+                _RESPAN_TOTAL_REQUEST_TOKENS,
+                (prompt_tokens or 0) + (completion_tokens or 0),
+            )
 
         cache_read = attrs.get(OI_LLM_TOKEN_COUNT_CACHE_READ)
         if cache_read is not None:
@@ -671,25 +693,38 @@ class OpenInferenceTranslator(SpanProcessor):
             direct_tools = _extract_tools_from_indexed_attrs(attrs)
         if direct_tools is not None:
             attrs.setdefault(RESPAN_SPAN_TOOLS, _safe_json_str(direct_tools))
+            if is_llm_kind:
+                attrs.setdefault(_RESPAN_TOOLS, direct_tools)
 
         direct_tool_calls = _extract_tool_calls(
             attrs=attrs,
             oi_prefixes=[_OI_OUTPUT_MESSAGES_PREFIX],
         )
+        if direct_tool_calls is None and is_llm_kind:
+            direct_tool_calls = _extract_tool_calls(
+                attrs=attrs,
+                oi_prefixes=[_OI_INPUT_MESSAGES_PREFIX],
+            )
         if direct_tool_calls is not None:
             attrs.setdefault(RESPAN_SPAN_TOOL_CALLS, _safe_json_str(direct_tool_calls))
+            if is_llm_kind:
+                attrs.setdefault(_RESPAN_TOOL_CALLS, direct_tool_calls)
 
         # --- LLM-specific: messages, invocation params, tools ---
         if oi_kind_upper in _LLM_KINDS:
-            self._translate_llm(attrs)
+            self._translate_llm(attrs=attrs, oi_kind_upper=oi_kind_upper)
 
         self._remove_redundant_oi_attrs(attrs)
         span._attributes = attrs
 
-    def _translate_llm(self, attrs: Dict[str, Any]) -> None:
+    def _translate_llm(self, attrs: Dict[str, Any], oi_kind_upper: str) -> None:
         """Extra translation for LLM/EMBEDDING spans."""
-        # Mark as chat request type
-        attrs.setdefault(LLM_REQUEST_TYPE, LLMRequestTypeValues.CHAT.value)
+        request_type = (
+            LLMRequestTypeValues.EMBEDDING.value
+            if oi_kind_upper == "EMBEDDING"
+            else LLMRequestTypeValues.CHAT.value
+        )
+        attrs.setdefault(LLM_REQUEST_TYPE, request_type)
 
         # --- Messages (reverse of Arize _collect_oi_messages) ---
         _oi_messages_to_openllmetry(attrs, _OI_INPUT_MESSAGES_PREFIX, GEN_AI_PROMPT_PREFIX.rstrip("."))
