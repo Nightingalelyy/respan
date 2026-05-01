@@ -98,6 +98,12 @@
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-langchain",
+      "path": "python-sdks/instrumentations/respan-instrumentation-langchain",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-openinference",
       "path": "python-sdks/instrumentations/respan-instrumentation-openinference",
       "registry": "pypi"
