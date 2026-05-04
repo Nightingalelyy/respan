@@ -52,7 +52,6 @@ function metadataKey(key: string): string {
 }
 
 // Traceloop wire-format keys
-const TL_SPAN_KIND = "traceloop.span.kind";
 const TL_ENTITY_NAME = "traceloop.entity.name";
 const TL_ENTITY_INPUT = "traceloop.entity.input";
 const TL_ENTITY_OUTPUT = "traceloop.entity.output";
@@ -434,12 +433,18 @@ function enrichMetadata(attrs: Record<string, any>, spanName: string): void {
         setDefault(attrs, TRACE_GROUP_ID, String(value));
         break;
       case "customer_params": {
-        // customer_params can be a JSON object with all three fields
+        // customer_params is a JSON-stringified object (Vercel telemetry
+        // metadata values must be flat scalars, so users serialize the object).
+        // Documented shape uses `email` / `name` (matching the Customer columns
+        // in the UI); accept the legacy `customer_email` / `customer_name`
+        // aliases too so older integrations keep working.
         try {
           const parsed = typeof value === "string" ? JSON.parse(value) : value;
           if (parsed?.customer_identifier) setDefault(attrs, CUSTOMER_ID, parsed.customer_identifier);
-          if (parsed?.customer_email) setDefault(attrs, CUSTOMER_EMAIL, parsed.customer_email);
-          if (parsed?.customer_name) setDefault(attrs, CUSTOMER_NAME, parsed.customer_name);
+          const email = parsed?.email ?? parsed?.customer_email;
+          if (email) setDefault(attrs, CUSTOMER_EMAIL, email);
+          const name = parsed?.name ?? parsed?.customer_name;
+          if (name) setDefault(attrs, CUSTOMER_NAME, name);
         } catch {
           // ignore
         }
@@ -719,7 +724,16 @@ export class VercelAITranslator implements SpanProcessor {
     attrs[RESPAN_LOG_TYPE] = logType;
 
     if (config) {
-      setDefault(attrs, TL_SPAN_KIND, config.kind);
+      // Do NOT set traceloop.span.kind for auto-emitted Vercel SDK spans.
+      // In the Respan composite processor `traceloop.span.kind` is reserved
+      // for user-decorated spans (withWorkflow / withTask / withAgent) and
+      // setting it on auto spans (a) flattens the parent/child tree and
+      // (b) causes LLM detail spans (doGenerate / doStream) to be classified
+      // as "task" instead of LLM in the backend. The respan.entity.log_type
+      // attribute (set above) carries the correct type for ingestion.
+      // Matches the patterns in respan-instrumentation-openinference (see
+      // _translator.ts:500) and respan-instrumentation-openai-agents
+      // (see _otel_emitter.ts:398).
 
       // LLM-specific enrichment
       if (config.isLLM) {
