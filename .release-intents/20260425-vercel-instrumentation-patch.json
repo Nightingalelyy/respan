@@ -1,0 +1,6 @@
+{
+  "summary": "Patch the Vercel AI SDK instrumentation package",
+  "packages": {
+    "@respan/instrumentation-vercel": "patch"
+  }
+}
