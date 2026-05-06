@@ -62,11 +62,18 @@ export function enrichMetadata(attrs: SpanAttributes): void {
         setDefault(attrs, TRACE_GROUP_ID, String(value));
         break;
       case "customer_params": {
+        // customer_params is a JSON-stringified object (Vercel telemetry
+        // metadata values must be flat scalars, so users serialize the object).
+        // Documented shape uses `email` / `name` (matching the Customer columns
+        // in the UI); accept the legacy `customer_email` / `customer_name`
+        // aliases too so older integrations keep working.
         try {
           const parsed = typeof value === "string" ? JSON.parse(value) : value;
           if (parsed?.customer_identifier) setDefault(attrs, CUSTOMER_ID, parsed.customer_identifier);
-          if (parsed?.customer_email) setDefault(attrs, CUSTOMER_EMAIL, parsed.customer_email);
-          if (parsed?.customer_name) setDefault(attrs, CUSTOMER_NAME, parsed.customer_name);
+          const email = parsed?.email ?? parsed?.customer_email;
+          if (email) setDefault(attrs, CUSTOMER_EMAIL, email);
+          const name = parsed?.name ?? parsed?.customer_name;
+          if (name) setDefault(attrs, CUSTOMER_NAME, name);
         } catch {
           // Ignore malformed customer_params metadata.
         }

@@ -27,7 +27,6 @@ import {
   TL_ENTITY_INPUT,
   TL_ENTITY_OUTPUT,
   TL_REQUEST_FUNCTIONS,
-  TL_SPAN_KIND,
   isVercelAISpan,
   metadataKey,
   normalizeModel,
@@ -89,7 +88,16 @@ export class VercelAITranslator implements SpanProcessor {
     attrs[RESPAN_LOG_TYPE] = logType;
 
     if (config) {
-      setDefault(attrs, TL_SPAN_KIND, config.kind);
+      // Do NOT set traceloop.span.kind for auto-emitted Vercel SDK spans.
+      // In the Respan composite processor `traceloop.span.kind` is reserved
+      // for user-decorated spans (withWorkflow / withTask / withAgent) and
+      // setting it on auto spans (a) flattens the parent/child tree and
+      // (b) causes LLM detail spans (doGenerate / doStream) to be classified
+      // as "task" instead of LLM in the backend. The respan.entity.log_type
+      // attribute (set above) carries the correct type for ingestion.
+      // Matches the patterns in respan-instrumentation-openinference (see
+      // _translator.ts:500) and respan-instrumentation-openai-agents
+      // (see _otel_emitter.ts:398).
 
       if (config.isLLM) {
         setDefault(attrs, LLM_REQUEST_TYPE, RespanLogType.CHAT);

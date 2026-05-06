@@ -1,0 +1,6 @@
+{
+  "summary": "Fix Vercel AI SDK instrumentation: populate Customer email/name from customer_params and stop misclassifying LLM spans as tasks",
+  "packages": {
+    "@respan/instrumentation-vercel": "patch"
+  }
+}
