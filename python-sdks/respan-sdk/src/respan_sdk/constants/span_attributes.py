@@ -151,9 +151,22 @@ RESPAN_SPAN_HANDOFFS = "respan.span.handoffs"
 # ---------------------------------------------------------------------------
 LLM_REQUEST_TYPE = "llm.request.type"
 LLM_REQUEST_MODEL = "gen_ai.request.model"
+LLM_PROMPTS = "gen_ai.prompt"
+LLM_COMPLETIONS = "gen_ai.completion"
 LLM_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"
 LLM_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"
+LLM_USAGE_TOTAL_TOKENS = "llm.usage.total_tokens"
 LLM_REQUEST_REASONING_EFFORT = "llm.request.reasoning_effort"
+
+# ---------------------------------------------------------------------------
+# Traceloop attributes
+# ---------------------------------------------------------------------------
+TRACELOOP_SPAN_KIND = "traceloop.span.kind"
+TRACELOOP_ENTITY_NAME = "traceloop.entity.name"
+TRACELOOP_ENTITY_PATH = "traceloop.entity.path"
+TRACELOOP_ENTITY_INPUT = "traceloop.entity.input"
+TRACELOOP_ENTITY_OUTPUT = "traceloop.entity.output"
+TRACELOOP_WORKFLOW_NAME = "traceloop.workflow.name"
 
 # ---------------------------------------------------------------------------
 # OTEL incubating GenAI attributes

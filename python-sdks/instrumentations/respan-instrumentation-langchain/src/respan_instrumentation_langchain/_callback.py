@@ -14,7 +14,6 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from opentelemetry import trace
-from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
 from respan_sdk.constants.llm_logging import (
     LOG_TYPE_AGENT,
     LOG_TYPE_CHAT,
@@ -116,14 +115,22 @@ from respan_sdk.constants.span_attributes import (
     GEN_AI_TOOL_CALL_ARGUMENTS,
     GEN_AI_TOOL_CALL_RESULT,
     GEN_AI_TOOL_NAME,
+    LLM_COMPLETIONS,
+    LLM_PROMPTS,
     LLM_REQUEST_MODEL,
     LLM_REQUEST_TYPE,
     LLM_USAGE_COMPLETION_TOKENS,
     LLM_USAGE_PROMPT_TOKENS,
+    LLM_USAGE_TOTAL_TOKENS,
     RESPAN_LOG_METHOD,
     RESPAN_LOG_TYPE,
     RESPAN_SPAN_TOOL_CALLS,
     RESPAN_SPAN_TOOLS,
+    TRACELOOP_ENTITY_INPUT,
+    TRACELOOP_ENTITY_NAME,
+    TRACELOOP_ENTITY_OUTPUT,
+    TRACELOOP_ENTITY_PATH,
+    TRACELOOP_SPAN_KIND,
 )
 from respan_tracing.utils.span_factory import build_readable_span, inject_span
 from respan_sdk.utils.data_processing.id_processing import format_span_id, format_trace_id
@@ -856,9 +863,9 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
         attrs: dict[str, Any] = {
             RESPAN_LOG_METHOD: LogMethodChoices.TRACING_INTEGRATION.value,
             RESPAN_LOG_TYPE: record.log_type,
-            SpanAttributes.TRACELOOP_SPAN_KIND: record.span_kind,
-            SpanAttributes.TRACELOOP_ENTITY_NAME: record.name,
-            SpanAttributes.TRACELOOP_ENTITY_PATH: record.entity_path,
+            TRACELOOP_SPAN_KIND: record.span_kind,
+            TRACELOOP_ENTITY_NAME: record.name,
+            TRACELOOP_ENTITY_PATH: record.entity_path,
             LANGCHAIN_RUN_ID_ATTR: record.run_id,
             LANGCHAIN_FRAMEWORK_ATTR: record.framework,
         }
@@ -872,8 +879,8 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
         if self.include_content:
             input_string = _to_json_string(record.input_value)
             output_string = _to_json_string(_normalize_output_for_logging(output_value))
-            _set_if_present(attrs, SpanAttributes.TRACELOOP_ENTITY_INPUT, input_string)
-            _set_if_present(attrs, SpanAttributes.TRACELOOP_ENTITY_OUTPUT, output_string)
+            _set_if_present(attrs, TRACELOOP_ENTITY_INPUT, input_string)
+            _set_if_present(attrs, TRACELOOP_ENTITY_OUTPUT, output_string)
 
         attrs.update(record.extra_attributes)
         return attrs
@@ -1035,7 +1042,7 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
         normalized_messages = _normalize_chat_messages(messages)
         first_conversation = normalized_messages[0] if normalized_messages else []
         extra_attrs: dict[str, Any] = {
-            LLM_REQUEST_TYPE: LLMRequestTypeValues.CHAT.value,
+            LLM_REQUEST_TYPE: LOG_TYPE_CHAT,
         }
         model = _extract_model(serialized, metadata=metadata)
         _set_if_present(extra_attrs, LLM_REQUEST_MODEL, model)
@@ -1043,7 +1050,7 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
             for key, value in message.items():
                 _set_if_present(
                     extra_attrs,
-                    f"{SpanAttributes.LLM_PROMPTS}.{index}.{key}",
+                    f"{LLM_PROMPTS}.{index}.{key}",
                     _to_json_string(value) if isinstance(value, (dict, list)) else value,
                 )
         tool_names = _extract_tool_names_from_serialized(serialized)
@@ -1054,7 +1061,7 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
             parent_run_id=parent_run_id,
             name=_extract_name(serialized, CHAT_MODEL_FALLBACK_NAME),
             log_type=LOG_TYPE_CHAT,
-            span_kind=LLMRequestTypeValues.CHAT.value,
+            span_kind=LOG_TYPE_CHAT,
             input_value=normalized_messages,
             serialized=serialized,
             tags=tags,
@@ -1078,10 +1085,10 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
         _set_if_present(extra_attrs, LLM_REQUEST_MODEL, model)
         for index, prompt in enumerate(prompts or []):
             extra_attrs[
-                f"{SpanAttributes.LLM_PROMPTS}.{index}.{LANGCHAIN_ROLE_KEY}"
+                f"{LLM_PROMPTS}.{index}.{LANGCHAIN_ROLE_KEY}"
             ] = LANGCHAIN_USER_ROLE
             extra_attrs[
-                f"{SpanAttributes.LLM_PROMPTS}.{index}.{LANGCHAIN_CONTENT_KEY}"
+                f"{LLM_PROMPTS}.{index}.{LANGCHAIN_CONTENT_KEY}"
             ] = prompt
 
         self._start_run(
@@ -1116,7 +1123,7 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
             for key, value in message.items():
                 _set_if_present(
                     extra_attrs,
-                    f"{SpanAttributes.LLM_COMPLETIONS}.{index}.{key}",
+                    f"{LLM_COMPLETIONS}.{index}.{key}",
                     _to_json_string(value) if isinstance(value, (dict, list)) else value,
                 )
 
@@ -1128,7 +1135,7 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
         for key, value in (
             (LLM_USAGE_PROMPT_TOKENS, prompt_tokens),
             (LLM_USAGE_COMPLETION_TOKENS, completion_tokens),
-            (SpanAttributes.LLM_USAGE_TOTAL_TOKENS, total_tokens),
+            (LLM_USAGE_TOTAL_TOKENS, total_tokens),
         ):
             _set_if_present(extra_attrs, key, value)
 
