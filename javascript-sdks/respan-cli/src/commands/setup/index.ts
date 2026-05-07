@@ -14,6 +14,13 @@ import {
   ensureDir,
 } from '../../lib/integrate.js';
 import { createSpinner } from '../../lib/spinner.js';
+import {
+  TRACING_MD,
+  GATEWAY_MD,
+  PROMPTS_MD,
+  EVALS_MD,
+  MONITORS_MD,
+} from '#lib/skill-refs.generated.js';
 
 // ── Shared skill content (same for all agents) ────────────────────────
 
@@ -25,198 +32,43 @@ Use the Respan CLI and SDK for LLM observability — tracing, evals, prompts, da
 
 ## When To Use
 
-- The user asks to **set up Respan** or **add tracing** → read [references/setup.md](references/setup.md)
-- The user asks about **traces, logs, prompts, datasets, evals** → read [references/platform.md](references/platform.md)
-- The user asks about **gateway routing** or **proxying LLM calls** → read [references/gateway.md](references/gateway.md)
-- You need to run a Respan CLI command → check [references/platform.md](references/platform.md) for command reference
+- **Set up Respan** or **add tracing** → read [references/setup.md](references/setup.md)
+- **Advanced tracing** (decorators, propagation, processors) → read [references/tracing.md](references/tracing.md)
+- **Gateway routing** or **proxying LLM calls** → read [references/gateway.md](references/gateway.md)
+- **Prompt management** (create, version, deploy) → read [references/prompts.md](references/prompts.md)
+- **Evals** (datasets, evaluators, experiments) → read [references/evals.md](references/evals.md)
+- **Monitors & automation** (alerts, online evals, webhooks) → read [references/monitors.md](references/monitors.md)
 
 ## Core Principles
 
-1. **Documentation First**: Always fetch current docs before implementing. Respan updates frequently. See docs access methods below.
-2. **CLI for Data Access**: Use \`respan\` CLI when querying/modifying Respan data.
-3. **Check References**: Read the relevant reference file before implementing any workflow.
+1. **Read the reference first.** Each reference file has the exact API patterns, MCP tools, and CLI commands.
+2. **Use MCP tools** for platform operations (prompts, datasets, evaluators, experiments, traces, logs).
+3. **Use CLI** when MCP is not available: \`respan traces list\`, \`respan prompts list\`, etc.
+4. **Fetch docs** for integration-specific details not covered in references.
 
 ## Quick Reference
 
-| Task | Command / Action |
-|------|-----------------|
-| Set up SDK tracing | Follow [references/setup.md](references/setup.md) |
+| Task | Reference / Command |
+|------|--------------------|
+| Set up SDK tracing | [references/setup.md](references/setup.md) |
+| Decorators & propagation | [references/tracing.md](references/tracing.md) |
+| Gateway routing | [references/gateway.md](references/gateway.md) |
+| Prompt management | [references/prompts.md](references/prompts.md) |
+| Evals & experiments | [references/evals.md](references/evals.md) |
+| Monitors & automation | [references/monitors.md](references/monitors.md) |
 | List traces | \`respan traces list --limit 10\` |
 | View a trace | \`respan traces get <id>\` |
-| List prompts | \`respan prompts list\` |
-| Create dataset | \`respan datasets create --name <name>\` |
-| Run evaluator | \`respan evaluators run <id>\` |
 | Check auth | \`respan auth status\` |
-| View logs | \`respan logs list --limit 10\` |
 
 ## Documentation Access
 
-Three methods to access Respan docs, in order of preference:
-
-### 1. Documentation Index (llms.txt)
-
-Fetch the full index of all doc pages:
-\`https://www.respan.ai/docs/llms.txt\`
-
-Use this to discover the right page for a topic, then fetch that page directly.
-
-### 2. Fetch Individual Pages as Markdown
-
-Any integration or SDK doc page can be fetched by changing \`.mdx\` to \`.md\`:
+Any doc page can be fetched as markdown:
 \`https://respan.ai/docs/integrations/openai-sdk.md\`
 \`https://respan.ai/docs/sdks/typescript-sdk/overview.md\`
 
-### 3. Platform
+Full docs index: \`https://www.respan.ai/docs/llms.txt\`
 
-View traces, logs, and analytics at: \`https://platform.respan.ai\`
-`;
-
-const GATEWAY_MD = `# Respan Gateway
-
-Route LLM calls through the Respan proxy for logging, caching, key management, and model switching.
-
-## Setup
-
-Point the LLM client's base URL at the Respan gateway. The API key authenticates both the proxy and tracing.
-
-### TypeScript
-
-\`\`\`typescript
-import OpenAI from "openai";
-
-const client = new OpenAI({
-  apiKey: process.env.RESPAN_API_KEY,
-  baseURL: process.env.RESPAN_BASE_URL || "https://api.respan.ai/api",
-});
-\`\`\`
-
-### Python
-
-\`\`\`python
-import os
-from openai import OpenAI
-
-client = OpenAI(
-    api_key=os.environ["RESPAN_API_KEY"],
-    base_url=os.getenv("RESPAN_BASE_URL", "https://api.respan.ai/api"),
-)
-\`\`\`
-
-## Gateway + Tracing (Both)
-
-Combine SDK tracing and gateway routing — initialize Respan for tracing AND point the LLM client at the gateway.
-
-## Features
-
-- **Unified key management** — one API key for all providers
-- **Caching** — cache repeated LLM calls
-- **Fallbacks** — automatic failover between providers
-- **Cost tracking** — per-request cost logging
-- **Model switching** — swap models without code changes
-
-## Docs
-
-- Quickstart: \`https://respan.ai/docs/documentation/features/gateway/gateway-quickstart.md\`
-- Advanced: \`https://respan.ai/docs/documentation/features/gateway/advanced.md\`
-- Provider setup: \`https://respan.ai/docs/integrations/providers/openai.md\`
-`;
-
-const PLATFORM_MD = `# Respan Platform
-
-Use the Respan CLI and platform for traces, logs, prompts, datasets, evaluations, and monitoring.
-
-## CLI Commands
-
-### Auth
-\`\`\`bash
-respan auth login          # Log in (browser or API key)
-respan auth status         # Check current auth
-respan auth logout         # Log out
-respan whoami              # Show current user
-\`\`\`
-
-### Traces
-\`\`\`bash
-respan traces list --limit 10          # List recent traces
-respan traces get <trace-id>           # Get trace details
-respan traces summary                  # Trace summary stats
-\`\`\`
-
-### Logs
-\`\`\`bash
-respan logs list --limit 10            # List recent logs
-respan logs get <log-id>               # Get log details
-respan logs summary                    # Log summary stats
-respan logs create --data '{...}'      # Create a log entry
-\`\`\`
-
-### Prompts
-\`\`\`bash
-respan prompts list                    # List all prompts
-respan prompts get <id>                # Get prompt details
-respan prompts create --name <name>    # Create a prompt
-respan prompts update <id>             # Update a prompt
-respan prompts versions <id>           # List prompt versions
-\`\`\`
-
-### Datasets
-\`\`\`bash
-respan datasets list                   # List datasets
-respan datasets create --name <name>   # Create a dataset
-respan datasets get <id>               # Get dataset details
-respan datasets spans <id>             # List dataset spans
-respan datasets add-spans <id>         # Add spans to dataset
-\`\`\`
-
-### Evaluators
-\`\`\`bash
-respan evaluators list                 # List evaluators
-respan evaluators get <id>             # Get evaluator details
-respan evaluators create               # Create an evaluator
-respan evaluators run <id>             # Run an evaluator
-\`\`\`
-
-### Experiments
-\`\`\`bash
-respan experiments list                # List experiments
-respan experiments get <id>            # Get experiment details
-respan experiments create              # Create an experiment
-\`\`\`
-
-### Integration (CLI agent tracing)
-\`\`\`bash
-respan integrate claude-code           # Trace Claude Code conversations
-respan integrate codex-cli             # Trace Codex CLI conversations
-respan integrate gemini-cli            # Trace Gemini CLI conversations
-respan integrate opencode              # Trace OpenCode conversations
-respan integrate <tool> --disable      # Disable tracing
-\`\`\`
-
-### Config
-\`\`\`bash
-respan config list                     # List all config
-respan config get <key>                # Get config value
-respan config set <key> <value>        # Set config value
-\`\`\`
-
-## Platform Features
-
-- **Traces** — structured spans showing LLM call hierarchy, inputs/outputs, tokens, cost
-- **Logs** — request-level logging with metadata
-- **Prompts** — version-controlled prompt templates with deployment
-- **Datasets** — curated test data for evaluations
-- **Evaluators** — automated scoring/grading of LLM outputs
-- **Experiments** — run evals over datasets and compare results
-- **Monitors** — metric-based alerts for production regressions
-- **Views** — saved filters for quick access
-
-## Docs
-
-- Tracing concepts: \`https://respan.ai/docs/documentation/features/tracing/concepts.md\`
-- Evals concepts: \`https://respan.ai/docs/documentation/features/evals/concepts.md\`
-- Prompts: \`https://respan.ai/docs/documentation/features/prompt-management/prompt-management-quickstart.md\`
-- Monitoring: \`https://respan.ai/docs/documentation/features/monitoring/metrics.md\`
-- Full docs: \`https://www.respan.ai/docs/llms.txt\`
+Platform: \`https://platform.respan.ai\`
 `;
 
 const SETUP_MD = `# Respan Setup
@@ -259,9 +111,9 @@ Check higher-priority categories first. If a match is found, use that instrument
 | Pydantic AI | \`pydantic-ai\` | — | \`respan-instrumentation-pydantic-ai\` | — | [docs](https://respan.ai/docs/integrations/pydantic-ai.md) |
 | LangChain | \`langchain\` | \`langchain\` | via OpenInference | — | [docs](https://respan.ai/docs/integrations/langchain.md) |
 | LangGraph | \`langgraph\` | — | via OpenInference | — | [docs](https://respan.ai/docs/integrations/langgraph.md) |
-| CrewAI | \`crewai\` | — | via OpenInference | — | [docs](https://respan.ai/docs/integrations/crewai.md) |
+| CrewAI | \`crewai\` | — | \`respan-instrumentation-crewai\` | — | [docs](https://respan.ai/docs/integrations/crewai.md) |
 | LlamaIndex | \`llama-index\` | — | via OpenInference | — | [docs](https://respan.ai/docs/integrations/llama-index.md) |
-| Haystack | \`haystack-ai\` | — | via exporter | — | [docs](https://respan.ai/docs/integrations/haystack.md) |
+| Haystack | \`haystack-ai\` | — | \`respan-instrumentation-haystack\` | — | [docs](https://respan.ai/docs/integrations/haystack.md) |
 | Mastra | — | \`mastra\` | — | via OTEL | [docs](https://respan.ai/docs/integrations/mastra.md) |
 | Google ADK | \`google-adk\` | — | via OpenInference | — | [docs](https://respan.ai/docs/integrations/google-adk.md) |
 
@@ -698,6 +550,8 @@ This is the recommended way to get started with Respan.`;
           attr('gen_ai.system', 'openai'),
           attr('gen_ai.request.model', 'gpt-4o-mini'),
           attr('gen_ai.response.model', 'gpt-4o-mini'),
+          intAttr('gen_ai.usage.input_tokens', 145),
+          intAttr('gen_ai.usage.output_tokens', 38),
           intAttr('gen_ai.usage.prompt_tokens', 145),
           intAttr('gen_ai.usage.completion_tokens', 38),
           attr('traceloop.entity.input', '[{"role": "system", "content": "Classify the customer intent."}, {"role": "user", "content": "My order #12345 hasn\'t arrived yet"}]'),
@@ -731,6 +585,8 @@ This is the recommended way to get started with Respan.`;
           attr('gen_ai.system', 'openai'),
           attr('gen_ai.request.model', 'gpt-4o-mini'),
           attr('gen_ai.response.model', 'gpt-4o-mini'),
+          intAttr('gen_ai.usage.input_tokens', 210),
+          intAttr('gen_ai.usage.output_tokens', 85),
           intAttr('gen_ai.usage.prompt_tokens', 210),
           intAttr('gen_ai.usage.completion_tokens', 85),
           attr('traceloop.entity.input', '[{"role": "system", "content": "Generate a helpful response to the customer."}, {"role": "user", "content": "Order delayed, refund initiated for #12345"}]'),
@@ -879,8 +735,11 @@ This is the recommended way to get started with Respan.`;
       ensureDir(refsDir);
       writeTextFile(path.join(skillDir, 'SKILL.md'), this.getSkillMd());
       writeTextFile(path.join(refsDir, 'setup.md'), SETUP_MD);
-      writeTextFile(path.join(refsDir, 'platform.md'), PLATFORM_MD);
+      writeTextFile(path.join(refsDir, 'tracing.md'), TRACING_MD);
       writeTextFile(path.join(refsDir, 'gateway.md'), GATEWAY_MD);
+      writeTextFile(path.join(refsDir, 'prompts.md'), PROMPTS_MD);
+      writeTextFile(path.join(refsDir, 'evals.md'), EVALS_MD);
+      writeTextFile(path.join(refsDir, 'monitors.md'), MONITORS_MD);
     };
 
     // Write to ~/.agents/skills/ (Cursor, Codex, Gemini CLI, OpenCode)
