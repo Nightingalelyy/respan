@@ -13,7 +13,6 @@ import {
   AI_TOOL_CALL_NAME,
   AI_TOOL_CALL_PREFIX,
   AI_TOOL_CALL_RESULT,
-  RESPAN_SPAN_TOOL_CALLS,
   isRecord,
   safeJsonParse,
   safeJsonStr,
@@ -72,7 +71,7 @@ function normalizeToolCallList(value: unknown): Record<string, any>[] | undefine
   return normalized.length > 0 ? normalized : undefined;
 }
 
-function parseToolCalls(attrs: SpanAttributes): Record<string, any>[] | undefined {
+export function parseToolCalls(attrs: SpanAttributes): Record<string, any>[] | undefined {
   for (const key of [AI_RESPONSE_TOOL_CALLS, AI_TOOL_CALL, AI_TOOL_CALLS]) {
     if (!attrs[key]) {
       continue;
@@ -145,6 +144,7 @@ export function parseToolsValue(attrs: SpanAttributes): unknown[] | undefined {
     return undefined;
   }
 }
+
 
 export function parseToolChoice(attrs: SpanAttributes): string | undefined {
   try {
@@ -442,27 +442,24 @@ function selectPrimaryAssistantMessage(value: unknown): MessagePayload | undefin
 
 function enrichCompletionAttrs(attrs: SpanAttributes, payload: unknown): void {
   const message = selectPrimaryAssistantMessage(payload);
-  if (!message) {
-    return;
+  const responseToolCalls = message
+    ? normalizeToolCallList(message.tool_calls) ||
+      normalizeToolCallList(message.toolCalls) ||
+      parseToolCalls(attrs)
+    : parseToolCalls(attrs);
+
+  if (message) {
+    attrs["gen_ai.completion.0.role"] = "assistant";
+    attrs["gen_ai.completion.0.content"] =
+      typeof message.content === "string"
+        ? message.content
+        : message.content !== undefined
+          ? safeJsonStr(message.content)
+          : "";
   }
 
-  attrs["gen_ai.completion.0.role"] = "assistant";
-  attrs["gen_ai.completion.0.content"] =
-    typeof message.content === "string"
-      ? message.content
-      : message.content !== undefined
-        ? safeJsonStr(message.content)
-        : "";
-
-  const toolCalls =
-    normalizeToolCallList(message.tool_calls) ||
-    normalizeToolCallList(message.toolCalls) ||
-    parseToolCalls(attrs);
-  if (toolCalls && toolCalls.length > 0) {
-    attrs["gen_ai.completion.0.tool_calls"] = toolCalls;
-    attrs[RESPAN_SPAN_TOOL_CALLS] = safeJsonStr(toolCalls);
-    attrs["has_tool_calls"] = true;
-    attrs["parallel_tool_calls"] = toolCalls.length > 1;
+  if (responseToolCalls && responseToolCalls.length > 0) {
+    attrs["gen_ai.completion.0.tool_calls"] = safeJsonStr(responseToolCalls);
   }
 }
 
@@ -547,3 +544,4 @@ export function formatToolOutput(attrs: SpanAttributes): string | undefined {
   }
   return safeJsonStr(typeof result === "string" ? safeJsonParse(result) : result);
 }
+
