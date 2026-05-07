@@ -1,18 +1,18 @@
-import builtins
 import sys
 from types import ModuleType, SimpleNamespace
 from uuid import UUID, uuid4
 
 from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
 
+import respan_instrumentation_langchain._callback
+import respan_instrumentation_langchain._instrumentation
 from respan_instrumentation_langchain import (
     LangChainInstrumentor,
     RespanCallbackHandler,
     add_respan_callback,
     get_callback_handler,
 )
-from respan_instrumentation_langchain import _callback as callback_module
-from respan_instrumentation_langchain._constants import LANGCHAIN_FRAMEWORK_ATTR
+from respan_sdk.constants.otlp_constants import ERROR_MESSAGE_ATTR
 from respan_sdk.constants.span_attributes import (
     GEN_AI_TOOL_CALL_ARGUMENTS,
     GEN_AI_TOOL_CALL_RESULT,
@@ -23,7 +23,6 @@ from respan_sdk.constants.span_attributes import (
     LLM_USAGE_PROMPT_TOKENS,
     RESPAN_LOG_TYPE,
 )
-from respan_sdk.constants.otlp_constants import ERROR_MESSAGE_ATTR
 
 
 def _capture_spans(monkeypatch):
@@ -34,8 +33,16 @@ def _capture_spans(monkeypatch):
         captured.append(span)
         return span
 
-    monkeypatch.setattr(callback_module, "build_readable_span", _fake_build_readable_span)
-    monkeypatch.setattr(callback_module, "inject_span", lambda span: True)
+    monkeypatch.setattr(
+        respan_instrumentation_langchain._callback,
+        "build_readable_span",
+        _fake_build_readable_span,
+    )
+    monkeypatch.setattr(
+        respan_instrumentation_langchain._callback,
+        "inject_span",
+        lambda span: True,
+    )
     return captured
 
 
@@ -108,7 +115,7 @@ def test_chain_root_and_child_emit_workflow_and_task_spans(monkeypatch):
     assert root_span.attributes[RESPAN_LOG_TYPE] == "workflow"
     assert child_span.kwargs["trace_id"] == root_span.kwargs["trace_id"]
     assert child_span.kwargs["parent_id"] == root_span.kwargs["span_id"]
-    assert root_span.attributes[LANGCHAIN_FRAMEWORK_ATTR] == "langgraph"
+    assert root_span.attributes["respan.metadata.framework"] == "langgraph"
 
 
 def test_root_run_uses_active_otel_span_as_parent(monkeypatch):
@@ -125,7 +132,11 @@ def test_root_run_uses_active_otel_span_as_parent(monkeypatch):
                 span_id=int(active_span_id, 16),
             )
 
-    monkeypatch.setattr(callback_module.trace, "get_current_span", lambda: _FakeSpan())
+    monkeypatch.setattr(
+        respan_instrumentation_langchain._callback.trace,
+        "get_current_span",
+        lambda: _FakeSpan(),
+    )
 
     handler.on_chain_start({"name": "root_chain"}, {}, run_id=run_id)
     handler.on_chain_end({"ok": True}, run_id=run_id)
@@ -184,7 +195,10 @@ def test_chat_model_start_end_maps_messages_usage_model_and_tool_calls(monkeypat
         usage_metadata={"input_tokens": 10, "output_tokens": 3},
     )
     generation = SimpleNamespace(message=ai_message)
-    response = SimpleNamespace(generations=[[generation]], llm_output={"model_name": "gpt-4o-mini"})
+    response = SimpleNamespace(
+        generations=[[generation]],
+        llm_output={"model_name": "gpt-4o-mini"},
+    )
 
     handler.on_chat_model_start(
         {"name": "ChatOpenAI", "kwargs": {"model": "gpt-4o-mini"}},
@@ -212,7 +226,10 @@ def test_llm_json_code_fence_output_is_unwrapped_for_logged_content(monkeypatch)
     fenced_json = '```json\n{"owner": "Security Operations Team"}\n```'
     ai_message = SimpleNamespace(type="ai", content=fenced_json)
     generation = SimpleNamespace(message=ai_message)
-    response = SimpleNamespace(generations=[[generation]], llm_output={"model_name": "gpt-4o-mini"})
+    response = SimpleNamespace(
+        generations=[[generation]],
+        llm_output={"model_name": "gpt-4o-mini"},
+    )
 
     handler.on_chat_model_start(
         {"name": "ChatOpenAI", "kwargs": {"model": "gpt-4o-mini"}},
@@ -222,9 +239,11 @@ def test_llm_json_code_fence_output_is_unwrapped_for_logged_content(monkeypatch)
     handler.on_llm_end(response, run_id=run_id)
 
     attrs = captured[0].attributes
-    assert attrs["gen_ai.completion.0.content"] == '{"owner": "Security Operations Team"}'
+    assert (
+        attrs["gen_ai.completion.0.content"]
+        == '{"owner": "Security Operations Team"}'
+    )
     assert "```" not in attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
-    assert "```" not in attrs["output"]
 
 
 def test_chain_json_code_fence_output_is_unwrapped_for_logged_output(monkeypatch):
@@ -238,7 +257,6 @@ def test_chain_json_code_fence_output_is_unwrapped_for_logged_output(monkeypatch
 
     attrs = captured[0].attributes
     assert "```" not in attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
-    assert "```" not in attrs["output"]
     assert "Investigate login history" in attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
 
 
@@ -265,7 +283,10 @@ def test_llm_start_new_tokens_and_end_emit_completion_span(monkeypatch):
     assert attrs[RESPAN_LOG_TYPE] == "completion"
     assert attrs[LLM_REQUEST_TYPE] == "completion"
     assert attrs[LLM_REQUEST_MODEL] == "text-davinci"
-    assert attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] == '[[{"role": "assistant", "content": ""}]]'
+    assert (
+        attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
+        == '[[{"role": "assistant", "content": ""}]]'
+    )
 
 
 def test_tool_start_end_maps_tool_fields(monkeypatch):
@@ -314,7 +335,6 @@ def test_error_callbacks_mark_span_as_error(monkeypatch):
     assert captured[0].kwargs["status_code"] == 500
     assert captured[0].kwargs["error_message"] == "failed"
     assert captured[0].attributes[ERROR_MESSAGE_ATTR] == "failed"
-    assert captured[0].attributes["status_code"] == 500
 
 
 def test_llm_tool_and_retriever_error_callbacks_mark_spans_as_error(monkeypatch):
@@ -342,7 +362,6 @@ def test_llm_tool_and_retriever_error_callbacks_mark_spans_as_error(monkeypatch)
         "tool failed",
         "retriever failed",
     ]
-    assert [span.attributes["status_code"] for span in captured] == [500, 500, 500]
 
 
 def test_on_text_uses_streamed_text_when_run_has_no_output(monkeypatch):
@@ -388,7 +407,7 @@ def test_custom_event_and_graph_lifecycle_events_emit_spans(monkeypatch):
         "langgraph.interrupt",
         "langgraph.resume",
     ]
-    assert captured[1].attributes[LANGCHAIN_FRAMEWORK_ATTR] == "langgraph"
+    assert captured[1].attributes["respan.metadata.framework"] == "langgraph"
 
 
 def test_on_retry_records_retry_metadata_on_final_span(monkeypatch):
@@ -477,14 +496,22 @@ def test_instrumentor_patches_langgraph_config_helpers(monkeypatch):
 
 
 def test_instrumentor_logs_warning_when_langchain_missing(monkeypatch, caplog):
-    original_import = builtins.__import__
+    original_import_module = (
+        respan_instrumentation_langchain._instrumentation.importlib.import_module
+    )
 
-    def _blocked_import(name, *args, **kwargs):
-        if name == "langchain_core.callbacks.manager":
+    def _blocked_import_module(name, package=None):
+        if (
+            name == "langchain_core.callbacks.manager"
+        ):
             raise ImportError("missing langchain")
-        return original_import(name, *args, **kwargs)
+        return original_import_module(name, package=package)
 
-    monkeypatch.setattr(builtins, "__import__", _blocked_import)
+    monkeypatch.setattr(
+        respan_instrumentation_langchain._instrumentation.importlib,
+        "import_module",
+        _blocked_import_module,
+    )
 
     instrumentor = LangChainInstrumentor()
 
@@ -498,6 +525,15 @@ def test_instrumentor_logs_warning_when_langchain_missing(monkeypatch, caplog):
 def test_run_id_to_hex_accepts_uuid_strings_and_plain_strings():
     run_id = UUID("12345678-1234-5678-1234-567812345678")
 
-    assert callback_module._run_id_to_hex(run_id) == "12345678123456781234567812345678"
-    assert callback_module._run_id_to_hex(str(run_id)) == "12345678123456781234567812345678"
-    assert len(callback_module._run_id_to_hex("plain-id")) == 32
+    assert (
+        respan_instrumentation_langchain._callback._run_id_to_hex(run_id)
+        == "12345678123456781234567812345678"
+    )
+    assert (
+        respan_instrumentation_langchain._callback._run_id_to_hex(str(run_id))
+        == "12345678123456781234567812345678"
+    )
+    assert (
+        len(respan_instrumentation_langchain._callback._run_id_to_hex("plain-id"))
+        == 32
+    )
