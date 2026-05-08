@@ -34,6 +34,7 @@ export const DIRECT_MODEL = "model";
 export const DIRECT_PROMPT_TOKENS = "prompt_tokens";
 export const DIRECT_COMPLETION_TOKENS = "completion_tokens";
 export const DIRECT_TOTAL_REQUEST_TOKENS = "total_request_tokens";
+export const DIRECT_TOOLS = "tools";
 
 const JSON_CODE_FENCE_RE =
   /^\s*(?<fence>`{3,}|~{3,})[ \t]*(?<language>jsonc?)?[ \t]*\r?\n(?<body>.*?)(?:\r?\n)?\k<fence>\s*$/is;
@@ -42,7 +43,12 @@ const EMPTY_VALUES = new Set<unknown>([undefined, null, ""]);
 
 export type HrTimeTuple = [number, number];
 export type FrameworkName = "langchain" | "langgraph" | "langflow";
-export type SpanAttributesRecord = Record<string, any>;
+export interface LangChainCallbackConfig {
+  callbacks?: unknown;
+  [key: string]: unknown;
+}
+
+export type SpanAttributesRecord = Record<string, unknown>;
 
 export interface RespanCallbackHandlerOptions {
   includeContent?: boolean;
@@ -54,6 +60,11 @@ export interface RespanCallbackHandlerOptions {
 interface ActiveParent {
   traceId: string;
   spanId: string;
+}
+
+interface MessageLikeRecord extends Record<string, unknown> {
+  _getType?: () => unknown;
+  getType?: () => unknown;
 }
 
 export interface RunRecord {
@@ -240,7 +251,9 @@ function normalizeRole(role: unknown): string {
 function messageToDict(message: unknown): Record<string, unknown> {
   const raw = toSerializableValue(message);
   const rawRecord = isPlainRecord(raw) ? raw : {};
-  const original = isPlainRecord(message) ? message : (message as any);
+  const original: MessageLikeRecord = isPlainRecord(message)
+    ? message
+    : {};
   const role =
     rawRecord.role ??
     rawRecord.type ??
@@ -440,7 +453,15 @@ export function extractUsage(response: unknown): {
       totalTokens = (promptTokens ?? 0) + (completionTokens ?? 0);
     }
     if (promptTokens !== undefined || completionTokens !== undefined || totalTokens !== undefined) {
-      return { promptTokens, completionTokens, totalTokens };
+      const usage: {
+        promptTokens?: number;
+        completionTokens?: number;
+        totalTokens?: number;
+      } = {};
+      if (promptTokens !== undefined) usage.promptTokens = promptTokens;
+      if (completionTokens !== undefined) usage.completionTokens = completionTokens;
+      if (totalTokens !== undefined) usage.totalTokens = totalTokens;
+      return usage;
     }
   }
 
@@ -543,18 +564,89 @@ export function extractToolCallsFromMessages(
 }
 
 export function extractToolNamesFromSerialized(serialized: unknown): string[] | undefined {
-  if (!isPlainRecord(serialized)) return undefined;
-  const kwargs = isPlainRecord(serialized.kwargs) ? serialized.kwargs : {};
-  const tools = serialized.tools ?? serialized.functions ?? kwargs.tools ?? kwargs.functions;
-  const rawTools = Array.isArray(tools) ? tools : [];
-  const names = rawTools
+  const names = (extractTools({ serialized }) ?? [])
     .map((tool) => {
-      if (!isPlainRecord(tool)) return undefined;
-      const fn = tool.function;
-      return isPlainRecord(fn) ? fn.name : tool.name;
+      const functionDefinition = tool.function;
+      if (isPlainRecord(functionDefinition) && typeof functionDefinition.name === "string") {
+        return functionDefinition.name;
+      }
+      return undefined;
     })
     .filter((name): name is string => typeof name === "string" && name.length > 0);
   return names.length > 0 ? names : undefined;
+}
+
+function collectToolCandidates(value: unknown, candidates: unknown[]): void {
+  if (!isPlainRecord(value)) return;
+
+  const rawTools = value.tools ?? value.functions;
+  if (Array.isArray(rawTools)) {
+    candidates.push(...rawTools);
+  }
+
+  for (const key of [
+    "invocation_params",
+    "invocationParams",
+    "kwargs",
+    "options",
+    "config",
+    "model_kwargs",
+    "modelKwargs",
+  ]) {
+    collectToolCandidates(value[key], candidates);
+  }
+}
+
+function normalizeToolDefinition(tool: unknown): Record<string, unknown> | undefined {
+  const serializableTool = toSerializableValue(tool);
+  if (!isPlainRecord(serializableTool)) return undefined;
+
+  const functionDefinition = serializableTool.function;
+  if (isPlainRecord(functionDefinition) && typeof functionDefinition.name === "string") {
+    return {
+      ...serializableTool,
+      type: typeof serializableTool.type === "string" ? serializableTool.type : "function",
+      function: functionDefinition,
+    };
+  }
+
+  const name = serializableTool.name ?? serializableTool.toolName ?? serializableTool.id;
+  if (typeof name !== "string" || !name.trim()) return undefined;
+
+  const parameters =
+    serializableTool.parameters ??
+    serializableTool.schema ??
+    serializableTool.args_schema ??
+    serializableTool.argsSchema;
+
+  const normalizedFunction: Record<string, unknown> = {
+    name: name.trim(),
+  };
+  setIfPresent(normalizedFunction, "description", serializableTool.description);
+  setIfPresent(normalizedFunction, "parameters", parameters);
+
+  return {
+    type: "function",
+    function: normalizedFunction,
+  };
+}
+
+export function extractTools({
+  serialized,
+  extraParams,
+}: {
+  serialized?: unknown;
+  extraParams?: unknown;
+}): Record<string, unknown>[] | undefined {
+  const candidates: unknown[] = [];
+  collectToolCandidates(extraParams, candidates);
+  collectToolCandidates(serialized, candidates);
+
+  const tools = candidates
+    .map(normalizeToolDefinition)
+    .filter((tool): tool is Record<string, unknown> => tool !== undefined);
+
+  return tools.length > 0 ? tools : undefined;
 }
 
 export function normalizeTags(tags?: unknown): string[] | undefined {

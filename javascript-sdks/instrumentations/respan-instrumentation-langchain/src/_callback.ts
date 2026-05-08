@@ -7,6 +7,7 @@ import {
   DIRECT_MODEL,
   DIRECT_OUTPUT,
   DIRECT_PROMPT_TOKENS,
+  DIRECT_TOOLS,
   DIRECT_TOTAL_REQUEST_TOKENS,
   ERROR_MESSAGE_ATTR,
   GEN_AI_COMPLETION_PREFIX,
@@ -36,8 +37,8 @@ import {
   extractLlmOutput,
   extractModel,
   extractName,
+  extractTools,
   extractToolCallsFromMessages,
-  extractToolNamesFromSerialized,
   extractUsage,
   generateTraceId,
   getActiveOtelParent,
@@ -52,12 +53,16 @@ import {
   setIfPresent,
   toSerializableValue,
   trimMap,
+  type LangChainCallbackConfig,
   type RespanCallbackHandlerOptions,
   type RunRecord,
   type SpanAttributesRecord,
 } from "./_callback_helpers.js";
 
-export type { RespanCallbackHandlerOptions } from "./_callback_helpers.js";
+export type {
+  LangChainCallbackConfig,
+  RespanCallbackHandlerOptions,
+} from "./_callback_helpers.js";
 
 export function getCallbackHandler(
   options: RespanCallbackHandlerOptions = {},
@@ -69,10 +74,10 @@ export function getCallbackHandler(
 }
 
 export function addRespanCallback(
-  config: Record<string, any> = {},
+  config: LangChainCallbackConfig = {},
   handler: RespanCallbackHandler = getCallbackHandler(),
-): Record<string, any> {
-  const nextConfig = { ...config };
+): LangChainCallbackConfig {
+  const nextConfig: LangChainCallbackConfig = { ...config };
   nextConfig.callbacks = withRespanCallback(nextConfig.callbacks, handler);
   return nextConfig;
 }
@@ -425,7 +430,7 @@ export class RespanCallbackHandler {
     messages: unknown,
     runId: unknown,
     parentRunId?: unknown,
-    _extraParams?: unknown,
+    extraParams?: unknown,
     tags?: unknown,
     metadata?: unknown,
     runName?: unknown,
@@ -448,11 +453,9 @@ export class RespanCallbackHandler {
         );
       }
     }
-    setIfPresent(
-      extraAttributes,
-      RespanSpanAttributes.RESPAN_SPAN_TOOLS,
-      safeJsonString(extractToolNamesFromSerialized(serialized)),
-    );
+    const tools = extractTools({ serialized, extraParams });
+    setIfPresent(extraAttributes, RespanSpanAttributes.RESPAN_SPAN_TOOLS, tools);
+    setIfPresent(extraAttributes, DIRECT_TOOLS, tools);
 
     this._startRun({
       runId,
@@ -473,7 +476,7 @@ export class RespanCallbackHandler {
     prompts: unknown,
     runId: unknown,
     parentRunId?: unknown,
-    _extraParams?: unknown,
+    extraParams?: unknown,
     tags?: unknown,
     metadata?: unknown,
     runName?: unknown,
@@ -486,6 +489,9 @@ export class RespanCallbackHandler {
     const model = extractModel(serialized, undefined, normalizedMetadata);
     setIfPresent(extraAttributes, RespanSpanAttributes.GEN_AI_REQUEST_MODEL, model);
     setIfPresent(extraAttributes, DIRECT_MODEL, model);
+    const tools = extractTools({ serialized, extraParams });
+    setIfPresent(extraAttributes, RespanSpanAttributes.RESPAN_SPAN_TOOLS, tools);
+    setIfPresent(extraAttributes, DIRECT_TOOLS, tools);
     for (const [index, prompt] of normalizedPrompts.entries()) {
       extraAttributes[`${GEN_AI_PROMPT_PREFIX}.${index}.role`] = "user";
       extraAttributes[`${GEN_AI_PROMPT_PREFIX}.${index}.content`] = String(prompt ?? "");

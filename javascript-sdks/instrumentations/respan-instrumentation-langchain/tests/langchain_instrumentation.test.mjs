@@ -9,6 +9,13 @@ import {
   addRespanCallback,
   getCallbackHandler,
 } from "../dist/index.js";
+import {
+  extractToolNamesFromSerialized,
+  extractTools,
+  extractUsage,
+  normalizeChatMessages,
+  toSerializableValue,
+} from "../dist/_callback_helpers.js";
 
 const captured = [];
 
@@ -191,6 +198,46 @@ test("chat model output maps messages, usage, model, tool calls, and strips JSON
   assert.equal(span.attributes["respan.span.tool_calls"][0].function.name, "router");
 });
 
+test("chat model start preserves full tool definitions from LangChain extra params", () => {
+  resetProvider();
+  const handler = new RespanCallbackHandler();
+  const llmRunId = runId(51);
+  const tools = [{
+    type: "function",
+    function: {
+      name: "route_case",
+      description: "Route the case to a department",
+      parameters: {
+        type: "object",
+        properties: {
+          department: { type: "string" },
+        },
+        required: ["department"],
+      },
+    },
+  }];
+
+  handler.handleChatModelStart(
+    { name: "ChatOpenAI", kwargs: { model: "gpt-4o-mini" } },
+    [[{ type: "human", content: "Route this case" }]],
+    llmRunId,
+    undefined,
+    { invocation_params: { tools } },
+  );
+  handler.handleLLMEnd(
+    {
+      generations: [[{
+        message: { type: "ai", content: "Done" },
+      }]],
+    },
+    llmRunId,
+  );
+
+  const span = captured[0];
+  assert.deepEqual(span.attributes["respan.span.tools"], tools);
+  assert.deepEqual(span.attributes.tools, tools);
+});
+
 test("LLM streaming falls back to collected text when final output is empty", () => {
   resetProvider();
   const handler = new RespanCallbackHandler();
@@ -302,4 +349,89 @@ test("agent action, agent end, and custom event emit event spans", () => {
   assert.equal(eventSpan.name, "custom_step");
   assert.equal(eventSpan.attributes["respan.entity.log_type"], "task");
   assert.equal(chainSpan.attributes["respan.entity.log_type"], "workflow");
+});
+
+test("pure helpers normalize messages, usage, serializable values, and tool definitions", () => {
+  const circular = { name: "root" };
+  circular.self = circular;
+  const serialized = toSerializableValue({
+    createdAt: new Date("2026-05-08T00:00:00.000Z"),
+    count: 1n,
+    circular,
+  });
+  assert.deepEqual(serialized, {
+    createdAt: "2026-05-08T00:00:00.000Z",
+    count: "1",
+    circular: {
+      name: "root",
+      self: "[Circular]",
+    },
+  });
+
+  assert.deepEqual(
+    normalizeChatMessages([{ type: "human", content: "hello" }]),
+    [[{ role: "user", content: "hello" }]],
+  );
+
+  assert.deepEqual(
+    extractUsage({
+      llmOutput: {
+        tokenUsage: {
+          promptTokens: "10",
+          completionTokens: 5.8,
+        },
+      },
+    }),
+    {
+      promptTokens: 10,
+      completionTokens: 5,
+      totalTokens: 15,
+    },
+  );
+  assert.deepEqual(extractUsage({ usage: { total_tokens: "7" } }), {
+    totalTokens: 7,
+  });
+  assert.deepEqual(extractUsage({}), {});
+
+  const langChainStyleTool = {
+    name: "search",
+    description: "Search docs",
+    schema: {
+      type: "object",
+      properties: { query: { type: "string" } },
+    },
+  };
+  const openAiStyleTool = {
+    type: "function",
+    function: {
+      name: "route",
+      parameters: { type: "object" },
+    },
+  };
+
+  assert.deepEqual(
+    extractTools({
+      serialized: { kwargs: { tools: [langChainStyleTool] } },
+      extraParams: { invocation_params: { tools: [openAiStyleTool] } },
+    }),
+    [
+      openAiStyleTool,
+      {
+        type: "function",
+        function: {
+          name: "search",
+          description: "Search docs",
+          parameters: {
+            type: "object",
+            properties: { query: { type: "string" } },
+          },
+        },
+      },
+    ],
+  );
+  assert.deepEqual(
+    extractToolNamesFromSerialized({ kwargs: { tools: [langChainStyleTool] } }),
+    ["search"],
+  );
+  assert.equal(extractTools({ serialized: { tools: ["bad-tool"] } }), undefined);
 });

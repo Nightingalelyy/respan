@@ -12,6 +12,7 @@ import {
   addRespanCallback,
   getCallbackHandler,
   RespanCallbackHandler,
+  type LangChainCallbackConfig,
   type RespanCallbackHandlerOptions,
 } from "./_callback.js";
 
@@ -19,6 +20,7 @@ export {
   addRespanCallback,
   getCallbackHandler,
   RespanCallbackHandler,
+  type LangChainCallbackConfig,
   type RespanCallbackHandlerOptions,
 } from "./_callback.js";
 
@@ -51,7 +53,7 @@ export class LangChainInstrumentor {
     return this._active;
   }
 
-  addCallback(config: Record<string, any> = {}): Record<string, any> {
+  addCallback(config: LangChainCallbackConfig = {}): LangChainCallbackConfig {
     return addRespanCallback(config, this.callbackHandler);
   }
 }
