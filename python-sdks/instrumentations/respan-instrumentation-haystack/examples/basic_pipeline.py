@@ -13,42 +13,48 @@ Environment variables:
 """
 
 import os
-from dotenv import load_dotenv
 
-load_dotenv()
-
-respan_api_key = os.environ["RESPAN_API_KEY"]
-respan_base_url = os.getenv("RESPAN_BASE_URL", "https://api.respan.ai/api")
-
-# Point OpenAI traffic through Respan gateway (same base URL)
-os.environ["OPENAI_API_KEY"] = respan_api_key
-os.environ["OPENAI_BASE_URL"] = respan_base_url
-
+from haystack import Pipeline
+from haystack.components.builders import PromptBuilder
+from haystack.components.generators import OpenAIGenerator
 from respan import Respan
 from respan_instrumentation_haystack import HaystackInstrumentor
 
-# Initialize Respan BEFORE importing Haystack components
-respan = Respan(
-    api_key=respan_api_key,
-    base_url=respan_base_url,
-    instrumentations=[HaystackInstrumentor()],
-)
 
-from haystack import Pipeline
-from haystack.components.generators import OpenAIGenerator
-from haystack.components.builders import PromptBuilder
+def run_basic_pipeline() -> None:
+    respan_api_key = os.environ["RESPAN_API_KEY"]
+    respan_base_url = os.getenv(
+        "RESPAN_BASE_URL",
+        "https://api.respan.ai",
+    ).rstrip("/")
 
-template = """Answer the following question concisely: {{question}}"""
+    os.environ.setdefault("HAYSTACK_CONTENT_TRACING_ENABLED", "true")
+    os.environ["OPENAI_API_KEY"] = respan_api_key
+    os.environ["OPENAI_BASE_URL"] = f"{respan_base_url}/api/openai"
 
-pipe = Pipeline()
-pipe.add_component("prompt_builder", PromptBuilder(template=template))
-pipe.add_component(
-    "llm",
-    OpenAIGenerator(model="gpt-4o-mini"),
-)
-pipe.connect("prompt_builder", "llm")
+    respan = Respan(
+        api_key=respan_api_key,
+        base_url=respan_base_url,
+        instrumentations=[HaystackInstrumentor()],
+    )
 
-result = pipe.run({"prompt_builder": {"question": "What is the capital of France?"}})
-print(result["llm"]["replies"][0])
+    template = """Answer the following question concisely: {{question}}"""
 
-respan.flush()
+    pipeline = Pipeline()
+    pipeline.add_component("prompt_builder", PromptBuilder(template=template))
+    pipeline.add_component(
+        "generator",
+        OpenAIGenerator(model="gpt-4o-mini"),
+    )
+    pipeline.connect("prompt_builder", "generator")
+
+    result = pipeline.run(
+        {"prompt_builder": {"question": "What is the capital of France?"}}
+    )
+    print(result["generator"]["replies"][0])
+
+    respan.flush()
+
+
+if __name__ == "__main__":
+    run_basic_pipeline()
