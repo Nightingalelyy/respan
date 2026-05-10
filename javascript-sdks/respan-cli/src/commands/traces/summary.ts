@@ -2,7 +2,7 @@ import { Flags } from '@oclif/core';
 import { BaseCommand } from '../../lib/base-command.js';
 
 export default class TracesSummary extends BaseCommand {
-  static description = 'Get a summary of traces for a time range';
+  static description = 'Get a span-level summary of activity for a time range (counts, latency, cost, errors aggregated across spans)';
   static flags = {
     ...BaseCommand.baseFlags,
     'start-time': Flags.string({ description: 'Start time (ISO 8601)', required: true }),
@@ -15,7 +15,11 @@ export default class TracesSummary extends BaseCommand {
     try {
       const client = this.getClient();
       const data = await this.spin('Fetching traces summary', () =>
-        client.traces.retrieveTracesSummary({ start_time: flags['start-time'], end_time: flags['end-time'] }),
+        client.spans.getSpansSummary({
+          Authorization: this.getAuthHeader(),
+          start_time: flags['start-time'],
+          end_time: flags['end-time'],
+        } as any),
       );
       this.log(JSON.stringify(data, null, 2));
     } catch (error) {
