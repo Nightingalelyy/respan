@@ -2,6 +2,6 @@
   "summary": "Publish the new Python LangChain instrumentation package for LangChain, LangGraph, and Langflow callback tracing",
   "packages": {
     "respan-sdk": "patch",
-    "respan-instrumentation-langchain": "new"
+    "respan-instrumentation-langchain": "patch"
   }
 }
