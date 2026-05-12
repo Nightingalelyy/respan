@@ -3,13 +3,6 @@ import { ensureSpanId, ensureTraceId } from "@respan/tracing";
 
 export const RESPAN_LOG_METHOD_TS_TRACING = "ts_tracing";
 export const STATUS_CODE_ATTR = "status_code";
-export const ERROR_MESSAGE_ATTR = "error.message";
-
-export const TL_SPAN_KIND = "traceloop.span.kind";
-export const TL_ENTITY_NAME = "traceloop.entity.name";
-export const TL_ENTITY_INPUT = "traceloop.entity.input";
-export const TL_ENTITY_OUTPUT = "traceloop.entity.output";
-export const TL_ENTITY_PATH = "traceloop.entity.path";
 
 export const LANGCHAIN_RUN_ID_ATTR = "langchain.run_id";
 export const LANGCHAIN_PARENT_RUN_ID_ATTR = "langchain.parent_run_id";
@@ -17,16 +10,6 @@ export const LANGCHAIN_FRAMEWORK_ATTR = "langchain.framework";
 export const LANGCHAIN_TAGS_ATTR = "langchain.tags";
 export const LANGCHAIN_METADATA_ATTR = "langchain.metadata";
 export const LANGCHAIN_SERIALIZED_ATTR = "langchain.serialized";
-
-export const GEN_AI_PROMPT_PREFIX = "gen_ai.prompt";
-export const GEN_AI_COMPLETION_PREFIX = "gen_ai.completion";
-export const GEN_AI_TOOL_NAME = "gen_ai.tool.name";
-export const GEN_AI_TOOL_CALL_ARGUMENTS = "gen_ai.tool.call.arguments";
-export const GEN_AI_TOOL_CALL_RESULT = "gen_ai.tool.call.result";
-export const GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens";
-export const GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens";
-export const GEN_AI_USAGE_TOTAL_TOKENS = "gen_ai.usage.total_tokens";
-export const LLM_USAGE_TOTAL_TOKENS = "llm.usage.total_tokens";
 
 export const DIRECT_INPUT = "input";
 export const DIRECT_OUTPUT = "output";

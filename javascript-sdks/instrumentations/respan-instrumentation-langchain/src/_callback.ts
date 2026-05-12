@@ -1,6 +1,24 @@
 import { hrTime } from "@opentelemetry/core";
+import {
+  ATTR_ERROR_MESSAGE,
+  ATTR_GEN_AI_COMPLETION,
+  ATTR_GEN_AI_PROMPT,
+  ATTR_GEN_AI_REQUEST_MODEL,
+  ATTR_GEN_AI_TOOL_CALL_ARGUMENTS,
+  ATTR_GEN_AI_TOOL_CALL_RESULT,
+  ATTR_GEN_AI_TOOL_NAME,
+  ATTR_GEN_AI_USAGE_COMPLETION_TOKENS,
+  ATTR_GEN_AI_USAGE_INPUT_TOKENS,
+  ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
+  ATTR_GEN_AI_USAGE_PROMPT_TOKENS,
+} from "@opentelemetry/semantic-conventions/incubating";
 import { RespanLogType, RespanSpanAttributes } from "@respan/respan-sdk";
 import { buildReadableSpan, injectSpan } from "@respan/tracing";
+import {
+  LLMRequestTypeValues,
+  SpanAttributes,
+  TraceloopSpanKindValues,
+} from "@traceloop/ai-semantic-conventions";
 import {
   DIRECT_COMPLETION_TOKENS,
   DIRECT_INPUT,
@@ -9,29 +27,14 @@ import {
   DIRECT_PROMPT_TOKENS,
   DIRECT_TOOLS,
   DIRECT_TOTAL_REQUEST_TOKENS,
-  ERROR_MESSAGE_ATTR,
-  GEN_AI_COMPLETION_PREFIX,
-  GEN_AI_PROMPT_PREFIX,
-  GEN_AI_TOOL_CALL_ARGUMENTS,
-  GEN_AI_TOOL_CALL_RESULT,
-  GEN_AI_TOOL_NAME,
-  GEN_AI_USAGE_INPUT_TOKENS,
-  GEN_AI_USAGE_OUTPUT_TOKENS,
-  GEN_AI_USAGE_TOTAL_TOKENS,
   LANGCHAIN_FRAMEWORK_ATTR,
   LANGCHAIN_METADATA_ATTR,
   LANGCHAIN_PARENT_RUN_ID_ATTR,
   LANGCHAIN_RUN_ID_ATTR,
   LANGCHAIN_SERIALIZED_ATTR,
   LANGCHAIN_TAGS_ATTR,
-  LLM_USAGE_TOTAL_TOKENS,
   RESPAN_LOG_METHOD_TS_TRACING,
   STATUS_CODE_ATTR,
-  TL_ENTITY_INPUT,
-  TL_ENTITY_NAME,
-  TL_ENTITY_OUTPUT,
-  TL_ENTITY_PATH,
-  TL_SPAN_KIND,
   deriveSpanId,
   detectFramework,
   extractLlmOutput,
@@ -231,9 +234,9 @@ export class RespanCallbackHandler {
     const attrs: SpanAttributesRecord = {
       [RespanSpanAttributes.RESPAN_LOG_METHOD]: RESPAN_LOG_METHOD_TS_TRACING,
       [RespanSpanAttributes.RESPAN_LOG_TYPE]: record.logType,
-      [TL_SPAN_KIND]: record.spanKind,
-      [TL_ENTITY_NAME]: record.name,
-      [TL_ENTITY_PATH]: record.entityPath,
+      [SpanAttributes.TRACELOOP_SPAN_KIND]: record.spanKind,
+      [SpanAttributes.TRACELOOP_ENTITY_NAME]: record.name,
+      [SpanAttributes.TRACELOOP_ENTITY_PATH]: record.entityPath,
       [LANGCHAIN_RUN_ID_ATTR]: record.runId,
       [LANGCHAIN_FRAMEWORK_ATTR]: record.framework,
     };
@@ -248,9 +251,9 @@ export class RespanCallbackHandler {
     if (this.includeContent) {
       const inputString = safeJsonString(record.inputValue);
       const outputString = safeJsonString(normalizeOutputForLogging(outputValue));
-      setIfPresent(attrs, TL_ENTITY_INPUT, inputString);
+      setIfPresent(attrs, SpanAttributes.TRACELOOP_ENTITY_INPUT, inputString);
       setIfPresent(attrs, DIRECT_INPUT, inputString);
-      setIfPresent(attrs, TL_ENTITY_OUTPUT, outputString);
+      setIfPresent(attrs, SpanAttributes.TRACELOOP_ENTITY_OUTPUT, outputString);
       setIfPresent(attrs, DIRECT_OUTPUT, outputString);
     }
 
@@ -289,7 +292,7 @@ export class RespanCallbackHandler {
       const attrs = this._buildAttributes(record, resolvedOutput);
       const errorMessage = error !== undefined && error !== null ? getErrorMessage(error) : undefined;
       if (errorMessage) {
-        attrs[ERROR_MESSAGE_ATTR] = errorMessage;
+        attrs[ATTR_ERROR_MESSAGE] = errorMessage;
         attrs[STATUS_CODE_ATTR] = 500;
       }
 
@@ -315,7 +318,7 @@ export class RespanCallbackHandler {
     parentRunId,
     name,
     logType = RespanLogType.TASK,
-    spanKind = RespanLogType.TASK,
+    spanKind = TraceloopSpanKindValues.TASK,
     inputValue,
     outputValue,
     tags,
@@ -374,7 +377,7 @@ export class RespanCallbackHandler {
       const attrs = this._buildAttributes(record, outputValue);
       const errorMessage = error !== undefined && error !== null ? getErrorMessage(error) : undefined;
       if (errorMessage) {
-        attrs[ERROR_MESSAGE_ATTR] = errorMessage;
+        attrs[ATTR_ERROR_MESSAGE] = errorMessage;
         attrs[STATUS_CODE_ATTR] = 500;
       }
       return injectSpan(buildReadableSpan({
@@ -409,7 +412,7 @@ export class RespanCallbackHandler {
       parentRunId,
       name: extractName(serialized, "chain", runName),
       logType: isRoot ? RespanLogType.WORKFLOW : RespanLogType.TASK,
-      spanKind: isRoot ? RespanLogType.WORKFLOW : RespanLogType.TASK,
+      spanKind: isRoot ? TraceloopSpanKindValues.WORKFLOW : TraceloopSpanKindValues.TASK,
       inputValue: inputs,
       serialized,
       tags: normalizeTags(tags),
@@ -439,16 +442,16 @@ export class RespanCallbackHandler {
     const firstConversation = normalizedMessages[0] ?? [];
     const normalizedMetadata = normalizeMetadata(metadata);
     const extraAttributes: SpanAttributesRecord = {
-      [RespanSpanAttributes.LLM_REQUEST_TYPE]: RespanLogType.CHAT,
+      [SpanAttributes.LLM_REQUEST_TYPE]: LLMRequestTypeValues.CHAT,
     };
     const model = extractModel(serialized, undefined, normalizedMetadata);
-    setIfPresent(extraAttributes, RespanSpanAttributes.GEN_AI_REQUEST_MODEL, model);
+    setIfPresent(extraAttributes, ATTR_GEN_AI_REQUEST_MODEL, model);
     setIfPresent(extraAttributes, DIRECT_MODEL, model);
     for (const [index, message] of firstConversation.entries()) {
       for (const [key, value] of Object.entries(message)) {
         setIfPresent(
           extraAttributes,
-          `${GEN_AI_PROMPT_PREFIX}.${index}.${key}`,
+          `${ATTR_GEN_AI_PROMPT}.${index}.${key}`,
           isPlainRecord(value) || Array.isArray(value) ? safeJsonString(value) : value,
         );
       }
@@ -462,7 +465,7 @@ export class RespanCallbackHandler {
       parentRunId,
       name: extractName(serialized, "chat_model", runName),
       logType: RespanLogType.CHAT,
-      spanKind: RespanLogType.CHAT,
+      spanKind: LLMRequestTypeValues.CHAT,
       inputValue: normalizedMessages,
       serialized,
       tags: normalizeTags(tags),
@@ -484,17 +487,17 @@ export class RespanCallbackHandler {
     const normalizedPrompts = Array.isArray(prompts) ? prompts : [prompts];
     const normalizedMetadata = normalizeMetadata(metadata);
     const extraAttributes: SpanAttributesRecord = {
-      [RespanSpanAttributes.LLM_REQUEST_TYPE]: "completion",
+      [SpanAttributes.LLM_REQUEST_TYPE]: LLMRequestTypeValues.COMPLETION,
     };
     const model = extractModel(serialized, undefined, normalizedMetadata);
-    setIfPresent(extraAttributes, RespanSpanAttributes.GEN_AI_REQUEST_MODEL, model);
+    setIfPresent(extraAttributes, ATTR_GEN_AI_REQUEST_MODEL, model);
     setIfPresent(extraAttributes, DIRECT_MODEL, model);
     const tools = extractTools({ serialized, extraParams });
     setIfPresent(extraAttributes, RespanSpanAttributes.RESPAN_SPAN_TOOLS, tools);
     setIfPresent(extraAttributes, DIRECT_TOOLS, tools);
     for (const [index, prompt] of normalizedPrompts.entries()) {
-      extraAttributes[`${GEN_AI_PROMPT_PREFIX}.${index}.role`] = "user";
-      extraAttributes[`${GEN_AI_PROMPT_PREFIX}.${index}.content`] = String(prompt ?? "");
+      extraAttributes[`${ATTR_GEN_AI_PROMPT}.${index}.role`] = "user";
+      extraAttributes[`${ATTR_GEN_AI_PROMPT}.${index}.content`] = String(prompt ?? "");
     }
 
     this._startRun({
@@ -502,7 +505,7 @@ export class RespanCallbackHandler {
       parentRunId,
       name: extractName(serialized, "llm", runName),
       logType: RespanLogType.TEXT,
-      spanKind: "completion",
+      spanKind: LLMRequestTypeValues.COMPLETION,
       inputValue: normalizedPrompts,
       serialized,
       tags: normalizeTags(tags),
@@ -529,7 +532,7 @@ export class RespanCallbackHandler {
     const extraAttributes: SpanAttributesRecord = {};
     if (record) {
       const model = extractModel(record.serialized, output, record.metadata);
-      setIfPresent(extraAttributes, RespanSpanAttributes.GEN_AI_REQUEST_MODEL, model);
+      setIfPresent(extraAttributes, ATTR_GEN_AI_REQUEST_MODEL, model);
       setIfPresent(extraAttributes, DIRECT_MODEL, model);
     }
 
@@ -537,7 +540,7 @@ export class RespanCallbackHandler {
       for (const [key, value] of Object.entries(message)) {
         setIfPresent(
           extraAttributes,
-          `${GEN_AI_COMPLETION_PREFIX}.${index}.${key}`,
+          `${ATTR_GEN_AI_COMPLETION}.${index}.${key}`,
           isPlainRecord(value) || Array.isArray(value) ? safeJsonString(value) : value,
         );
       }
@@ -547,14 +550,13 @@ export class RespanCallbackHandler {
     setIfPresent(extraAttributes, RespanSpanAttributes.RESPAN_SPAN_TOOL_CALLS, toolCalls);
 
     const usage = extractUsage(output);
-    setIfPresent(extraAttributes, RespanSpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS, usage.promptTokens);
-    setIfPresent(extraAttributes, GEN_AI_USAGE_INPUT_TOKENS, usage.promptTokens);
+    setIfPresent(extraAttributes, ATTR_GEN_AI_USAGE_PROMPT_TOKENS, usage.promptTokens);
+    setIfPresent(extraAttributes, ATTR_GEN_AI_USAGE_INPUT_TOKENS, usage.promptTokens);
     setIfPresent(extraAttributes, DIRECT_PROMPT_TOKENS, usage.promptTokens);
-    setIfPresent(extraAttributes, RespanSpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS, usage.completionTokens);
-    setIfPresent(extraAttributes, GEN_AI_USAGE_OUTPUT_TOKENS, usage.completionTokens);
+    setIfPresent(extraAttributes, ATTR_GEN_AI_USAGE_COMPLETION_TOKENS, usage.completionTokens);
+    setIfPresent(extraAttributes, ATTR_GEN_AI_USAGE_OUTPUT_TOKENS, usage.completionTokens);
     setIfPresent(extraAttributes, DIRECT_COMPLETION_TOKENS, usage.completionTokens);
-    setIfPresent(extraAttributes, GEN_AI_USAGE_TOTAL_TOKENS, usage.totalTokens);
-    setIfPresent(extraAttributes, LLM_USAGE_TOTAL_TOKENS, usage.totalTokens);
+    setIfPresent(extraAttributes, SpanAttributes.LLM_USAGE_TOTAL_TOKENS, usage.totalTokens);
     setIfPresent(extraAttributes, DIRECT_TOTAL_REQUEST_TOKENS, usage.totalTokens);
 
     this._endRun({ runId, outputValue: outputPayload, extraAttributes });
@@ -580,14 +582,14 @@ export class RespanCallbackHandler {
       parentRunId,
       name,
       logType: RespanLogType.TOOL,
-      spanKind: RespanLogType.TOOL,
+      spanKind: TraceloopSpanKindValues.TOOL,
       inputValue,
       serialized,
       tags: normalizeTags(tags),
       metadata: normalizeMetadata(metadata),
       extraAttributes: {
-        [GEN_AI_TOOL_NAME]: name,
-        [GEN_AI_TOOL_CALL_ARGUMENTS]: safeJsonString(inputValue),
+        [ATTR_GEN_AI_TOOL_NAME]: name,
+        [ATTR_GEN_AI_TOOL_CALL_ARGUMENTS]: safeJsonString(inputValue),
       },
     });
   }
@@ -598,7 +600,7 @@ export class RespanCallbackHandler {
       runId,
       outputValue,
       extraAttributes: {
-        [GEN_AI_TOOL_CALL_RESULT]: safeJsonString(outputValue),
+        [ATTR_GEN_AI_TOOL_CALL_RESULT]: safeJsonString(outputValue),
       },
     });
   }
@@ -621,7 +623,7 @@ export class RespanCallbackHandler {
       parentRunId,
       name: extractName(serialized, "retriever", runName),
       logType: RespanLogType.TASK,
-      spanKind: RespanLogType.TASK,
+      spanKind: TraceloopSpanKindValues.TASK,
       inputValue: query,
       serialized,
       tags: normalizeTags(tags),
@@ -653,12 +655,12 @@ export class RespanCallbackHandler {
       parentRunId: runId,
       name: toolName,
       logType: RespanLogType.TOOL,
-      spanKind: RespanLogType.TOOL,
+      spanKind: TraceloopSpanKindValues.TOOL,
       inputValue: toolInput,
       outputValue: actionRecord.log,
       extraAttributes: {
-        [GEN_AI_TOOL_NAME]: toolName,
-        [GEN_AI_TOOL_CALL_ARGUMENTS]: safeJsonString(toSerializableValue(toolInput)),
+        [ATTR_GEN_AI_TOOL_NAME]: toolName,
+        [ATTR_GEN_AI_TOOL_CALL_ARGUMENTS]: safeJsonString(toSerializableValue(toolInput)),
       },
     });
   }
@@ -669,7 +671,7 @@ export class RespanCallbackHandler {
       parentRunId: runId,
       name: "agent_finish",
       logType: RespanLogType.AGENT,
-      spanKind: RespanLogType.AGENT,
+      spanKind: TraceloopSpanKindValues.AGENT,
       outputValue: actionRecord.returnValues ?? actionRecord.return_values ?? action,
     });
   }
@@ -685,7 +687,7 @@ export class RespanCallbackHandler {
       parentRunId: runId,
       name: eventName,
       logType: RespanLogType.TASK,
-      spanKind: RespanLogType.TASK,
+      spanKind: TraceloopSpanKindValues.TASK,
       inputValue: data,
       outputValue: data,
       tags: normalizeTags(tags),
