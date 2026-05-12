@@ -1,4 +1,5 @@
 import logging
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -7,15 +8,16 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.semconv_ai import SpanAttributes
 from opentelemetry.trace import StatusCode
 from respan_sdk.constants.llm_logging import (
+    LOG_TYPE_AGENT,
     LOG_TYPE_CHAT,
+    LOG_TYPE_COMPLETION,
     LOG_TYPE_EMBEDDING,
     LOG_TYPE_TASK,
-    LOG_TYPE_TEXT,
     LOG_TYPE_TOOL,
     LOG_TYPE_WORKFLOW,
 )
 from respan_sdk.constants.span_attributes import (
-    LLM_REQUEST_TYPE,
+    GEN_AI_SYSTEM,
     RESPAN_LOG_TYPE,
 )
 from respan_tracing import RespanTelemetry
@@ -27,6 +29,11 @@ from respan_instrumentation_llama_index import _instrumentation
 from respan_instrumentation_llama_index._handlers import (
     RespanLlamaIndexEventHandler,
     RespanLlamaIndexSpanHandler,
+)
+from respan_instrumentation_llama_index._constants import (
+    RESPAN_OVERRIDE_COMPLETION_TOKENS_ATTR,
+    RESPAN_OVERRIDE_PROMPT_TOKENS_ATTR,
+    RESPAN_OVERRIDE_TOTAL_REQUEST_TOKENS_ATTR,
 )
 from respan_instrumentation_llama_index._serialization import extract_usage
 
@@ -167,6 +174,83 @@ def test_span_handler_emits_workflow_and_task_spans(span_exporter):
     )
 
 
+def test_span_handler_uses_cached_parent_context_after_parent_exits(span_exporter):
+    handler = RespanLlamaIndexSpanHandler()
+    root_bound_args = SimpleNamespace(args=("question",), kwargs={})
+    child_bound_args = SimpleNamespace(args=(), kwargs={"top_k": 2})
+    root_id = "RetrieverQueryEngine.query-11111111-1111-1111-1111-111111111111"
+    child_id = "BaseRetriever.retrieve-22222222-2222-2222-2222-222222222222"
+
+    handler.span_enter(
+        id_=root_id,
+        bound_args=root_bound_args,
+        parent_id=None,
+    )
+    handler.span_exit(
+        id_=root_id,
+        bound_args=root_bound_args,
+        result="answer",
+    )
+    handler.span_enter(
+        id_=child_id,
+        bound_args=child_bound_args,
+        parent_id=root_id,
+    )
+    handler.span_exit(
+        id_=child_id,
+        bound_args=child_bound_args,
+        result=["node"],
+    )
+
+    spans_by_name = {span.name: span for span in span_exporter.get_finished_spans()}
+    root_span = spans_by_name["RetrieverQueryEngine.query"]
+    child_span = spans_by_name["BaseRetriever.retrieve"]
+
+    assert child_span.context.trace_id == root_span.context.trace_id
+    assert child_span.parent.span_id == root_span.context.span_id
+
+
+def test_span_handler_groups_missing_parent_siblings_under_synthetic_parent(
+    span_exporter,
+):
+    handler = RespanLlamaIndexSpanHandler()
+    parent_id = "ReActAgent.run-11111111-1111-1111-1111-111111111111"
+    bound_args = SimpleNamespace(args=(), kwargs={})
+
+    handler.span_enter(
+        id_="BaseWorkflowAgent.setup_agent-22222222-2222-2222-2222-222222222222",
+        bound_args=bound_args,
+        parent_id=parent_id,
+    )
+    handler.span_exit(
+        id_="BaseWorkflowAgent.setup_agent-22222222-2222-2222-2222-222222222222",
+        bound_args=bound_args,
+        result="setup",
+    )
+    handler.span_enter(
+        id_="BaseWorkflowAgent.run_agent_step-33333333-3333-3333-3333-333333333333",
+        bound_args=bound_args,
+        parent_id=parent_id,
+    )
+    handler.span_exit(
+        id_="BaseWorkflowAgent.run_agent_step-33333333-3333-3333-3333-333333333333",
+        bound_args=bound_args,
+        result="step",
+    )
+
+    spans_by_name = {span.name: span for span in span_exporter.get_finished_spans()}
+    synthetic_parent = spans_by_name["ReActAgent.run"]
+    setup_span = spans_by_name["BaseWorkflowAgent.setup_agent"]
+    step_span = spans_by_name["BaseWorkflowAgent.run_agent_step"]
+
+    assert synthetic_parent.attributes[RESPAN_LOG_TYPE] == LOG_TYPE_AGENT
+    assert synthetic_parent.attributes["llama_index.synthetic_parent"] is True
+    assert setup_span.context.trace_id == synthetic_parent.context.trace_id
+    assert step_span.context.trace_id == synthetic_parent.context.trace_id
+    assert setup_span.parent.span_id == synthetic_parent.context.span_id
+    assert step_span.parent.span_id == synthetic_parent.context.span_id
+
+
 def test_chat_events_emit_canonical_llm_span(span_exporter):
     handler = RespanLlamaIndexEventHandler()
     user_message = SimpleNamespace(role="user", content="Hello")
@@ -203,16 +287,191 @@ def test_chat_events_emit_canonical_llm_span(span_exporter):
     attributes = chat_span.attributes
 
     assert attributes[RESPAN_LOG_TYPE] == LOG_TYPE_CHAT
-    assert attributes[LLM_REQUEST_TYPE] == "chat"
-    assert attributes["gen_ai.system"] == "openai"
-    assert attributes["gen_ai.request.model"] == "gpt-4o-mini"
-    assert attributes["gen_ai.prompt.0.role"] == "user"
-    assert attributes["gen_ai.prompt.0.content"] == "Hello"
-    assert attributes["gen_ai.completion.0.role"] == "assistant"
-    assert attributes["gen_ai.completion.0.content"] == "Hi"
-    assert attributes["gen_ai.usage.prompt_tokens"] == 3
-    assert attributes["gen_ai.usage.completion_tokens"] == 2
-    assert attributes["llm.usage.total_tokens"] == 5
+    assert attributes[SpanAttributes.LLM_REQUEST_TYPE] == "chat"
+    assert attributes[GEN_AI_SYSTEM] == "openai"
+    assert attributes[SpanAttributes.LLM_REQUEST_MODEL] == "gpt-4o-mini"
+    assert attributes[f"{SpanAttributes.LLM_PROMPTS}.0.role"] == "user"
+    assert attributes[f"{SpanAttributes.LLM_PROMPTS}.0.content"] == "Hello"
+    assert attributes[f"{SpanAttributes.LLM_COMPLETIONS}.0.role"] == "assistant"
+    assert attributes[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"] == "Hi"
+    assert attributes[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] == 3
+    assert attributes[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] == 2
+    assert attributes[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] == 5
+
+
+def test_react_observation_messages_are_marked_as_system(span_exporter):
+    handler = RespanLlamaIndexEventHandler()
+    response = SimpleNamespace(
+        message=SimpleNamespace(role="assistant", content="Answer: 42"),
+        raw={},
+    )
+
+    handler.handle(
+        SimpleNamespace(
+            class_name=lambda: "LLMChatStartEvent",
+            span_id="span-react",
+            messages=[
+                SimpleNamespace(
+                    role="user",
+                    content="Use the multiply_numbers tool.",
+                ),
+                SimpleNamespace(
+                    role="assistant",
+                    content='Action: multiply_numbers\nAction Input: {"a": 7, "b": 6}',
+                ),
+                SimpleNamespace(role="user", content="Observation: 42"),
+            ],
+            model_dict={"class_name": "OpenAI", "model_name": "gpt-4o-mini"},
+        )
+    )
+    handler.handle(
+        SimpleNamespace(
+            class_name=lambda: "LLMChatEndEvent",
+            span_id="span-react",
+            response=response,
+        )
+    )
+
+    chat_span = next(
+        span
+        for span in span_exporter.get_finished_spans()
+        if span.name == "llama_index.chat"
+    )
+    attributes = chat_span.attributes
+
+    assert attributes[f"{SpanAttributes.LLM_PROMPTS}.0.role"] == "user"
+    assert attributes[f"{SpanAttributes.LLM_PROMPTS}.2.role"] == "system"
+    assert attributes[f"{SpanAttributes.LLM_PROMPTS}.2.content"] == "Observation: 42"
+
+
+def test_generated_context_prompt_is_split_from_user_query(span_exporter):
+    handler = RespanLlamaIndexEventHandler()
+    generated_prompt = (
+        "Context information is below.\n"
+        "---------------------\n"
+        "Respan traces LlamaIndex query engines.\n"
+        "---------------------\n"
+        "Given the context information and not prior knowledge, answer the query.\n"
+        "Query: What does Respan trace?\n"
+        "Answer: "
+    )
+
+    handler.handle(
+        SimpleNamespace(
+            class_name=lambda: "LLMChatStartEvent",
+            span_id="span-context",
+            messages=[
+                SimpleNamespace(role="system", content="Answer from context only."),
+                SimpleNamespace(role="user", content=generated_prompt),
+            ],
+            model_dict={"class_name": "OpenAI", "model_name": "gpt-4o-mini"},
+        )
+    )
+    handler.handle(
+        SimpleNamespace(
+            class_name=lambda: "LLMChatEndEvent",
+            span_id="span-context",
+            response=SimpleNamespace(
+                message=SimpleNamespace(role="assistant", content="It traces queries."),
+                raw={},
+            ),
+        )
+    )
+
+    chat_span = next(
+        span
+        for span in span_exporter.get_finished_spans()
+        if span.name == "llama_index.chat"
+    )
+    attributes = chat_span.attributes
+
+    assert attributes[f"{SpanAttributes.LLM_PROMPTS}.1.role"] == "system"
+    assert (
+        "Context information is below."
+        in attributes[f"{SpanAttributes.LLM_PROMPTS}.1.content"]
+    )
+    assert attributes[f"{SpanAttributes.LLM_PROMPTS}.2.role"] == "user"
+    assert attributes[f"{SpanAttributes.LLM_PROMPTS}.2.content"] == (
+        "What does Respan trace?"
+    )
+
+
+def test_generic_span_payload_marks_react_observations_as_system(span_exporter):
+    handler = RespanLlamaIndexSpanHandler()
+    bound_args = SimpleNamespace(
+        args=(
+            [
+                SimpleNamespace(role="user", content="Question"),
+                SimpleNamespace(
+                    role="assistant",
+                    content='Action: multiply_numbers\nAction Input: {"a": 7, "b": 6}',
+                ),
+                SimpleNamespace(role="user", content="Observation: 42"),
+            ],
+        ),
+        kwargs={},
+    )
+
+    handler.span_enter(
+        id_="OpenAI.achat-11111111-1111-1111-1111-111111111111",
+        bound_args=bound_args,
+        parent_id=None,
+    )
+    handler.span_exit(
+        id_="OpenAI.achat-11111111-1111-1111-1111-111111111111",
+        bound_args=bound_args,
+        result="Answer: 42",
+    )
+
+    span = next(
+        span
+        for span in span_exporter.get_finished_spans()
+        if span.name == "OpenAI.achat"
+    )
+    payload = json.loads(span.attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT])
+    messages = payload["args"][0]
+
+    assert messages[0]["role"] == "user"
+    assert messages[1]["role"] == "assistant"
+    assert messages[2]["role"] == "system"
+    assert messages[2]["content"] == "Observation: 42"
+
+
+def test_user_observation_prompt_remains_user(span_exporter):
+    handler = RespanLlamaIndexEventHandler()
+
+    handler.handle(
+        SimpleNamespace(
+            class_name=lambda: "LLMChatStartEvent",
+            span_id="span-user-observation",
+            messages=[
+                SimpleNamespace(role="user", content="Observation: this is my note"),
+            ],
+            model_dict={"class_name": "OpenAI", "model_name": "gpt-4o-mini"},
+        )
+    )
+    handler.handle(
+        SimpleNamespace(
+            class_name=lambda: "LLMChatEndEvent",
+            span_id="span-user-observation",
+            response=SimpleNamespace(
+                message=SimpleNamespace(role="assistant", content="Noted."),
+                raw={},
+            ),
+        )
+    )
+
+    chat_span = next(
+        span
+        for span in span_exporter.get_finished_spans()
+        if span.name == "llama_index.chat"
+    )
+    attributes = chat_span.attributes
+
+    assert attributes[f"{SpanAttributes.LLM_PROMPTS}.0.role"] == "user"
+    assert attributes[f"{SpanAttributes.LLM_PROMPTS}.0.content"] == (
+        "Observation: this is my note"
+    )
 
 
 def test_chat_events_can_disable_content_capture(span_exporter):
@@ -284,11 +543,20 @@ def test_completion_events_emit_text_span(span_exporter):
     )
     attributes = text_span.attributes
 
-    assert attributes[RESPAN_LOG_TYPE] == LOG_TYPE_TEXT
-    assert attributes[LLM_REQUEST_TYPE] == "completion"
-    assert attributes["gen_ai.prompt.0.content"] == "Complete this sentence"
-    assert attributes["gen_ai.completion.0.content"] == "A short completion."
-    assert attributes["llm.usage.total_tokens"] == 7
+    assert attributes[RESPAN_LOG_TYPE] == LOG_TYPE_COMPLETION
+    assert attributes[SpanAttributes.LLM_REQUEST_TYPE] == "completion"
+    assert (
+        attributes[f"{SpanAttributes.LLM_PROMPTS}.0.content"]
+        == "Complete this sentence"
+    )
+    assert (
+        attributes[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"]
+        == "A short completion."
+    )
+    assert attributes[RESPAN_OVERRIDE_PROMPT_TOKENS_ATTR] == 4
+    assert attributes[RESPAN_OVERRIDE_COMPLETION_TOKENS_ATTR] == 3
+    assert attributes[RESPAN_OVERRIDE_TOTAL_REQUEST_TOKENS_ATTR] == 7
+    assert attributes[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] == 7
 
 
 def test_embedding_events_emit_embedding_span_without_vectors(span_exporter):
@@ -321,7 +589,12 @@ def test_embedding_events_emit_embedding_span_without_vectors(span_exporter):
     attributes = embedding_span.attributes
 
     assert attributes[RESPAN_LOG_TYPE] == LOG_TYPE_EMBEDDING
-    assert attributes[LLM_REQUEST_TYPE] == "embedding"
+    assert attributes[SpanAttributes.LLM_REQUEST_TYPE] == "embedding"
+    assert attributes[f"{SpanAttributes.LLM_PROMPTS}.0.content"] == (
+        '["alpha", "beta"]'
+    )
+    assert "embedding_count" in attributes["llm.embeddings.0"]
+    assert "0.1" not in attributes["llm.embeddings.0"]
     assert "embedding_count" in attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
     assert "0.1" not in attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
 

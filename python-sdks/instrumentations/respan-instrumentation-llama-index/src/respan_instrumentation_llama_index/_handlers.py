@@ -18,19 +18,15 @@ from pydantic import ConfigDict, PrivateAttr
 from respan_sdk.constants.llm_logging import (
     LOG_TYPE_AGENT,
     LOG_TYPE_CHAT,
+    LOG_TYPE_COMPLETION,
     LOG_TYPE_EMBEDDING,
     LOG_TYPE_TASK,
-    LOG_TYPE_TEXT,
     LOG_TYPE_TOOL,
     LOG_TYPE_WORKFLOW,
     LogMethodChoices,
 )
 from respan_sdk.constants.span_attributes import (
     GEN_AI_SYSTEM,
-    LLM_REQUEST_MODEL,
-    LLM_REQUEST_TYPE,
-    LLM_USAGE_COMPLETION_TOKENS,
-    LLM_USAGE_PROMPT_TOKENS,
     RESPAN_LOG_METHOD,
     RESPAN_LOG_TYPE,
 )
@@ -40,9 +36,23 @@ from respan_instrumentation_llama_index._constants import (
     CHAT_EVENT_KEY,
     COMPLETION_EVENT_KEY,
     EMBEDDING_EVENT_KEY,
-    GEN_AI_USAGE_INPUT_TOKENS,
-    GEN_AI_USAGE_OUTPUT_TOKENS,
-    LLM_USAGE_TOTAL_TOKENS,
+    LLAMA_INDEX_CHAT_SPAN_NAME,
+    LLAMA_INDEX_COMPLETION_SPAN_NAME,
+    LLAMA_INDEX_DEFAULT_TOOL_NAME,
+    LLAMA_INDEX_EMBEDDING_SPAN_NAME,
+    LLAMA_INDEX_USAGE_INPUT_TOKENS,
+    LLAMA_INDEX_USAGE_OUTPUT_TOKENS,
+    LLAMA_INDEX_PARENT_SPAN_ID_ATTR,
+    LLAMA_INDEX_SPAN_ID_ATTR,
+    LLAMA_INDEX_SYNTHETIC_PARENT_ATTR,
+    LLAMA_INDEX_TAGS_ATTR,
+    LLAMA_INDEX_TOOL_SPAN_PREFIX,
+    LLM_EMBEDDINGS_0,
+    MESSAGE_ROLE_ASSISTANT,
+    MESSAGE_ROLE_USER,
+    RESPAN_OVERRIDE_COMPLETION_TOKENS_ATTR,
+    RESPAN_OVERRIDE_PROMPT_TOKENS_ATTR,
+    RESPAN_OVERRIDE_TOTAL_REQUEST_TOKENS_ATTR,
 )
 from respan_instrumentation_llama_index._serialization import (
     chat_messages_to_dicts,
@@ -86,6 +96,8 @@ class RespanLlamaIndexSpanHandler(BaseSpanHandler[RespanLlamaIndexSpan]):
 
     capture_content: bool = True
 
+    _span_contexts: dict[str, Any] = PrivateAttr(default_factory=dict)
+
     def __init__(self, *, capture_content: bool = True) -> None:
         super().__init__()
         self.capture_content = capture_content
@@ -114,11 +126,11 @@ class RespanLlamaIndexSpanHandler(BaseSpanHandler[RespanLlamaIndexSpan]):
             log_type=log_type,
             entity_path=entity_name,
         )
-        attributes["llama_index.span_id"] = id_
+        attributes[LLAMA_INDEX_SPAN_ID_ATTR] = id_
         if parent_span_id:
-            attributes["llama_index.parent_span_id"] = parent_span_id
+            attributes[LLAMA_INDEX_PARENT_SPAN_ID_ATTR] = parent_span_id
         if tags:
-            attributes["llama_index.tags"] = safe_json(tags)
+            attributes[LLAMA_INDEX_TAGS_ATTR] = safe_json(tags)
         if self.capture_content:
             attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safe_json(
                 {
@@ -127,10 +139,12 @@ class RespanLlamaIndexSpanHandler(BaseSpanHandler[RespanLlamaIndexSpan]):
                 }
             )
 
-        otel_span, context_token = _start_otel_span(
+        otel_span, context_token, span_context = _start_otel_span(
             span_name=entity_name,
             attributes=attributes,
+            parent_context=self._parent_context(parent_span_id=parent_span_id),
         )
+        self._span_contexts[id_] = span_context
         return RespanLlamaIndexSpan(
             id_=id_,
             parent_id=parent_span_id,
@@ -140,6 +154,49 @@ class RespanLlamaIndexSpanHandler(BaseSpanHandler[RespanLlamaIndexSpan]):
             entity_name=entity_name,
             log_type=log_type,
         )
+
+    def _parent_context(self, *, parent_span_id: str | None) -> Any | None:
+        if parent_span_id is None:
+            return None
+
+        active_parent = self.open_spans.get(parent_span_id)
+        if active_parent is not None:
+            parent_context = self._span_contexts.get(parent_span_id)
+            if parent_context is None:
+                parent_context = trace.set_span_in_context(active_parent.otel_span)
+                self._span_contexts[parent_span_id] = parent_context
+            return parent_context
+
+        parent_context = self._span_contexts.get(parent_span_id)
+        if parent_context is not None:
+            return parent_context
+
+        return self._create_synthetic_parent_context(parent_span_id=parent_span_id)
+
+    def _create_synthetic_parent_context(self, *, parent_span_id: str) -> Any:
+        entity_name = _span_entity_name(span_id=parent_span_id)
+        attributes = _base_attributes(
+            entity_name=entity_name,
+            log_type=_span_log_type(
+                entity_name=entity_name,
+                instance=None,
+                parent_span_id=None,
+            ),
+            entity_path=entity_name,
+        )
+        attributes[LLAMA_INDEX_SPAN_ID_ATTR] = parent_span_id
+        attributes[LLAMA_INDEX_SYNTHETIC_PARENT_ATTR] = True
+
+        parent_context = context.get_current()
+        otel_span = _start_detached_otel_span(
+            span_name=entity_name,
+            attributes=attributes,
+            parent_context=parent_context,
+        )
+        span_context = trace.set_span_in_context(otel_span, parent_context)
+        self._span_contexts[parent_span_id] = span_context
+        otel_span.end()
+        return span_context
 
     def prepare_to_exit_span(
         self,
@@ -155,7 +212,12 @@ class RespanLlamaIndexSpanHandler(BaseSpanHandler[RespanLlamaIndexSpan]):
         if self.capture_content:
             active_span.otel_span.set_attribute(
                 SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
-                safe_json(result),
+                safe_json(
+                    _span_output_payload(
+                        entity_name=active_span.entity_name,
+                        result=result,
+                    )
+                ),
             )
         _end_otel_span(active_span=active_span)
         with self.lock:
@@ -227,22 +289,24 @@ class RespanLlamaIndexEventHandler(BaseEventHandler):
         messages = chat_messages_to_dicts(getattr(event, "messages", []))
         model_dict = getattr(event, "model_dict", None)
         attributes = _llm_base_attributes(
-            entity_name="llama_index.chat",
+            entity_name=LLAMA_INDEX_CHAT_SPAN_NAME,
             log_type=LOG_TYPE_CHAT,
             request_type=LLMRequestTypeValues.CHAT.value,
             model_dict=model_dict,
         )
         for message_index, message in enumerate(messages):
-            attributes[f"gen_ai.prompt.{message_index}.role"] = message.get("role", "")
-            attributes[f"gen_ai.prompt.{message_index}.content"] = _content_attribute(
-                value=message.get("content")
+            attributes[f"{SpanAttributes.LLM_PROMPTS}.{message_index}.role"] = (
+                message.get("role", "")
+            )
+            attributes[f"{SpanAttributes.LLM_PROMPTS}.{message_index}.content"] = (
+                _content_attribute(value=message.get("content"))
             )
         if self.capture_content:
             attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safe_json(messages)
         self._push_event_span(
             span_id=getattr(event, "span_id", None),
             event_key=CHAT_EVENT_KEY,
-            span_name="llama_index.chat",
+            span_name=LLAMA_INDEX_CHAT_SPAN_NAME,
             attributes=attributes,
         )
 
@@ -257,8 +321,10 @@ class RespanLlamaIndexEventHandler(BaseEventHandler):
             getattr(event, "response", None)
         )
         attributes = {
-            "gen_ai.completion.0.role": response_message.get("role", "assistant"),
-            "gen_ai.completion.0.content": _content_attribute(
+            f"{SpanAttributes.LLM_COMPLETIONS}.0.role": response_message.get(
+                "role", MESSAGE_ROLE_ASSISTANT
+            ),
+            f"{SpanAttributes.LLM_COMPLETIONS}.0.content": _content_attribute(
                 value=response_message.get("content")
             ),
         }
@@ -279,21 +345,21 @@ class RespanLlamaIndexEventHandler(BaseEventHandler):
         model_dict = getattr(event, "model_dict", None)
         prompt = getattr(event, "prompt", "")
         attributes = _llm_base_attributes(
-            entity_name="llama_index.completion",
-            log_type=LOG_TYPE_TEXT,
+            entity_name=LLAMA_INDEX_COMPLETION_SPAN_NAME,
+            log_type=LOG_TYPE_COMPLETION,
             request_type=LLMRequestTypeValues.COMPLETION.value,
             model_dict=model_dict,
         )
-        attributes["gen_ai.prompt.0.role"] = "user"
-        attributes["gen_ai.prompt.0.content"] = str(prompt)
+        attributes[f"{SpanAttributes.LLM_PROMPTS}.0.role"] = MESSAGE_ROLE_USER
+        attributes[f"{SpanAttributes.LLM_PROMPTS}.0.content"] = str(prompt)
         if self.capture_content:
             attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safe_json(
-                [{"role": "user", "content": prompt}]
+                [{"role": MESSAGE_ROLE_USER, "content": prompt}]
             )
         self._push_event_span(
             span_id=getattr(event, "span_id", None),
             event_key=COMPLETION_EVENT_KEY,
-            span_name="llama_index.completion",
+            span_name=LLAMA_INDEX_COMPLETION_SPAN_NAME,
             attributes=attributes,
         )
 
@@ -306,12 +372,12 @@ class RespanLlamaIndexEventHandler(BaseEventHandler):
             return
         completion_text = completion_response_to_text(getattr(event, "response", None))
         attributes = {
-            "gen_ai.completion.0.role": "assistant",
-            "gen_ai.completion.0.content": completion_text,
+            f"{SpanAttributes.LLM_COMPLETIONS}.0.role": MESSAGE_ROLE_ASSISTANT,
+            f"{SpanAttributes.LLM_COMPLETIONS}.0.content": completion_text,
         }
         if self.capture_content:
             attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safe_json(
-                {"role": "assistant", "content": completion_text}
+                {"role": MESSAGE_ROLE_ASSISTANT, "content": completion_text}
             )
         _set_usage_attributes(
             attributes=attributes,
@@ -325,7 +391,7 @@ class RespanLlamaIndexEventHandler(BaseEventHandler):
     def _handle_embedding_start(self, *, event: Any) -> None:
         model_dict = getattr(event, "model_dict", None)
         attributes = _llm_base_attributes(
-            entity_name="llama_index.embedding",
+            entity_name=LLAMA_INDEX_EMBEDDING_SPAN_NAME,
             log_type=LOG_TYPE_EMBEDDING,
             request_type=LLMRequestTypeValues.EMBEDDING.value,
             model_dict=model_dict,
@@ -333,7 +399,7 @@ class RespanLlamaIndexEventHandler(BaseEventHandler):
         self._push_event_span(
             span_id=getattr(event, "span_id", None),
             event_key=EMBEDDING_EVENT_KEY,
-            span_name="llama_index.embedding",
+            span_name=LLAMA_INDEX_EMBEDDING_SPAN_NAME,
             attributes=attributes,
         )
 
@@ -345,12 +411,17 @@ class RespanLlamaIndexEventHandler(BaseEventHandler):
         if active_event_span is None:
             return
         chunks = getattr(event, "chunks", [])
-        embedding_count = len(getattr(event, "embeddings", []) or [])
+        embedding_summary = _embedding_summary(
+            embeddings=getattr(event, "embeddings", []) or []
+        )
         attributes: dict[str, Any] = {
-            SpanAttributes.TRACELOOP_ENTITY_OUTPUT: safe_json(
-                {"embedding_count": embedding_count}
-            ),
+            SpanAttributes.TRACELOOP_ENTITY_OUTPUT: safe_json(embedding_summary),
+            LLM_EMBEDDINGS_0: safe_json(embedding_summary),
         }
+        if chunks:
+            attributes[f"{SpanAttributes.LLM_PROMPTS}.0.content"] = _embedding_input(
+                chunks=chunks
+            )
         if self.capture_content:
             attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safe_json(chunks)
         _finish_event_span(
@@ -374,7 +445,7 @@ class RespanLlamaIndexEventHandler(BaseEventHandler):
                 }
             )
         active_event_span = _start_event_span(
-            span_name=f"llama_index.tool.{tool_name}",
+            span_name=f"{LLAMA_INDEX_TOOL_SPAN_PREFIX}{tool_name}",
             attributes=attributes,
         )
         _finish_event_span(active_event_span=active_event_span, attributes={})
@@ -430,14 +501,34 @@ def _start_otel_span(
     *,
     span_name: str,
     attributes: dict[str, Any],
-) -> tuple[Any, Any]:
+    parent_context: Any | None = None,
+) -> tuple[Any, Any, Any]:
     tracer = RespanTracer().get_tracer()
     otel_span = tracer.start_span(
         span_name,
+        context=parent_context,
         attributes=_clean_attributes(attributes=attributes),
     )
-    context_token = context.attach(trace.set_span_in_context(otel_span))
-    return otel_span, context_token
+    span_context = trace.set_span_in_context(
+        otel_span,
+        parent_context or context.get_current(),
+    )
+    context_token = context.attach(span_context)
+    return otel_span, context_token, span_context
+
+
+def _start_detached_otel_span(
+    *,
+    span_name: str,
+    attributes: dict[str, Any],
+    parent_context: Any | None = None,
+) -> Any:
+    tracer = RespanTracer().get_tracer()
+    return tracer.start_span(
+        span_name,
+        context=parent_context,
+        attributes=_clean_attributes(attributes=attributes),
+    )
 
 
 def _start_event_span(
@@ -445,7 +536,7 @@ def _start_event_span(
     span_name: str,
     attributes: dict[str, Any],
 ) -> ActiveEventSpan:
-    otel_span, context_token = _start_otel_span(
+    otel_span, context_token, _ = _start_otel_span(
         span_name=span_name,
         attributes=attributes,
     )
@@ -498,11 +589,11 @@ def _llm_base_attributes(
         log_type=log_type,
         entity_path=entity_name,
     )
-    attributes[LLM_REQUEST_TYPE] = request_type
+    attributes[SpanAttributes.LLM_REQUEST_TYPE] = request_type
     model_name = get_model_name(model_dict=model_dict)
     model_system = get_model_system(model_dict=model_dict)
     if model_name:
-        attributes[LLM_REQUEST_MODEL] = model_name
+        attributes[SpanAttributes.LLM_REQUEST_MODEL] = model_name
     if model_system:
         attributes[GEN_AI_SYSTEM] = model_system
     return attributes
@@ -511,13 +602,16 @@ def _llm_base_attributes(
 def _set_usage_attributes(*, attributes: dict[str, Any], response: Any) -> None:
     prompt_tokens, completion_tokens, total_tokens = extract_usage(response=response)
     if prompt_tokens is not None:
-        attributes[LLM_USAGE_PROMPT_TOKENS] = prompt_tokens
-        attributes[GEN_AI_USAGE_INPUT_TOKENS] = prompt_tokens
+        attributes[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] = prompt_tokens
+        attributes[LLAMA_INDEX_USAGE_INPUT_TOKENS] = prompt_tokens
+        attributes[RESPAN_OVERRIDE_PROMPT_TOKENS_ATTR] = prompt_tokens
     if completion_tokens is not None:
-        attributes[LLM_USAGE_COMPLETION_TOKENS] = completion_tokens
-        attributes[GEN_AI_USAGE_OUTPUT_TOKENS] = completion_tokens
+        attributes[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] = completion_tokens
+        attributes[LLAMA_INDEX_USAGE_OUTPUT_TOKENS] = completion_tokens
+        attributes[RESPAN_OVERRIDE_COMPLETION_TOKENS_ATTR] = completion_tokens
     if total_tokens is not None:
-        attributes[LLM_USAGE_TOTAL_TOKENS] = total_tokens
+        attributes[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] = total_tokens
+        attributes[RESPAN_OVERRIDE_TOTAL_REQUEST_TOKENS_ATTR] = total_tokens
 
 
 def _clean_attributes(*, attributes: dict[str, Any]) -> dict[str, Any]:
@@ -537,6 +631,47 @@ def _content_attribute(*, value: Any) -> str:
     if isinstance(jsonable_value, str):
         return jsonable_value
     return safe_json(jsonable_value)
+
+
+def _span_output_payload(*, entity_name: str, result: Any) -> Any:
+    if "embedding" in entity_name.lower():
+        return _embedding_summary(embeddings=result)
+    return result
+
+
+def _embedding_summary(*, embeddings: Any) -> dict[str, Any]:
+    if _is_number_sequence(embeddings):
+        return {
+            "embedding_count": 1,
+            "embedding_dimensions": len(embeddings),
+        }
+    if isinstance(embeddings, list):
+        first_embedding = next(
+            (embedding for embedding in embeddings if _is_number_sequence(embedding)),
+            None,
+        )
+        summary: dict[str, Any] = {"embedding_count": len(embeddings)}
+        if first_embedding is not None:
+            summary["embedding_dimensions"] = len(first_embedding)
+        return summary
+    return {"embedding_count": 0}
+
+
+def _embedding_input(*, chunks: Any) -> str:
+    if isinstance(chunks, list) and len(chunks) == 1:
+        return str(chunks[0])
+    return safe_json(chunks)
+
+
+def _is_number_sequence(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(
+            isinstance(item, (int, float)) and not isinstance(item, bool)
+            for item in value
+        )
+    )
 
 
 def _span_entity_name(*, span_id: str) -> str:
@@ -569,4 +704,4 @@ def _tool_name(*, tool: Any) -> str:
     get_name = getattr(tool, "get_name", None)
     if callable(get_name):
         return str(get_name())
-    return "llama_index_tool"
+    return LLAMA_INDEX_DEFAULT_TOOL_NAME

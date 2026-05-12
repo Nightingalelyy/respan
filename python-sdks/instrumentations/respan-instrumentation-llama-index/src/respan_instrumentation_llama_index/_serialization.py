@@ -6,6 +6,17 @@ import json
 from enum import Enum
 from typing import Any
 
+from respan_instrumentation_llama_index._constants import (
+    MESSAGE_ROLE_ASSISTANT,
+    MESSAGE_ROLE_SYSTEM,
+    MESSAGE_ROLE_USER,
+)
+
+_REACT_OBSERVATION_PREFIX = "Observation:"
+_CONTEXT_PROMPT_PREFIX = "Context information is below."
+_QUERY_MARKER = "\nQuery:"
+_ANSWER_MARKER = "\nAnswer:"
+
 
 def enum_value(value: Any) -> Any:
     if isinstance(value, Enum):
@@ -22,12 +33,13 @@ def to_jsonable(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, dict):
-        return {
+        jsonable_dict = {
             str(enum_value(key)): to_jsonable(item_value)
             for key, item_value in value.items()
         }
+        return normalize_message_dict(jsonable_dict)
     if isinstance(value, (list, tuple, set)):
-        return [to_jsonable(item) for item in value]
+        return normalize_message_sequence([to_jsonable(item) for item in value])
     if hasattr(value, "model_dump"):
         return to_jsonable(value.model_dump())
     if hasattr(value, "dict"):
@@ -78,7 +90,7 @@ def get_model_system(model_dict: dict[str, Any] | None) -> str | None:
 
 
 def message_to_dict(message: Any) -> dict[str, Any]:
-    role = enum_value(getattr(message, "role", None)) or "user"
+    role = enum_value(getattr(message, "role", None)) or MESSAGE_ROLE_USER
     content = getattr(message, "content", None)
     if content is None and hasattr(message, "blocks"):
         content = [to_jsonable(block) for block in getattr(message, "blocks", [])]
@@ -90,13 +102,87 @@ def message_to_dict(message: Any) -> dict[str, Any]:
     additional_kwargs = getattr(message, "additional_kwargs", None)
     if additional_kwargs:
         result["additional_kwargs"] = to_jsonable(additional_kwargs)
-    return result
+    return normalize_message_dict(result)
 
 
 def chat_messages_to_dicts(messages: Any) -> list[dict[str, Any]]:
     if messages is None:
         return []
-    return [message_to_dict(message) for message in messages]
+    return normalize_message_sequence(
+        [message_to_dict(message) for message in messages]
+    )
+
+
+def normalize_message_sequence(messages: list[Any]) -> list[Any]:
+    if not all(isinstance(message, dict) for message in messages):
+        return messages
+
+    result: list[dict[str, Any]] = []
+    for message in messages:
+        for candidate in split_generated_context_message(
+            message=normalize_message_dict(message)
+        ):
+            result.append(
+                normalize_react_observation_message(
+                    message=candidate,
+                    previous_messages=result,
+                )
+            )
+    return result
+
+
+def normalize_message_dict(message: dict[str, Any]) -> dict[str, Any]:
+    """Normalize LlamaIndex-generated messages before export."""
+    role = message.get("role")
+    if role != MESSAGE_ROLE_USER:
+        return message
+
+    text = _message_text(message.get("content"))
+    if text is None:
+        text = _message_text(message.get("blocks"))
+    if text is None:
+        return message
+
+    if _is_llama_index_context_prompt(text=text):
+        normalized = dict(message)
+        normalized["role"] = MESSAGE_ROLE_SYSTEM
+        return normalized
+    return message
+
+
+def normalize_react_observation_message(
+    *,
+    message: dict[str, Any],
+    previous_messages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not _is_react_observation_message(message=message):
+        return message
+    if not _previous_message_is_react_action(previous_messages=previous_messages):
+        return message
+
+    normalized = dict(message)
+    normalized["role"] = MESSAGE_ROLE_SYSTEM
+    return normalized
+
+
+def split_generated_context_message(message: dict[str, Any]) -> list[dict[str, Any]]:
+    """Separate LlamaIndex-generated retrieval context from the user query."""
+    text = _message_text(message.get("content"))
+    if text is None or not _is_llama_index_context_prompt(text=text):
+        return [message]
+
+    query = _extract_generated_query(text=text)
+    if not query:
+        return [message]
+
+    context_message = dict(message)
+    context_message["role"] = MESSAGE_ROLE_SYSTEM
+    context_message["content"] = text.split(_QUERY_MARKER, maxsplit=1)[0].rstrip()
+    user_message = {
+        "role": MESSAGE_ROLE_USER,
+        "content": query,
+    }
+    return [context_message, user_message]
 
 
 def chat_response_to_message_dict(response: Any) -> dict[str, Any]:
@@ -108,7 +194,7 @@ def chat_response_to_message_dict(response: Any) -> dict[str, Any]:
         content = getattr(response, "response", None)
     if content is None:
         content = str(response) if response is not None else ""
-    return {"role": "assistant", "content": to_jsonable(content)}
+    return {"role": MESSAGE_ROLE_ASSISTANT, "content": to_jsonable(content)}
 
 
 def completion_response_to_text(response: Any) -> str:
@@ -169,6 +255,65 @@ def _find_usage_dict(value: Any) -> dict[str, Any] | None:
         if isinstance(nested, dict):
             return nested
     return None
+
+
+def _message_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        segments: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                segments.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    segments.append(text)
+        return "\n".join(segments) if segments else None
+    return None
+
+
+def _is_react_observation_message(*, message: dict[str, Any]) -> bool:
+    if message.get("role") != MESSAGE_ROLE_USER:
+        return False
+
+    text = _message_text(message.get("content"))
+    if text is None:
+        text = _message_text(message.get("blocks"))
+    return bool(text and text.lstrip().startswith(_REACT_OBSERVATION_PREFIX))
+
+
+def _previous_message_is_react_action(
+    *,
+    previous_messages: list[dict[str, Any]],
+) -> bool:
+    for previous_message in reversed(previous_messages):
+        role = previous_message.get("role")
+        if role == MESSAGE_ROLE_SYSTEM:
+            continue
+        if role != MESSAGE_ROLE_ASSISTANT:
+            return False
+
+        text = _message_text(previous_message.get("content"))
+        if text is None:
+            text = _message_text(previous_message.get("blocks"))
+        return bool(text and "Action:" in text)
+    return False
+
+
+def _is_llama_index_context_prompt(*, text: str) -> bool:
+    stripped = text.lstrip()
+    return stripped.startswith(_CONTEXT_PROMPT_PREFIX) and _QUERY_MARKER in stripped
+
+
+def _extract_generated_query(*, text: str) -> str | None:
+    _, query_part = text.split(_QUERY_MARKER, maxsplit=1)
+    if _ANSWER_MARKER in query_part:
+        query_part = query_part.split(_ANSWER_MARKER, maxsplit=1)[0]
+    query = query_part.strip()
+    return query or None
 
 
 def _get_int(value: dict[str, Any], *keys: str) -> int | None:
