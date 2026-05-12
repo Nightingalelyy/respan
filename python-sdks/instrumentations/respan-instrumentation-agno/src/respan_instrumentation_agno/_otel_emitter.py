@@ -3,10 +3,18 @@
 import json
 import logging
 from collections.abc import Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+import inspect
 from typing import Any
+from typing import Union
+from typing import get_args
+from typing import get_origin
 
 from opentelemetry import trace
 from opentelemetry.semconv_ai import LLMRequestTypeValues
+from opentelemetry.semconv_ai import SpanAttributes
 
 from respan_instrumentation_agno._constants import (
     AGENT_ID_KEY,
@@ -26,6 +34,8 @@ from respan_instrumentation_agno._constants import (
     AGNO_TOOL_CALL_ID_ATTR,
     AGNO_TOOL_SPAN_NAME,
     AGNO_TOOL_NAME_ATTR,
+    AGNO_USAGE_INPUT_TOKENS_ATTR,
+    AGNO_USAGE_OUTPUT_TOKENS_ATTR,
     AGNO_USER_ID_ATTR,
     ARGUMENTS_KEY,
     ASSISTANT_ROLE,
@@ -48,16 +58,9 @@ from respan_instrumentation_agno._constants import (
     FUNCTION_KEY,
     FUNCTION_TOOL_SCHEMA_KEYS,
     FUNCTION_TYPE,
-    GEN_AI_COMPLETION_PREFIX,
-    GEN_AI_PROMPT_PREFIX,
-    GEN_AI_USAGE_INPUT_TOKENS,
-    GEN_AI_USAGE_OUTPUT_TOKENS,
     ID_KEY,
     INPUT_KEY,
     INPUT_TOKENS_KEY,
-    LLM_REQUEST_FUNCTIONS,
-    LLM_USAGE_CACHE_READ_INPUT_TOKENS,
-    LLM_USAGE_TOTAL_TOKENS,
     MESSAGES_KEY,
     METADATA_KEY,
     METRICS_KEY,
@@ -87,11 +90,6 @@ from respan_instrumentation_agno._constants import (
     TOOL_SPAN_SEED_PART,
     TOOLS_KEY,
     TOTAL_TOKENS_KEY,
-    TRACELOOP_ENTITY_INPUT,
-    TRACELOOP_ENTITY_NAME,
-    TRACELOOP_ENTITY_OUTPUT,
-    TRACELOOP_ENTITY_PATH,
-    TRACELOOP_WORKFLOW_NAME,
     TYPE_KEY,
     USER_ID_KEY,
     USER_ROLE,
@@ -105,11 +103,6 @@ from respan_sdk.constants.llm_logging import (
     LogMethodChoices,
 )
 from respan_sdk.constants.span_attributes import (
-    GEN_AI_SYSTEM,
-    LLM_REQUEST_MODEL,
-    LLM_REQUEST_TYPE,
-    LLM_USAGE_COMPLETION_TOKENS,
-    LLM_USAGE_PROMPT_TOKENS,
     RESPAN_LOG_METHOD,
     RESPAN_LOG_TYPE,
     RESPAN_METADATA,
@@ -124,6 +117,57 @@ from respan_sdk.utils.serialization import serialize_value
 from respan_tracing.utils.span_factory import build_readable_span, inject_span
 
 logger = logging.getLogger(__name__)
+
+AGNO_PROMPT_PREFIX = f"{SpanAttributes.LLM_PROMPTS}."
+AGNO_COMPLETION_PREFIX = f"{SpanAttributes.LLM_COMPLETIONS}."
+
+
+@dataclass(frozen=True)
+class _AgnoRunContext:
+    trace_id: str
+    root_span_id: str
+    parent_span_id: str | None
+
+
+_CURRENT_RUN_CONTEXT: ContextVar[_AgnoRunContext | None] = ContextVar(
+    "respan_agno_current_run_context",
+    default=None,
+)
+
+
+def create_agno_run_context(
+    *,
+    target_kind: str,
+    started_at_ns: int,
+) -> _AgnoRunContext:
+    current_context = _CURRENT_RUN_CONTEXT.get()
+    trace_seed = f"{AGNO_INSTRUMENTATION_NAME}:{target_kind}:{started_at_ns}"
+    root_span_id = format_span_id(
+        ensure_span_id(val=f"{trace_seed}:{ROOT_SPAN_SEED_PART}")
+    )
+
+    if current_context is not None:
+        return _AgnoRunContext(
+            trace_id=current_context.trace_id,
+            root_span_id=root_span_id,
+            parent_span_id=current_context.root_span_id,
+        )
+
+    parent_trace_id, parent_span_id = _current_parent_ids()
+    return _AgnoRunContext(
+        trace_id=parent_trace_id or format_trace_id(ensure_trace_id(val=trace_seed)),
+        root_span_id=root_span_id,
+        parent_span_id=parent_span_id,
+    )
+
+
+@contextmanager
+def use_agno_run_context(run_context: _AgnoRunContext):
+    token = _CURRENT_RUN_CONTEXT.set(run_context)
+    try:
+        yield
+    finally:
+        _CURRENT_RUN_CONTEXT.reset(token)
 
 
 def _object_value(value: Any, key: str, default: Any = None) -> Any:
@@ -385,9 +429,70 @@ def _normalize_tool_definition(tool: Any) -> dict[str, Any] | None:
     parameters = tool_dict.get(PARAMETERS_KEY) or tool_dict.get(
         PARAMETERS_JSON_SCHEMA_KEY
     )
+    if parameters is None and callable(tool):
+        parameters = _callable_parameters_schema(function=tool)
     if parameters is not None:
         function_payload[PARAMETERS_KEY] = parameters
     return {TYPE_KEY: FUNCTION_TYPE, FUNCTION_KEY: function_payload}
+
+
+def _callable_parameters_schema(function: Any) -> dict[str, Any] | None:
+    try:
+        signature = inspect.signature(function)
+    except (TypeError, ValueError):
+        return None
+
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for parameter in signature.parameters.values():
+        if parameter.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            continue
+        properties[parameter.name] = _annotation_schema(
+            annotation=parameter.annotation,
+        )
+        if parameter.default is inspect.Parameter.empty:
+            required.append(parameter.name)
+
+    schema: dict[str, Any] = {TYPE_KEY: "object", "properties": properties}
+    if required:
+        schema["required"] = required
+    return schema
+
+
+def _annotation_schema(annotation: Any) -> dict[str, Any]:
+    if annotation is inspect.Signature.empty:
+        return {TYPE_KEY: "string"}
+
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin is Union:
+        non_none_args = [arg for arg in args if arg is not type(None)]
+        if len(non_none_args) == 1:
+            return _annotation_schema(annotation=non_none_args[0])
+        return {"anyOf": [_annotation_schema(annotation=arg) for arg in non_none_args]}
+
+    if origin in (list, tuple, set, frozenset):
+        item_schema = _annotation_schema(annotation=args[0]) if args else {}
+        return {TYPE_KEY: "array", "items": item_schema}
+    if origin is dict:
+        return {TYPE_KEY: "object"}
+
+    if annotation is str:
+        return {TYPE_KEY: "string"}
+    if annotation is int:
+        return {TYPE_KEY: "integer"}
+    if annotation is float:
+        return {TYPE_KEY: "number"}
+    if annotation is bool:
+        return {TYPE_KEY: "boolean"}
+    if annotation in (dict, Mapping):
+        return {TYPE_KEY: "object"}
+    if annotation in (list, tuple, set, frozenset):
+        return {TYPE_KEY: "array"}
+    return {TYPE_KEY: "string"}
 
 
 def _extract_tool_definitions(target: Any) -> list[dict[str, Any]]:
@@ -485,6 +590,14 @@ def _span_ids(
     target_kind: str,
     started_at_ns: int,
 ) -> tuple[str, str, str | None]:
+    current_context = _CURRENT_RUN_CONTEXT.get()
+    if current_context is not None:
+        return (
+            current_context.trace_id,
+            current_context.root_span_id,
+            current_context.parent_span_id,
+        )
+
     parent_trace_id, parent_span_id = _current_parent_ids()
     run_id = _object_value(value=output, key=RUN_ID_KEY)
     trace_seed = str(
@@ -509,13 +622,15 @@ def _root_attributes(
     attributes: dict[str, Any] = {
         RESPAN_LOG_METHOD: LogMethodChoices.TRACING_INTEGRATION.value,
         RESPAN_LOG_TYPE: log_type,
-        TRACELOOP_ENTITY_NAME: entity_name,
-        TRACELOOP_ENTITY_PATH: "",
-        TRACELOOP_WORKFLOW_NAME: entity_name,
-        TRACELOOP_ENTITY_INPUT: _attribute_string(
+        SpanAttributes.TRACELOOP_ENTITY_NAME: entity_name,
+        SpanAttributes.TRACELOOP_ENTITY_PATH: "",
+        SpanAttributes.TRACELOOP_WORKFLOW_NAME: entity_name,
+        SpanAttributes.TRACELOOP_ENTITY_INPUT: _attribute_string(
             value=_input_payload(input_value=input_value, output=output),
         ),
-        TRACELOOP_ENTITY_OUTPUT: _attribute_string(value=_output_payload(output=output)),
+        SpanAttributes.TRACELOOP_ENTITY_OUTPUT: _attribute_string(
+            value=_output_payload(output=output)
+        ),
     }
 
     run_id = _object_value(value=output, key=RUN_ID_KEY)
@@ -565,67 +680,79 @@ def _chat_attributes(
     attributes: dict[str, Any] = {
         RESPAN_LOG_METHOD: LogMethodChoices.TRACING_INTEGRATION.value,
         RESPAN_LOG_TYPE: LOG_TYPE_CHAT,
-        TRACELOOP_ENTITY_NAME: entity_name,
-        TRACELOOP_ENTITY_PATH: entity_name,
-        TRACELOOP_ENTITY_INPUT: _json_string(
+        SpanAttributes.TRACELOOP_ENTITY_NAME: entity_name,
+        SpanAttributes.TRACELOOP_ENTITY_PATH: entity_name,
+        SpanAttributes.TRACELOOP_ENTITY_INPUT: _json_string(
             value=prompt_messages,
         ),
-        TRACELOOP_ENTITY_OUTPUT: _attribute_string(
+        SpanAttributes.TRACELOOP_ENTITY_OUTPUT: _attribute_string(
             value=completion_message.get(CONTENT_KEY),
         )
         or "",
-        LLM_REQUEST_TYPE: LLMRequestTypeValues.CHAT.value,
+        SpanAttributes.LLM_REQUEST_TYPE: LLMRequestTypeValues.CHAT.value,
     }
 
-    _set_if_present(attributes=attributes, key=GEN_AI_SYSTEM, value=provider)
-    _set_if_present(attributes=attributes, key=LLM_REQUEST_MODEL, value=model_name)
+    _set_if_present(
+        attributes=attributes, key=SpanAttributes.LLM_SYSTEM, value=provider
+    )
     _set_if_present(
         attributes=attributes,
-        key=GEN_AI_USAGE_INPUT_TOKENS,
+        key=SpanAttributes.LLM_REQUEST_MODEL,
+        value=model_name,
+    )
+    _set_if_present(
+        attributes=attributes,
+        key=AGNO_USAGE_INPUT_TOKENS_ATTR,
         value=prompt_tokens,
     )
     _set_if_present(
         attributes=attributes,
-        key=GEN_AI_USAGE_OUTPUT_TOKENS,
+        key=AGNO_USAGE_OUTPUT_TOKENS_ATTR,
         value=completion_tokens,
     )
     _set_if_present(
         attributes=attributes,
-        key=LLM_USAGE_PROMPT_TOKENS,
+        key=SpanAttributes.LLM_USAGE_PROMPT_TOKENS,
         value=prompt_tokens,
     )
     _set_if_present(
         attributes=attributes,
-        key=LLM_USAGE_COMPLETION_TOKENS,
+        key=SpanAttributes.LLM_USAGE_COMPLETION_TOKENS,
         value=completion_tokens,
     )
-    _set_if_present(attributes=attributes, key=LLM_USAGE_TOTAL_TOKENS, value=total_tokens)
     _set_if_present(
         attributes=attributes,
-        key=LLM_USAGE_CACHE_READ_INPUT_TOKENS,
+        key=SpanAttributes.LLM_USAGE_TOTAL_TOKENS,
+        value=total_tokens,
+    )
+    _set_if_present(
+        attributes=attributes,
+        key=SpanAttributes.LLM_USAGE_CACHE_READ_INPUT_TOKENS,
         value=cache_read_tokens,
     )
 
     _set_message_attributes(
         attributes=attributes,
-        prefix=GEN_AI_PROMPT_PREFIX,
+        prefix=AGNO_PROMPT_PREFIX,
         messages=prompt_messages,
     )
     _set_message_attributes(
         attributes=attributes,
-        prefix=GEN_AI_COMPLETION_PREFIX,
+        prefix=AGNO_COMPLETION_PREFIX,
         messages=[completion_message],
     )
 
     tool_definitions = _extract_tool_definitions(target=target)
     if tool_definitions:
-        attributes[LLM_REQUEST_FUNCTIONS] = _json_string(value=tool_definitions)
+        attributes[SpanAttributes.LLM_REQUEST_FUNCTIONS] = _json_string(
+            value=tool_definitions
+        )
 
     tool_calls = _extract_tool_calls(
         tool_executions=_extract_tool_executions(output=output),
     )
     if tool_calls:
-        attributes[f"{GEN_AI_COMPLETION_PREFIX}0.{TOOL_CALLS_KEY}"] = _json_string(
+        attributes[f"{AGNO_COMPLETION_PREFIX}0.{TOOL_CALLS_KEY}"] = _json_string(
             value=tool_calls,
         )
 
@@ -643,12 +770,13 @@ def _tool_attributes(tool_execution: Any) -> dict[str, Any]:
     attributes: dict[str, Any] = {
         RESPAN_LOG_METHOD: LogMethodChoices.TRACING_INTEGRATION.value,
         RESPAN_LOG_TYPE: LOG_TYPE_TOOL,
-        TRACELOOP_ENTITY_NAME: str(tool_name),
-        TRACELOOP_ENTITY_PATH: f"{DEFAULT_TOOL_NAME}.{tool_name}",
-        TRACELOOP_ENTITY_INPUT: _json_string(
+        SpanAttributes.TRACELOOP_ENTITY_NAME: str(tool_name),
+        SpanAttributes.TRACELOOP_ENTITY_PATH: f"{DEFAULT_TOOL_NAME}.{tool_name}",
+        SpanAttributes.TRACELOOP_ENTITY_INPUT: _json_string(
             value={NAME_KEY: tool_name, ARGUMENTS_KEY: tool_arguments},
         ),
-        TRACELOOP_ENTITY_OUTPUT: _attribute_string(value=tool_result) or "",
+        SpanAttributes.TRACELOOP_ENTITY_OUTPUT: _attribute_string(value=tool_result)
+        or "",
         AGNO_TOOL_NAME_ATTR: str(tool_name),
     }
     _set_if_present(
@@ -665,9 +793,11 @@ def _event_attributes(event: Any) -> dict[str, Any]:
     attributes: dict[str, Any] = {
         RESPAN_LOG_METHOD: LogMethodChoices.TRACING_INTEGRATION.value,
         RESPAN_LOG_TYPE: LOG_TYPE_WORKFLOW,
-        TRACELOOP_ENTITY_NAME: entity_name,
-        TRACELOOP_ENTITY_PATH: f"{DEFAULT_EVENT_NAME}.{entity_name}",
-        TRACELOOP_ENTITY_INPUT: _json_string(value=_object_to_dict(value=event)),
+        SpanAttributes.TRACELOOP_ENTITY_NAME: entity_name,
+        SpanAttributes.TRACELOOP_ENTITY_PATH: f"{DEFAULT_EVENT_NAME}.{entity_name}",
+        SpanAttributes.TRACELOOP_ENTITY_INPUT: _json_string(
+            value=_object_to_dict(value=event)
+        ),
     }
     _set_if_present(attributes=attributes, key=AGNO_EVENT_NAME_ATTR, value=event_name)
     return attributes

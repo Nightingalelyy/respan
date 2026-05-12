@@ -1,6 +1,4 @@
-"""Constants for Agno instrumentation."""
-
-from opentelemetry.semconv_ai import SpanAttributes
+"""Agno-owned constants for Agno instrumentation."""
 
 AGNO_INSTRUMENTATION_NAME = "agno"
 AGNO_AGENT_MODULE = "agno.agent.agent"
@@ -83,7 +81,14 @@ FUNCTION_TOOL_SCHEMA_KEYS = frozenset(
     (NAME_KEY, DESCRIPTION_KEY, PARAMETERS_KEY, STRICT_KEY)
 )
 ROOT_OUTPUT_PAYLOAD_KEYS = frozenset(
-    (RUN_ID_KEY, STATUS_KEY, MODEL_KEY, MODEL_PROVIDER_KEY, CONTENT_TYPE_KEY, METADATA_KEY)
+    (
+        RUN_ID_KEY,
+        STATUS_KEY,
+        MODEL_KEY,
+        MODEL_PROVIDER_KEY,
+        CONTENT_TYPE_KEY,
+        METADATA_KEY,
+    )
 )
 RUN_OUTPUT_MARKER_KEYS = (
     RUN_ID_KEY,
@@ -105,16 +110,7 @@ AGNO_TOOL_CALL_ID_ATTR = "agno.tool.call.id"
 AGNO_TOOL_NAME_ATTR = "agno.tool.name"
 AGNO_STATUS_ATTR = "agno.status"
 
-GEN_AI_PROMPT_PREFIX = f"{SpanAttributes.LLM_PROMPTS}."
-GEN_AI_COMPLETION_PREFIX = f"{SpanAttributes.LLM_COMPLETIONS}."
-GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
-GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
-LLM_USAGE_CACHE_READ_INPUT_TOKENS = "llm.usage.cache_read_input_tokens"
-
-TRACELOOP_ENTITY_INPUT = SpanAttributes.TRACELOOP_ENTITY_INPUT
-TRACELOOP_ENTITY_NAME = SpanAttributes.TRACELOOP_ENTITY_NAME
-TRACELOOP_ENTITY_OUTPUT = SpanAttributes.TRACELOOP_ENTITY_OUTPUT
-TRACELOOP_ENTITY_PATH = SpanAttributes.TRACELOOP_ENTITY_PATH
-TRACELOOP_WORKFLOW_NAME = SpanAttributes.TRACELOOP_WORKFLOW_NAME
-LLM_REQUEST_FUNCTIONS = SpanAttributes.LLM_REQUEST_FUNCTIONS
-LLM_USAGE_TOTAL_TOKENS = SpanAttributes.LLM_USAGE_TOTAL_TOKENS
+# These modern usage keys are part of the Respan span contract but are not
+# exposed by opentelemetry-semantic-conventions-ai 0.5.1 yet.
+AGNO_USAGE_INPUT_TOKENS_ATTR = "gen_ai.usage.input_tokens"
+AGNO_USAGE_OUTPUT_TOKENS_ATTR = "gen_ai.usage.output_tokens"

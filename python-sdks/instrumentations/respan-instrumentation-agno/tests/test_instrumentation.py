@@ -1,9 +1,11 @@
 import asyncio
+import json
 import sys
 from types import ModuleType
 from types import SimpleNamespace
 
 import pytest
+from opentelemetry.semconv_ai import SpanAttributes
 
 from respan_instrumentation_agno import AgnoInstrumentor
 from respan_instrumentation_agno import _instrumentation
@@ -14,21 +16,14 @@ from respan_instrumentation_agno._constants import (
     AGNO_TARGET_AGENT,
     AGNO_TARGET_TEAM,
     AGNO_TEAM_MODULE,
-    GEN_AI_COMPLETION_PREFIX,
-    GEN_AI_PROMPT_PREFIX,
-    LLM_USAGE_TOTAL_TOKENS,
-    TRACELOOP_ENTITY_INPUT,
-    TRACELOOP_ENTITY_NAME,
-    TRACELOOP_ENTITY_OUTPUT,
-    TRACELOOP_ENTITY_PATH,
 )
 from respan_sdk.constants.span_attributes import (
-    GEN_AI_SYSTEM,
-    LLM_REQUEST_MODEL,
-    LLM_REQUEST_TYPE,
     RESPAN_LOG_TYPE,
 )
 from respan_tracing.core.tracer import RespanTracer
+
+AGNO_PROMPT_PREFIX = f"{SpanAttributes.LLM_PROMPTS}."
+AGNO_COMPLETION_PREFIX = f"{SpanAttributes.LLM_COMPLETIONS}."
 
 
 class FakeMetrics:
@@ -129,6 +124,23 @@ class FakeTeam:
             return self.run(input=input, **kwargs)
 
         return run_async()
+
+
+class FakeNestedTeam(FakeTeam):
+    name = "Nested Team"
+
+    def run(self, input, **kwargs):
+        FakeAgent().run(input="Ask the member agent for a draft.")
+        return SimpleNamespace(
+            run_id="nested_team_run_123",
+            team_id="nested_team_123",
+            team_name="Nested Team",
+            content="Nested team answer.",
+            model="gpt-4o-mini",
+            model_provider="OpenAI",
+            metrics=FakeMetrics(),
+            status="completed",
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -269,32 +281,32 @@ def test_sync_run_emits_agent_chat_and_tool_spans(captured_spans):
 
     root_attributes = captured_spans[0].attributes
     assert root_attributes[RESPAN_LOG_TYPE] == "agent"
-    assert root_attributes[TRACELOOP_ENTITY_NAME] == "Weather Agent"
-    assert root_attributes[TRACELOOP_ENTITY_PATH] == ""
+    assert root_attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "Weather Agent"
+    assert root_attributes[SpanAttributes.TRACELOOP_ENTITY_PATH] == ""
     assert root_attributes[AGNO_RUN_ID_ATTR] == "run_123"
-    assert root_attributes[TRACELOOP_ENTITY_INPUT] == (
+    assert root_attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT] == (
         '{"input_content":"What is the weather?"}'
     )
-    assert root_attributes[TRACELOOP_ENTITY_OUTPUT] == "It is sunny."
+    assert root_attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] == "It is sunny."
 
     chat_attributes = captured_spans[1].attributes
     assert chat_attributes[RESPAN_LOG_TYPE] == "chat"
-    assert chat_attributes[LLM_REQUEST_TYPE] == "chat"
-    assert chat_attributes[LLM_REQUEST_MODEL] == "gpt-4o-mini"
-    assert chat_attributes[GEN_AI_SYSTEM] == "openai"
-    assert chat_attributes[LLM_USAGE_TOTAL_TOKENS] == 12
-    assert chat_attributes[f"{GEN_AI_PROMPT_PREFIX}0.role"] == "user"
-    assert chat_attributes[f"{GEN_AI_PROMPT_PREFIX}0.content"] == "What is the weather?"
-    assert chat_attributes[f"{GEN_AI_COMPLETION_PREFIX}0.role"] == "assistant"
-    assert chat_attributes[f"{GEN_AI_COMPLETION_PREFIX}0.content"] == "It is sunny."
+    assert chat_attributes[SpanAttributes.LLM_REQUEST_TYPE] == "chat"
+    assert chat_attributes[SpanAttributes.LLM_REQUEST_MODEL] == "gpt-4o-mini"
+    assert chat_attributes[SpanAttributes.LLM_SYSTEM] == "openai"
+    assert chat_attributes[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] == 12
+    assert chat_attributes[f"{AGNO_PROMPT_PREFIX}0.role"] == "user"
+    assert chat_attributes[f"{AGNO_PROMPT_PREFIX}0.content"] == "What is the weather?"
+    assert chat_attributes[f"{AGNO_COMPLETION_PREFIX}0.role"] == "assistant"
+    assert chat_attributes[f"{AGNO_COMPLETION_PREFIX}0.content"] == "It is sunny."
     assert "gen_ai.completion.0.tool_calls" in chat_attributes
     assert "tool_calls" not in chat_attributes
     assert "tools" not in chat_attributes
 
     tool_attributes = captured_spans[2].attributes
     assert tool_attributes[RESPAN_LOG_TYPE] == "tool"
-    assert tool_attributes[TRACELOOP_ENTITY_NAME] == "lookup_weather"
-    assert tool_attributes[TRACELOOP_ENTITY_OUTPUT] == "sunny"
+    assert tool_attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "lookup_weather"
+    assert tool_attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] == "sunny"
 
 
 def test_instrumented_sync_stream_emits_after_consumption(captured_spans):
@@ -377,4 +389,56 @@ def test_team_run_emits_workflow_root(captured_spans):
 
     root_attributes = captured_spans[0].attributes
     assert root_attributes[RESPAN_LOG_TYPE] == "workflow"
-    assert root_attributes[TRACELOOP_ENTITY_NAME] == "Research Team"
+    assert root_attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "Research Team"
+
+
+def test_nested_agent_run_uses_team_trace_context(monkeypatch, captured_spans):
+    fake_modules = _install_fake_agno_modules(monkeypatch)
+    fake_modules.team_class = FakeNestedTeam
+    sys.modules[AGNO_TEAM_MODULE].Team = FakeNestedTeam
+
+    instrumentor = AgnoInstrumentor()
+    instrumentor.activate()
+
+    team = FakeNestedTeam()
+    result = team.run(input="Coordinate a draft.")
+
+    assert result.content == "Nested team answer."
+
+    team_root = next(span for span in captured_spans if span.name == "agno.team")
+    agent_root = next(span for span in captured_spans if span.name == "agno.agent")
+    assert agent_root.trace_id == team_root.trace_id
+    assert agent_root.parent_id == team_root.span_id
+
+
+def test_callable_tool_definition_includes_json_schema(captured_spans):
+    def lookup_weather(city: str, days: int = 1) -> str:
+        """Look up weather for a city."""
+        return f"{city}: {days}"
+
+    agent = FakeAgent()
+    agent.tools = [lookup_weather]
+
+    _otel_emitter.emit_agno_run(
+        target=agent,
+        target_kind=AGNO_TARGET_AGENT,
+        input_value="What is the weather?",
+        output=FakeRunOutput(),
+        events=None,
+        started_at_ns=100,
+        ended_at_ns=200,
+    )
+
+    chat_attributes = captured_spans[1].attributes
+    tool_definitions = json.loads(chat_attributes[SpanAttributes.LLM_REQUEST_FUNCTIONS])
+    function_schema = tool_definitions[0]["function"]
+    assert function_schema["name"] == "lookup_weather"
+    assert function_schema["description"] == "Look up weather for a city."
+    assert function_schema["parameters"] == {
+        "type": "object",
+        "properties": {
+            "city": {"type": "string"},
+            "days": {"type": "integer"},
+        },
+        "required": ["city"],
+    }

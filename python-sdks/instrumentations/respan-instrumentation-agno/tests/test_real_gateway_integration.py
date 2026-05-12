@@ -2,10 +2,11 @@ import os
 
 import pytest
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.semconv_ai import SpanAttributes
 
 from respan_instrumentation_agno import AgnoInstrumentor
 from respan_sdk.constants.llm_logging import LOG_TYPE_AGENT, LOG_TYPE_CHAT
-from respan_sdk.constants.span_attributes import LLM_REQUEST_MODEL, RESPAN_LOG_TYPE
+from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
 from respan_tracing import RespanTelemetry
 from respan_tracing.core.tracer import RespanTracer
 from respan_tracing.testing import InMemorySpanExporter
@@ -75,4 +76,7 @@ def test_real_agno_gateway_run_captures_spans(monkeypatch):
         attributes.get(RESPAN_LOG_TYPE) == LOG_TYPE_CHAT
         for attributes in span_attributes
     )
-    assert any(attributes.get(LLM_REQUEST_MODEL) for attributes in span_attributes)
+    assert any(
+        attributes.get(SpanAttributes.LLM_REQUEST_MODEL)
+        for attributes in span_attributes
+    )

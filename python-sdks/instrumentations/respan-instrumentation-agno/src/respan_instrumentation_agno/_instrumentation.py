@@ -26,8 +26,10 @@ from respan_instrumentation_agno._constants import (
     RUN_METHOD_NAME,
 )
 from respan_instrumentation_agno._otel_emitter import (
+    create_agno_run_context,
     emit_agno_error,
     emit_agno_run,
+    use_agno_run_context,
 )
 from respan_tracing.core.tracer import RespanTracer
 
@@ -69,8 +71,7 @@ def _is_run_output(item: Any) -> bool:
     if _object_value(value=item, key=EVENT_KEY) is not None:
         return False
     return any(
-        _object_value(value=item, key=key) is not None
-        for key in RUN_OUTPUT_MARKER_KEYS
+        _object_value(value=item, key=key) is not None for key in RUN_OUTPUT_MARKER_KEYS
     )
 
 
@@ -132,30 +133,32 @@ def _wrap_sync_stream(
     target_kind: str,
     input_value: Any,
     started_at_ns: int,
+    run_context: Any,
 ) -> Iterator[Any]:
     items: list[Any] = []
-    try:
-        for item in iterator:
-            items.append(item)
-            yield item
-    except Exception as exception:
-        _emit_failed_run(
-            target=target,
-            target_kind=target_kind,
-            input_value=input_value,
-            exception=exception,
-            started_at_ns=started_at_ns,
-        )
-        raise
-    else:
-        _emit_completed_run(
-            target=target,
-            target_kind=target_kind,
-            input_value=input_value,
-            output=_last_run_output(items=items),
-            events=items,
-            started_at_ns=started_at_ns,
-        )
+    with use_agno_run_context(run_context=run_context):
+        try:
+            for item in iterator:
+                items.append(item)
+                yield item
+        except Exception as exception:
+            _emit_failed_run(
+                target=target,
+                target_kind=target_kind,
+                input_value=input_value,
+                exception=exception,
+                started_at_ns=started_at_ns,
+            )
+            raise
+        else:
+            _emit_completed_run(
+                target=target,
+                target_kind=target_kind,
+                input_value=input_value,
+                output=_last_run_output(items=items),
+                events=items,
+                started_at_ns=started_at_ns,
+            )
 
 
 async def _wrap_async_stream(
@@ -165,30 +168,32 @@ async def _wrap_async_stream(
     target_kind: str,
     input_value: Any,
     started_at_ns: int,
+    run_context: Any,
 ) -> AsyncIterator[Any]:
     items: list[Any] = []
-    try:
-        async for item in async_iterator:
-            items.append(item)
-            yield item
-    except Exception as exception:
-        _emit_failed_run(
-            target=target,
-            target_kind=target_kind,
-            input_value=input_value,
-            exception=exception,
-            started_at_ns=started_at_ns,
-        )
-        raise
-    else:
-        _emit_completed_run(
-            target=target,
-            target_kind=target_kind,
-            input_value=input_value,
-            output=_last_run_output(items=items),
-            events=items,
-            started_at_ns=started_at_ns,
-        )
+    with use_agno_run_context(run_context=run_context):
+        try:
+            async for item in async_iterator:
+                items.append(item)
+                yield item
+        except Exception as exception:
+            _emit_failed_run(
+                target=target,
+                target_kind=target_kind,
+                input_value=input_value,
+                exception=exception,
+                started_at_ns=started_at_ns,
+            )
+            raise
+        else:
+            _emit_completed_run(
+                target=target,
+                target_kind=target_kind,
+                input_value=input_value,
+                output=_last_run_output(items=items),
+                events=items,
+                started_at_ns=started_at_ns,
+            )
 
 
 def _wrap_sync_method(
@@ -204,37 +209,43 @@ def _wrap_sync_method(
         input_args = args[1:] if is_bound_method else args[1:]
         input_value = _extract_input_value(args=input_args, kwargs=kwargs)
         started_at_ns = time.time_ns()
-
-        try:
-            result = original_method(*call_args, **kwargs)
-        except Exception as exception:
-            _emit_failed_run(
-                target=target,
-                target_kind=target_kind,
-                input_value=input_value,
-                exception=exception,
-                started_at_ns=started_at_ns,
-            )
-            raise
-
-        if _is_sync_stream_result(result=result):
-            return _wrap_sync_stream(
-                iterator=result,
-                target=target,
-                target_kind=target_kind,
-                input_value=input_value,
-                started_at_ns=started_at_ns,
-            )
-
-        _emit_completed_run(
-            target=target,
+        run_context = create_agno_run_context(
             target_kind=target_kind,
-            input_value=input_value,
-            output=result,
-            events=None,
             started_at_ns=started_at_ns,
         )
-        return result
+
+        with use_agno_run_context(run_context=run_context):
+            try:
+                result = original_method(*call_args, **kwargs)
+            except Exception as exception:
+                _emit_failed_run(
+                    target=target,
+                    target_kind=target_kind,
+                    input_value=input_value,
+                    exception=exception,
+                    started_at_ns=started_at_ns,
+                )
+                raise
+
+            if _is_sync_stream_result(result=result):
+                return _wrap_sync_stream(
+                    iterator=result,
+                    target=target,
+                    target_kind=target_kind,
+                    input_value=input_value,
+                    started_at_ns=started_at_ns,
+                    run_context=run_context,
+                )
+
+            _emit_completed_run(
+                target=target,
+                target_kind=target_kind,
+                input_value=input_value,
+                output=result,
+                events=None,
+                started_at_ns=started_at_ns,
+            )
+            return result
 
     setattr(wrapped_sync_method, RESPAN_AGNO_WRAPPED_ATTR, True)
     return wrapped_sync_method
@@ -253,64 +264,71 @@ def _wrap_async_method(
         input_args = args[1:] if is_bound_method else args[1:]
         input_value = _extract_input_value(args=input_args, kwargs=kwargs)
         started_at_ns = time.time_ns()
+        run_context = create_agno_run_context(
+            target_kind=target_kind,
+            started_at_ns=started_at_ns,
+        )
 
-        try:
-            result = original_method(*call_args, **kwargs)
-        except Exception as exception:
-            _emit_failed_run(
-                target=target,
-                target_kind=target_kind,
-                input_value=input_value,
-                exception=exception,
-                started_at_ns=started_at_ns,
-            )
-            raise
-
-        if _is_async_stream_result(result=result):
-            return _wrap_async_stream(
-                async_iterator=result,
-                target=target,
-                target_kind=target_kind,
-                input_value=input_value,
-                started_at_ns=started_at_ns,
-            )
-
-        if inspect.isawaitable(result):
-
-            async def await_and_emit() -> Any:
-                try:
-                    output = await result
-                except Exception as exception:
-                    _emit_failed_run(
-                        target=target,
-                        target_kind=target_kind,
-                        input_value=input_value,
-                        exception=exception,
-                        started_at_ns=started_at_ns,
-                    )
-                    raise
-
-                _emit_completed_run(
+        with use_agno_run_context(run_context=run_context):
+            try:
+                result = original_method(*call_args, **kwargs)
+            except Exception as exception:
+                _emit_failed_run(
                     target=target,
                     target_kind=target_kind,
                     input_value=input_value,
-                    output=output,
-                    events=None,
+                    exception=exception,
                     started_at_ns=started_at_ns,
                 )
-                return output
+                raise
 
-            return await_and_emit()
+            if _is_async_stream_result(result=result):
+                return _wrap_async_stream(
+                    async_iterator=result,
+                    target=target,
+                    target_kind=target_kind,
+                    input_value=input_value,
+                    started_at_ns=started_at_ns,
+                    run_context=run_context,
+                )
 
-        _emit_completed_run(
-            target=target,
-            target_kind=target_kind,
-            input_value=input_value,
-            output=result,
-            events=None,
-            started_at_ns=started_at_ns,
-        )
-        return result
+            if inspect.isawaitable(result):
+
+                async def await_and_emit() -> Any:
+                    with use_agno_run_context(run_context=run_context):
+                        try:
+                            output = await result
+                        except Exception as exception:
+                            _emit_failed_run(
+                                target=target,
+                                target_kind=target_kind,
+                                input_value=input_value,
+                                exception=exception,
+                                started_at_ns=started_at_ns,
+                            )
+                            raise
+
+                        _emit_completed_run(
+                            target=target,
+                            target_kind=target_kind,
+                            input_value=input_value,
+                            output=output,
+                            events=None,
+                            started_at_ns=started_at_ns,
+                        )
+                        return output
+
+                return await_and_emit()
+
+            _emit_completed_run(
+                target=target,
+                target_kind=target_kind,
+                input_value=input_value,
+                output=result,
+                events=None,
+                started_at_ns=started_at_ns,
+            )
+            return result
 
     setattr(wrapped_async_method, RESPAN_AGNO_WRAPPED_ATTR, True)
     return wrapped_async_method
@@ -396,7 +414,9 @@ class AgnoInstrumentor:
             return
 
         if not _is_respan_tracing_enabled():
-            logger.info("Agno instrumentation skipped because Respan tracing is disabled")
+            logger.info(
+                "Agno instrumentation skipped because Respan tracing is disabled"
+            )
             return
 
         if self._agent is not None:
@@ -426,7 +446,9 @@ class AgnoInstrumentor:
             try:
                 team_class = self._load_team_class()
             except ImportError:
-                logger.info("Agno Team instrumentation skipped because Team is unavailable")
+                logger.info(
+                    "Agno Team instrumentation skipped because Team is unavailable"
+                )
             else:
                 self._patch_target(
                     target=team_class,
