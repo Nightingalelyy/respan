@@ -1,15 +1,18 @@
 import asyncio
+import json
 import sys
 from types import ModuleType
 from types import SimpleNamespace
+from typing import Literal
+from typing import TypedDict
 
 import pytest
+from opentelemetry.semconv_ai import SpanAttributes
 
 from respan_instrumentation_instructor import InstructorInstrumentor
 from respan_instrumentation_instructor import _instrumentation
 from respan_sdk.constants.span_attributes import (
-    LLM_REQUEST_MODEL,
-    LLM_REQUEST_TYPE,
+    GEN_AI_SYSTEM,
     RESPAN_LOG_TYPE,
 )
 from respan_tracing.core.tracer import RespanTracer
@@ -37,6 +40,13 @@ class UserResult:
 
     def model_dump(self):
         return {"name": self.name}
+
+
+class TicketResult(TypedDict):
+    customer: str
+    priority: Literal["low", "medium", "high"]
+    follow_up_hours: int
+    next_step: str | None
 
 
 class FakeSpan:
@@ -83,6 +93,10 @@ def _fake_create(**kwargs):
 
 async def _fake_async_create(**kwargs):
     return UserResult(name="Grace")
+
+
+def _fake_iter_create(**kwargs):
+    return iter([{"task": "send checklist"}, {"task": "finish dashboard"}])
 
 
 def _install_fake_tracer(monkeypatch):
@@ -138,11 +152,14 @@ def _install_fake_instructor_modules(monkeypatch):
             )
 
         def create_iterable(self, messages=None, response_model=None, **kwargs):
-            return self.create(
-                response_model=response_model,
-                messages=messages,
-                **kwargs,
-            )
+            def iterator():
+                yield self.create(
+                    response_model=object,
+                    messages=messages,
+                    **kwargs,
+                )
+
+            return iterator()
 
         def create_with_completion(self, messages=None, response_model=None, **kwargs):
             result = self.create(
@@ -253,17 +270,130 @@ def test_patch_create_emits_native_respan_chat_span(monkeypatch):
     assert len(tracer.spans) == 1
     attributes = tracer.spans[0].attributes
     assert attributes[RESPAN_LOG_TYPE] == "chat"
-    assert attributes[LLM_REQUEST_TYPE] == "chat"
-    assert attributes[LLM_REQUEST_MODEL] == "gpt-4o-mini"
-    assert attributes["gen_ai.system"] == "openai"
-    assert attributes["gen_ai.prompt.0.role"] == "user"
-    assert attributes["gen_ai.prompt.0.content"] == "Extract Ada Lovelace."
-    assert attributes["gen_ai.completion.0.role"] == "assistant"
-    assert attributes["gen_ai.completion.0.content"] == '{"name":"Ada"}'
-    assert "UserResult" in attributes["llm.request.functions"]
+    assert attributes[SpanAttributes.LLM_REQUEST_TYPE] == "chat"
+    assert attributes[SpanAttributes.LLM_REQUEST_MODEL] == "gpt-4o-mini"
+    assert attributes[GEN_AI_SYSTEM] == "openai"
+    assert attributes[f"{SpanAttributes.LLM_PROMPTS}.0.role"] == "user"
+    assert (
+        attributes[f"{SpanAttributes.LLM_PROMPTS}.0.content"]
+        == "Extract Ada Lovelace."
+    )
+    assert attributes[f"{SpanAttributes.LLM_COMPLETIONS}.0.role"] == "assistant"
+    assert attributes[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"] == '{"name":"Ada"}'
+    assert "UserResult" in attributes[SpanAttributes.LLM_REQUEST_FUNCTIONS]
     assert "model" not in attributes
     assert "prompt_tokens" not in attributes
     assert "tool_calls" not in attributes
+
+
+def test_patch_create_includes_typed_dict_function_schema(monkeypatch):
+    fake = _install_fake_instructor_modules(monkeypatch)
+    tracer = _install_fake_tracer(monkeypatch)
+
+    instrumentor = InstructorInstrumentor()
+    instrumentor.activate()
+
+    create = fake.instructor_module.patch(create=_fake_create, mode=FakeMode())
+    create(
+        response_model=TicketResult,
+        messages=[{"role": "user", "content": "Extract support ticket."}],
+        model="gpt-4o-mini",
+    )
+
+    functions = tracer.spans[0].attributes[SpanAttributes.LLM_REQUEST_FUNCTIONS]
+    schema = json.loads(functions)[0]["function"]["parameters"]
+    assert schema["title"] == "TicketResult"
+    assert schema["properties"]["customer"]["type"] == "string"
+    assert schema["properties"]["priority"]["type"] == "string"
+    assert schema["properties"]["priority"]["enum"] == ["low", "medium", "high"]
+    assert schema["properties"]["follow_up_hours"]["type"] == "integer"
+    assert schema["properties"]["next_step"]["anyOf"] == [
+        {"type": "string"},
+        {"type": "null"},
+    ]
+
+
+def test_patch_create_resolves_postponed_typed_dict_annotations(monkeypatch):
+    class FutureTicket(TypedDict):
+        priority: Literal["low", "high"]
+        tags: list[str]
+
+    monkeypatch.setattr(
+        FutureTicket,
+        "__annotations__",
+        {"priority": "Literal['low', 'high']", "tags": "list[str]"},
+    )
+    fake = _install_fake_instructor_modules(monkeypatch)
+    tracer = _install_fake_tracer(monkeypatch)
+
+    instrumentor = InstructorInstrumentor()
+    instrumentor.activate()
+
+    create = fake.instructor_module.patch(create=_fake_create, mode=FakeMode())
+    create(
+        response_model=FutureTicket,
+        messages=[{"role": "user", "content": "Extract support ticket."}],
+        model="gpt-4o-mini",
+    )
+
+    functions = tracer.spans[0].attributes[SpanAttributes.LLM_REQUEST_FUNCTIONS]
+    schema = json.loads(functions)[0]["function"]["parameters"]
+    assert schema["properties"]["priority"]["type"] == "string"
+    assert schema["properties"]["priority"]["enum"] == ["low", "high"]
+    assert schema["properties"]["tags"]["type"] == "array"
+    assert schema["properties"]["tags"]["items"]["type"] == "string"
+
+
+def test_patch_create_preserves_prebuilt_tool_schema(monkeypatch):
+    fake = _install_fake_instructor_modules(monkeypatch)
+    tracer = _install_fake_tracer(monkeypatch)
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "ActionItem",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"task": {"type": "string"}},
+                },
+            },
+        }
+    ]
+
+    instrumentor = InstructorInstrumentor()
+    instrumentor.activate()
+
+    create = fake.instructor_module.patch(create=_fake_create, mode=FakeMode())
+    create(
+        tools=tools,
+        messages=[{"role": "user", "content": "Extract action items."}],
+        model="gpt-4o-mini",
+    )
+
+    functions = tracer.spans[0].attributes[SpanAttributes.LLM_REQUEST_FUNCTIONS]
+    assert json.loads(functions) == tools
+
+
+def test_patch_create_records_consumed_iterable_output(monkeypatch):
+    fake = _install_fake_instructor_modules(monkeypatch)
+    tracer = _install_fake_tracer(monkeypatch)
+
+    instrumentor = InstructorInstrumentor()
+    instrumentor.activate()
+
+    create = fake.instructor_module.patch(create=_fake_iter_create, mode=FakeMode())
+    result = list(
+        create(
+            response_model=TicketResult,
+            messages=[{"role": "user", "content": "Extract action items."}],
+            model="gpt-4o-mini",
+        )
+    )
+
+    assert result == [{"task": "send checklist"}, {"task": "finish dashboard"}]
+    assert tracer.spans[0].attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] == (
+        '[{"task":"send checklist"},{"task":"finish dashboard"}]'
+    )
 
 
 def test_instructor_create_uses_wrapped_create_fn_without_duplicate_span(monkeypatch):
@@ -282,7 +412,35 @@ def test_instructor_create_uses_wrapped_create_fn_without_duplicate_span(monkeyp
     )
 
     assert len(tracer.spans) == 1
-    assert tracer.spans[0].name == "instructor.patch"
+    assert tracer.spans[0].name == "instructor.create"
+    assert "UserResult" in tracer.spans[0].attributes[
+        SpanAttributes.LLM_REQUEST_FUNCTIONS
+    ]
+
+
+def test_create_iterable_preserves_method_context_for_wrapped_create_fn(monkeypatch):
+    fake = _install_fake_instructor_modules(monkeypatch)
+    tracer = _install_fake_tracer(monkeypatch)
+
+    instrumentor = InstructorInstrumentor()
+    instrumentor.activate()
+
+    create = fake.instructor_module.patch(create=_fake_create, mode=FakeMode())
+    client = fake.client_module.Instructor(create_function=create)
+    list(
+        client.create_iterable(
+            response_model=TicketResult,
+            messages=[{"role": "user", "content": "Extract action items."}],
+            model="gpt-4o-mini",
+        )
+    )
+
+    assert len(tracer.spans) == 1
+    assert tracer.spans[0].name == "instructor.create_iterable"
+    functions = tracer.spans[0].attributes[SpanAttributes.LLM_REQUEST_FUNCTIONS]
+    schema = json.loads(functions)[0]["function"]["parameters"]
+    assert schema["title"] == "TicketResult"
+    assert schema["properties"]["priority"]["enum"] == ["low", "medium", "high"]
 
 
 def test_instructor_create_emits_span_for_unwrapped_create_fn(monkeypatch):
@@ -300,7 +458,7 @@ def test_instructor_create_emits_span_for_unwrapped_create_fn(monkeypatch):
 
     assert len(tracer.spans) == 1
     assert tracer.spans[0].name == "instructor.create"
-    assert tracer.spans[0].attributes[LLM_REQUEST_MODEL] == "gpt-4o-mini"
+    assert tracer.spans[0].attributes[SpanAttributes.LLM_REQUEST_MODEL] == "gpt-4o-mini"
 
 
 def test_patch_client_emits_span(monkeypatch):
@@ -323,7 +481,7 @@ def test_patch_client_emits_span(monkeypatch):
 
     assert len(tracer.spans) == 1
     assert tracer.spans[0].name == "instructor.patch"
-    assert tracer.spans[0].attributes["gen_ai.system"] == "openai"
+    assert tracer.spans[0].attributes[GEN_AI_SYSTEM] == "openai"
 
 
 def test_patch_async_create_emits_span(monkeypatch):
@@ -344,9 +502,9 @@ def test_patch_async_create_emits_span(monkeypatch):
 
     assert result.model_dump() == {"name": "Grace"}
     assert len(tracer.spans) == 1
-    assert tracer.spans[0].attributes["gen_ai.completion.0.content"] == (
-        '{"name":"Grace"}'
-    )
+    assert tracer.spans[0].attributes[
+        f"{SpanAttributes.LLM_COMPLETIONS}.0.content"
+    ] == '{"name":"Grace"}'
 
 
 def test_deactivate_restores_patches(monkeypatch):

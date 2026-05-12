@@ -5,8 +5,20 @@ import importlib
 import inspect
 import json
 import logging
-from collections.abc import Callable, Mapping
-from typing import Any
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from contextvars import ContextVar
+from types import NoneType, UnionType
+from typing import (
+    Any,
+    Literal,
+    NotRequired,
+    Required,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+    is_typeddict,
+)
 
 from opentelemetry import trace
 from opentelemetry.semconv_ai import LLMRequestTypeValues
@@ -15,8 +27,6 @@ from opentelemetry.semconv_ai import SpanAttributes
 from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT
 from respan_sdk.constants.span_attributes import (
     GEN_AI_SYSTEM,
-    LLM_REQUEST_MODEL,
-    LLM_REQUEST_TYPE,
     RESPAN_LOG_TYPE,
 )
 from respan_sdk.utils.serialization import serialize_value
@@ -29,14 +39,10 @@ INSTRUCTOR_MODULE = "instructor"
 INSTRUCTOR_CORE_PATCH_MODULE = "instructor.core.patch"
 INSTRUCTOR_CORE_CLIENT_MODULE = "instructor.core.client"
 RESPAN_INSTRUCTOR_INSTRUMENTED_ATTR = "_respan_instructor_instrumented"
-
-TRACELOOP_ENTITY_NAME = SpanAttributes.TRACELOOP_ENTITY_NAME
-TRACELOOP_ENTITY_INPUT = SpanAttributes.TRACELOOP_ENTITY_INPUT
-TRACELOOP_ENTITY_OUTPUT = SpanAttributes.TRACELOOP_ENTITY_OUTPUT
-TRACELOOP_ENTITY_PATH = SpanAttributes.TRACELOOP_ENTITY_PATH
-GEN_AI_PROMPT_PREFIX = f"{SpanAttributes.LLM_PROMPTS}."
-GEN_AI_COMPLETION_PREFIX = f"{SpanAttributes.LLM_COMPLETIONS}."
-LLM_REQUEST_FUNCTIONS = SpanAttributes.LLM_REQUEST_FUNCTIONS
+INSTRUCTOR_CALL_CONTEXT: ContextVar[dict[str, Any] | None] = ContextVar(
+    "respan_instructor_call_context",
+    default=None,
+)
 
 _OPENAI_PROVIDER = "openai"
 _ASSISTANT_ROLE = "assistant"
@@ -99,15 +105,94 @@ def _message_content_to_string(content: Any) -> str:
     return _serialize_value_to_string(content)
 
 
+def _json_schema_for_annotation(annotation: Any) -> dict[str, Any]:
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+
+    if origin in {Required, NotRequired}:
+        wrapped_annotation = args[0] if args else Any
+        return _json_schema_for_annotation(wrapped_annotation)
+
+    if origin is None:
+        if annotation is str:
+            return {"type": "string"}
+        if annotation is int:
+            return {"type": "integer"}
+        if annotation is float:
+            return {"type": "number"}
+        if annotation is bool:
+            return {"type": "boolean"}
+        if annotation is None or annotation is NoneType:
+            return {"type": "null"}
+        if is_typeddict(annotation):
+            return _typed_dict_json_schema(annotation)
+        return {}
+
+    if origin is Literal:
+        values = list(args)
+        schema: dict[str, Any] = {"enum": values}
+        if values:
+            value_type = type(values[0])
+            if value_type is str:
+                schema["type"] = "string"
+            elif value_type is int:
+                schema["type"] = "integer"
+            elif value_type is float:
+                schema["type"] = "number"
+            elif value_type is bool:
+                schema["type"] = "boolean"
+        return schema
+
+    if origin in {Union, UnionType}:
+        return {"anyOf": [_json_schema_for_annotation(arg) for arg in args]}
+
+    if origin in {list, tuple, set}:
+        item_annotation = args[0] if args else Any
+        return {
+            "type": "array",
+            "items": _json_schema_for_annotation(item_annotation),
+        }
+
+    if origin in {dict, Mapping}:
+        return {"type": "object"}
+
+    return {}
+
+
+def _typed_dict_json_schema(response_model: Any) -> dict[str, Any]:
+    try:
+        annotations = get_type_hints(response_model, include_extras=True)
+    except (NameError, TypeError):
+        annotations = getattr(response_model, "__annotations__", {})
+    required_keys = getattr(response_model, "__required_keys__", frozenset())
+    properties = {
+        field_name: _json_schema_for_annotation(field_type) | {
+            "title": field_name.replace("_", " ").title(),
+        }
+        for field_name, field_type in annotations.items()
+    }
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": properties,
+        "title": _response_model_name(response_model),
+    }
+    if required_keys:
+        schema["required"] = sorted(required_keys)
+    return schema
+
+
 def _response_model_function_schema(response_model: Any) -> list[dict[str, Any]] | None:
     if response_model is None:
         return None
 
     model_json_schema = getattr(response_model, "model_json_schema", None)
-    if not callable(model_json_schema):
+    if callable(model_json_schema):
+        schema = model_json_schema()
+    elif is_typeddict(response_model):
+        schema = _typed_dict_json_schema(response_model)
+    else:
         return None
 
-    schema = model_json_schema()
     model_name = _response_model_name(response_model) or "response_model"
     description = schema.get("description") if isinstance(schema, dict) else None
 
@@ -121,6 +206,18 @@ def _response_model_function_schema(response_model: Any) -> list[dict[str, Any]]
             },
         }
     ]
+
+
+def _request_function_schema(arguments: Mapping[str, Any]) -> Any | None:
+    response_model_schema = _response_model_function_schema(arguments.get("response_model"))
+    if response_model_schema is not None:
+        return response_model_schema
+
+    tools = arguments.get("tools")
+    if isinstance(tools, (list, tuple)) and tools:
+        return tools
+
+    return None
 
 
 def _extract_base_url_provider(client: Any) -> str | None:
@@ -208,6 +305,66 @@ def _extract_method_call_arguments(
     return arguments
 
 
+def _method_call_context(
+    *,
+    operation_name: str,
+    arguments: Mapping[str, Any],
+    mode: Any | None,
+) -> dict[str, Any]:
+    existing_context = INSTRUCTOR_CALL_CONTEXT.get()
+    context = dict(existing_context) if isinstance(existing_context, Mapping) else {}
+    for key, value in arguments.items():
+        if context.get(key) is None and value is not None:
+            context[key] = value
+    context.setdefault("operation_name", operation_name)
+    if mode is not None:
+        context.setdefault("mode", mode)
+    return context
+
+
+def _merge_call_context(arguments: Mapping[str, Any]) -> tuple[dict[str, Any], Any]:
+    merged_arguments = dict(arguments)
+    context = INSTRUCTOR_CALL_CONTEXT.get()
+    if not isinstance(context, Mapping):
+        return merged_arguments, None
+
+    context_response_model = context.get("response_model")
+    if (
+        context_response_model is not None
+        and _response_model_function_schema(merged_arguments.get("response_model"))
+        is None
+    ):
+        merged_arguments["response_model"] = context_response_model
+
+    for key in ("messages", "model", "response_model", "tools"):
+        if merged_arguments.get(key) is None and context.get(key) is not None:
+            merged_arguments[key] = context[key]
+    return merged_arguments, context
+
+
+def _iter_with_call_context(
+    iterable: Iterator[Any],
+    context: Mapping[str, Any],
+) -> Iterator[Any]:
+    token = INSTRUCTOR_CALL_CONTEXT.set(dict(context))
+    try:
+        yield from iterable
+    finally:
+        INSTRUCTOR_CALL_CONTEXT.reset(token)
+
+
+async def _async_iter_with_call_context(
+    async_iterable: AsyncIterator[Any],
+    context: Mapping[str, Any],
+) -> AsyncIterator[Any]:
+    token = INSTRUCTOR_CALL_CONTEXT.set(dict(context))
+    try:
+        async for item in async_iterable:
+            yield item
+    finally:
+        INSTRUCTOR_CALL_CONTEXT.reset(token)
+
+
 def _build_span_attributes(
     operation_name: str,
     arguments: Mapping[str, Any],
@@ -228,10 +385,10 @@ def _build_span_attributes(
     }
     attributes: dict[str, Any] = {
         RESPAN_LOG_TYPE: LOG_TYPE_CHAT,
-        LLM_REQUEST_TYPE: LLMRequestTypeValues.CHAT.value,
-        TRACELOOP_ENTITY_NAME: operation_name,
-        TRACELOOP_ENTITY_PATH: "",
-        TRACELOOP_ENTITY_INPUT: _serialize_value_to_string(
+        SpanAttributes.LLM_REQUEST_TYPE: LLMRequestTypeValues.CHAT.value,
+        SpanAttributes.TRACELOOP_ENTITY_NAME: operation_name,
+        SpanAttributes.TRACELOOP_ENTITY_PATH: "",
+        SpanAttributes.TRACELOOP_ENTITY_INPUT: _serialize_value_to_string(
             {key: value for key, value in input_payload.items() if value is not None}
         ),
     }
@@ -239,7 +396,7 @@ def _build_span_attributes(
     if provider:
         attributes[GEN_AI_SYSTEM] = provider.lower()
     if model:
-        attributes[LLM_REQUEST_MODEL] = str(model)
+        attributes[SpanAttributes.LLM_REQUEST_MODEL] = str(model)
 
     if isinstance(messages, list):
         for message_index, message in enumerate(messages):
@@ -249,34 +406,96 @@ def _build_span_attributes(
             content = message.get("content")
             tool_calls = message.get("tool_calls")
             if role is not None:
-                attributes[f"{GEN_AI_PROMPT_PREFIX}{message_index}.role"] = str(role)
+                attributes[f"{SpanAttributes.LLM_PROMPTS}.{message_index}.role"] = str(
+                    role
+                )
             if content is not None:
-                attributes[f"{GEN_AI_PROMPT_PREFIX}{message_index}.content"] = (
-                    _message_content_to_string(content)
-                )
+                attributes[
+                    f"{SpanAttributes.LLM_PROMPTS}.{message_index}.content"
+                ] = _message_content_to_string(content)
             if tool_calls is not None:
-                attributes[f"{GEN_AI_PROMPT_PREFIX}{message_index}.tool_calls"] = (
-                    _serialize_value_to_string(tool_calls)
-                )
+                attributes[
+                    f"{SpanAttributes.LLM_PROMPTS}.{message_index}.tool_calls"
+                ] = _serialize_value_to_string(tool_calls)
 
-    function_schema = _response_model_function_schema(response_model)
+    function_schema = _request_function_schema(arguments)
     if function_schema is not None:
-        attributes[LLM_REQUEST_FUNCTIONS] = _serialize_value_to_string(function_schema)
+        attributes[SpanAttributes.LLM_REQUEST_FUNCTIONS] = _serialize_value_to_string(
+            function_schema
+        )
 
     return attributes
 
 
 def _set_success_attributes(span: Any, result: Any) -> None:
     output = _serialize_value_to_string(result)
-    span.set_attribute(TRACELOOP_ENTITY_OUTPUT, output)
-    span.set_attribute(f"{GEN_AI_COMPLETION_PREFIX}0.role", _ASSISTANT_ROLE)
-    span.set_attribute(f"{GEN_AI_COMPLETION_PREFIX}0.content", output)
+    span.set_attribute(SpanAttributes.TRACELOOP_ENTITY_OUTPUT, output)
+    span.set_attribute(
+        f"{SpanAttributes.LLM_COMPLETIONS}.0.role",
+        _ASSISTANT_ROLE,
+    )
+    span.set_attribute(
+        f"{SpanAttributes.LLM_COMPLETIONS}.0.content",
+        output,
+    )
     span.set_status(trace.StatusCode.OK)
 
 
 def _set_error_status(span: Any, exception: Exception) -> None:
     span.set_status(trace.Status(trace.StatusCode.ERROR, str(exception)))
     span.record_exception(exception)
+
+
+def _iter_with_span(
+    iterator: Iterator[Any],
+    span: Any,
+    span_context: Any,
+) -> Iterator[Any]:
+    output_items: list[Any] = []
+    span_closed = False
+    try:
+        for item in iterator:
+            output_items.append(item)
+            yield item
+    except Exception as exception:
+        _set_error_status(span=span, exception=exception)
+        span_context.__exit__(type(exception), exception, exception.__traceback__)
+        span_closed = True
+        raise
+    else:
+        _set_success_attributes(span=span, result=output_items)
+        span_context.__exit__(None, None, None)
+        span_closed = True
+    finally:
+        if not span_closed:
+            _set_success_attributes(span=span, result=output_items)
+            span_context.__exit__(None, None, None)
+
+
+async def _async_iter_with_span(
+    async_iterator: AsyncIterator[Any],
+    span: Any,
+    span_context: Any,
+) -> AsyncIterator[Any]:
+    output_items: list[Any] = []
+    span_closed = False
+    try:
+        async for item in async_iterator:
+            output_items.append(item)
+            yield item
+    except Exception as exception:
+        _set_error_status(span=span, exception=exception)
+        span_context.__exit__(type(exception), exception, exception.__traceback__)
+        span_closed = True
+        raise
+    else:
+        _set_success_attributes(span=span, result=output_items)
+        span_context.__exit__(None, None, None)
+        span_closed = True
+    finally:
+        if not span_closed:
+            _set_success_attributes(span=span, result=output_items)
+            span_context.__exit__(None, None, None)
 
 
 class InstructorInstrumentor:
@@ -334,38 +553,78 @@ class InstructorInstrumentor:
             @functools.wraps(original_create)
             async def wrapped_async_create(*args: Any, **kwargs: Any) -> Any:
                 arguments = _extract_direct_call_arguments(args=args, kwargs=kwargs)
-                with self._start_span(
-                    operation_name=operation_name,
+                arguments, context = _merge_call_context(arguments)
+                effective_operation_name = (
+                    context.get("operation_name", operation_name)
+                    if isinstance(context, Mapping)
+                    else operation_name
+                )
+                effective_mode = (
+                    mode
+                    if mode is not None or not isinstance(context, Mapping)
+                    else context.get("mode")
+                )
+                span_context = self._start_span(
+                    operation_name=effective_operation_name,
                     arguments=arguments,
                     provider=provider,
-                    mode=mode,
-                ) as span:
-                    try:
-                        result = await original_create(*args, **kwargs)
-                    except Exception as exception:
-                        _set_error_status(span=span, exception=exception)
-                        raise
-                    _set_success_attributes(span=span, result=result)
-                    return result
+                    mode=effective_mode,
+                )
+                span = span_context.__enter__()
+                try:
+                    result = await original_create(*args, **kwargs)
+                except Exception as exception:
+                    _set_error_status(span=span, exception=exception)
+                    span_context.__exit__(
+                        type(exception),
+                        exception,
+                        exception.__traceback__,
+                    )
+                    raise
+                if isinstance(result, AsyncIterator):
+                    return _async_iter_with_span(result, span, span_context)
+                _set_success_attributes(span=span, result=result)
+                span_context.__exit__(None, None, None)
+                return result
 
             return _mark_wrapped(wrapped_async_create)
 
         @functools.wraps(original_create)
         def wrapped_create(*args: Any, **kwargs: Any) -> Any:
             arguments = _extract_direct_call_arguments(args=args, kwargs=kwargs)
-            with self._start_span(
-                operation_name=operation_name,
+            arguments, context = _merge_call_context(arguments)
+            effective_operation_name = (
+                context.get("operation_name", operation_name)
+                if isinstance(context, Mapping)
+                else operation_name
+            )
+            effective_mode = (
+                mode
+                if mode is not None or not isinstance(context, Mapping)
+                else context.get("mode")
+            )
+            span_context = self._start_span(
+                operation_name=effective_operation_name,
                 arguments=arguments,
                 provider=provider,
-                mode=mode,
-            ) as span:
-                try:
-                    result = original_create(*args, **kwargs)
-                except Exception as exception:
-                    _set_error_status(span=span, exception=exception)
-                    raise
-                _set_success_attributes(span=span, result=result)
-                return result
+                mode=effective_mode,
+            )
+            span = span_context.__enter__()
+            try:
+                result = original_create(*args, **kwargs)
+            except Exception as exception:
+                _set_error_status(span=span, exception=exception)
+                span_context.__exit__(
+                    type(exception),
+                    exception,
+                    exception.__traceback__,
+                )
+                raise
+            if isinstance(result, Iterator):
+                return _iter_with_span(result, span, span_context)
+            _set_success_attributes(span=span, result=result)
+            span_context.__exit__(None, None, None)
+            return result
 
         return _mark_wrapped(wrapped_create)
 
@@ -434,7 +693,27 @@ class InstructorInstrumentor:
             ) -> Any:
                 create_function = getattr(instance, "create_fn", None)
                 if _is_wrapped(create_function):
-                    return await original_method(instance, *args, **kwargs)
+                    arguments = _extract_method_call_arguments(
+                        method=original_method,
+                        instance=instance,
+                        args=args,
+                        kwargs=kwargs,
+                    )
+                    if arguments.get("model") is None:
+                        arguments["model"] = getattr(instance, "default_model", None)
+                    context = _method_call_context(
+                        operation_name=operation_name,
+                        arguments=arguments,
+                        mode=getattr(instance, "mode", None),
+                    )
+                    token = INSTRUCTOR_CALL_CONTEXT.set(context)
+                    try:
+                        result = await original_method(instance, *args, **kwargs)
+                    finally:
+                        INSTRUCTOR_CALL_CONTEXT.reset(token)
+                    if isinstance(result, AsyncIterator):
+                        return _async_iter_with_call_context(result, context)
+                    return result
 
                 arguments = _extract_method_call_arguments(
                     method=original_method,
@@ -465,7 +744,29 @@ class InstructorInstrumentor:
         def wrapped_method(instance: Any, *args: Any, **kwargs: Any) -> Any:
             create_function = getattr(instance, "create_fn", None)
             if _is_wrapped(create_function):
-                return original_method(instance, *args, **kwargs)
+                arguments = _extract_method_call_arguments(
+                    method=original_method,
+                    instance=instance,
+                    args=args,
+                    kwargs=kwargs,
+                )
+                if arguments.get("model") is None:
+                    arguments["model"] = getattr(instance, "default_model", None)
+                context = _method_call_context(
+                    operation_name=operation_name,
+                    arguments=arguments,
+                    mode=getattr(instance, "mode", None),
+                )
+                token = INSTRUCTOR_CALL_CONTEXT.set(context)
+                try:
+                    result = original_method(instance, *args, **kwargs)
+                finally:
+                    INSTRUCTOR_CALL_CONTEXT.reset(token)
+                if isinstance(result, Iterator) and operation_name.endswith(
+                    "create_iterable"
+                ):
+                    return _iter_with_call_context(iter(result), context)
+                return result
 
             arguments = _extract_method_call_arguments(
                 method=original_method,
