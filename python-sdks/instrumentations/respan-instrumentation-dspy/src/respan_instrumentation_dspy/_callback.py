@@ -174,6 +174,26 @@ def _get_lm_history_entry(state: _CallState) -> Mapping[str, Any] | None:
     return history_entry if isinstance(history_entry, Mapping) else None
 
 
+def _tool_input_value(*, name: str, inputs: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "name": name,
+        "arguments": _tool_arguments(inputs=inputs),
+    }
+
+
+def _tool_arguments(*, inputs: Mapping[str, Any]) -> Any:
+    kwargs = inputs.get("kwargs")
+    args = inputs.get("args")
+    if isinstance(kwargs, Mapping):
+        if args:
+            return {
+                "args": output_to_plain_value(value=args),
+                "kwargs": output_to_plain_value(value=kwargs),
+            }
+        return output_to_plain_value(value=kwargs)
+    return output_to_plain_value(value=inputs)
+
+
 class DSPyInstrumentationCallback:
     """DSPy callback handler that emits Respan-compatible OTEL spans."""
 
@@ -393,7 +413,7 @@ class DSPyInstrumentationCallback:
         return self._base_attributes(
             log_type=LOG_TYPE_TOOL,
             entity_name=entity_name,
-            input_value=state.inputs,
+            input_value=_tool_input_value(name=entity_name, inputs=state.inputs),
             output_value=output_value,
         )
 

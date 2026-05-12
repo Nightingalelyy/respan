@@ -1,5 +1,7 @@
 """Constants for DSPy instrumentation."""
 
+from opentelemetry.semconv_ai import SpanAttributes
+
 DSPY_INSTRUMENTATION_NAME = "dspy"
 
 DSPY_CALL_KIND_ADAPTER_FORMAT = "adapter_format"
@@ -23,8 +25,16 @@ CHAT_MODEL_TYPE = "chat"
 TEXT_MODEL_TYPE = "text"
 RESPONSES_MODEL_TYPE = "responses"
 
-GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
-GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
+DSPY_USAGE_INPUT_TOKENS_ATTR = getattr(
+    SpanAttributes,
+    "GEN_AI_USAGE_INPUT_TOKENS",
+    "gen_ai.usage.input_tokens",
+)
+DSPY_USAGE_OUTPUT_TOKENS_ATTR = getattr(
+    SpanAttributes,
+    "GEN_AI_USAGE_OUTPUT_TOKENS",
+    "gen_ai.usage.output_tokens",
+)
 
 PROMPT_TOKENS_KEY = "prompt_tokens"
 COMPLETION_TOKENS_KEY = "completion_tokens"

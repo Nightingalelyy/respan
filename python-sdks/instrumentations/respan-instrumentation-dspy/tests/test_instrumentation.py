@@ -1,4 +1,5 @@
 import importlib
+import json
 import logging
 import sys
 from types import ModuleType, SimpleNamespace
@@ -7,12 +8,37 @@ from opentelemetry.semconv_ai import SpanAttributes
 
 import respan_instrumentation_dspy._callback
 from respan_instrumentation_dspy import DSPyInstrumentor
+from respan_instrumentation_dspy._constants import (
+    DSPY_USAGE_INPUT_TOKENS_ATTR,
+    DSPY_USAGE_OUTPUT_TOKENS_ATTR,
+)
 from respan_instrumentation_dspy._callback import DSPyInstrumentationCallback
 from respan_instrumentation_dspy._utils import (
     add_lm_usage_attributes,
     extract_provider_name,
     normalize_messages,
+    safe_json,
 )
+
+
+_OFF_CONTRACT_ALIAS_KEYS = (
+    "tools",
+    "tool_calls",
+    "model",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_request_tokens",
+    "span_tools",
+    "has_tool_calls",
+    "respan.span.tools",
+    "respan.span.tool_calls",
+    "respan.span.handoffs",
+)
+
+
+def _assert_no_off_contract_aliases(attributes):
+    for off_contract_key in _OFF_CONTRACT_ALIAS_KEYS:
+        assert off_contract_key not in attributes
 
 
 def _install_fake_dspy(monkeypatch, callbacks=None):
@@ -163,34 +189,22 @@ def test_lm_callback_emits_canonical_chat_span(monkeypatch):
     assert captured_spans[0]["name"] == "dspy.lm"
     assert attributes["respan.entity.log_type"] == "chat"
     assert attributes["respan.entity.log_method"] == "tracing_integration"
-    assert attributes["gen_ai.system"] == "openai"
-    assert attributes["gen_ai.request.model"] == "openai/gpt-4o-mini"
-    assert attributes["llm.request.type"] == "chat"
+    assert attributes[SpanAttributes.LLM_SYSTEM] == "openai"
+    assert attributes[SpanAttributes.LLM_REQUEST_MODEL] == "openai/gpt-4o-mini"
+    assert attributes[SpanAttributes.LLM_REQUEST_TYPE] == "chat"
     assert attributes["gen_ai.prompt.0.role"] == "user"
     assert attributes["gen_ai.prompt.0.content"] == "hello"
     assert attributes["gen_ai.completion.0.role"] == "assistant"
     assert attributes["gen_ai.completion.0.content"] == "hi there"
-    assert attributes["gen_ai.usage.input_tokens"] == 11
-    assert attributes["gen_ai.usage.output_tokens"] == 7
-    assert attributes["gen_ai.usage.prompt_tokens"] == 11
-    assert attributes["gen_ai.usage.completion_tokens"] == 7
-    assert attributes["llm.usage.total_tokens"] == 18
+    assert attributes[DSPY_USAGE_INPUT_TOKENS_ATTR] == 11
+    assert attributes[DSPY_USAGE_OUTPUT_TOKENS_ATTR] == 7
+    assert attributes[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] == 11
+    assert attributes[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] == 7
+    assert attributes[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] == 18
     assert attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "dspy.lm"
     assert attributes[SpanAttributes.TRACELOOP_ENTITY_PATH] == "dspy.lm"
     assert SpanAttributes.TRACELOOP_SPAN_KIND not in attributes
-    for off_contract_key in (
-        "tools",
-        "tool_calls",
-        "model",
-        "prompt_tokens",
-        "completion_tokens",
-        "total_request_tokens",
-        "span_tools",
-        "has_tool_calls",
-        "respan.span.tools",
-        "respan.span.tool_calls",
-    ):
-        assert off_contract_key not in attributes
+    _assert_no_off_contract_aliases(attributes=attributes)
 
 
 def test_module_and_nested_lm_callbacks_share_parent_trace(monkeypatch):
@@ -259,15 +273,61 @@ def test_tool_callback_emits_tool_span(monkeypatch):
     assert captured_spans[0]["name"] == "dspy.tool"
     assert attributes["respan.entity.log_type"] == "tool"
     assert attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "lookup_order"
-    assert (
-        attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT]
-        == '{"order_id": "ord_123"}'
-    )
+    assert json.loads(attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT]) == {
+        "name": "lookup_order",
+        "arguments": {"order_id": "ord_123"},
+    }
     assert (
         attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
         == '{"status": "shipped"}'
     )
     assert SpanAttributes.TRACELOOP_SPAN_KIND not in attributes
+    _assert_no_off_contract_aliases(attributes=attributes)
+
+
+def test_tool_callback_normalizes_dspy_kwargs(monkeypatch):
+    captured_spans = _capture_spans(monkeypatch=monkeypatch)
+    callback = DSPyInstrumentationCallback()
+    tool = SimpleNamespace(name="lookup_city_fact")
+
+    callback.on_tool_start(
+        call_id="tool-call",
+        instance=tool,
+        inputs={"kwargs": {"city": "Tokyo"}},
+    )
+    callback.on_tool_end(call_id="tool-call", outputs="Tokyo has busy trains.")
+
+    attributes = captured_spans[0]["attributes"]
+    assert json.loads(attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT]) == {
+        "name": "lookup_city_fact",
+        "arguments": {"city": "Tokyo"},
+    }
+
+
+def test_react_module_callback_emits_agent_span(monkeypatch):
+    captured_spans = _capture_spans(monkeypatch=monkeypatch)
+    callback = DSPyInstrumentationCallback()
+
+    class ReAct:
+        pass
+
+    callback.on_module_start(
+        call_id="react-call",
+        instance=ReAct(),
+        inputs={"question": "Use a tool."},
+    )
+    callback.on_module_end(
+        call_id="react-call",
+        outputs={"answer": "done"},
+        exception=None,
+    )
+
+    attributes = captured_spans[0]["attributes"]
+    assert captured_spans[0]["name"] == "dspy.module"
+    assert attributes["respan.entity.log_type"] == "agent"
+    assert attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "ReAct"
+    assert SpanAttributes.TRACELOOP_SPAN_KIND not in attributes
+    _assert_no_off_contract_aliases(attributes=attributes)
 
 
 def test_lm_callback_records_error_status(monkeypatch):
@@ -329,8 +389,100 @@ def test_add_lm_usage_attributes_sets_modern_and_legacy_token_fields():
         },
     )
 
-    assert attributes["gen_ai.usage.input_tokens"] == 3
-    assert attributes["gen_ai.usage.output_tokens"] == 4
-    assert attributes["gen_ai.usage.prompt_tokens"] == 3
-    assert attributes["gen_ai.usage.completion_tokens"] == 4
-    assert attributes["llm.usage.total_tokens"] == 7
+    assert attributes[DSPY_USAGE_INPUT_TOKENS_ATTR] == 3
+    assert attributes[DSPY_USAGE_OUTPUT_TOKENS_ATTR] == 4
+    assert attributes[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] == 3
+    assert attributes[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] == 4
+    assert attributes[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] == 7
+
+
+def test_safe_json_summarizes_dspy_signature_without_internal_model_dump():
+    import dspy
+
+    class AnswerSignature(dspy.Signature):
+        """Answer the question."""
+
+        question: str = dspy.InputField()
+        answer: str = dspy.OutputField()
+
+    encoded = safe_json(value={"signature": AnswerSignature})
+    payload = json.loads(encoded)
+
+    assert payload == {
+        "signature": {
+            "name": "AnswerSignature",
+            "instructions": "Answer the question.",
+            "input_fields": ["question"],
+            "output_fields": ["answer"],
+        }
+    }
+    assert "__pydantic" not in encoded
+
+
+def test_safe_json_summarizes_dspy_program_and_examples():
+    import dspy
+
+    class AnswerSignature(dspy.Signature):
+        """Answer the question."""
+
+        question: str = dspy.InputField()
+        answer: str = dspy.OutputField()
+
+    class AnswerProgram(dspy.Module):
+        def __init__(self):
+            super().__init__()
+            self.answer = dspy.Predict(AnswerSignature)
+
+    example = dspy.Example(question="What is DSPy?", answer="A framework").with_inputs(
+        "question"
+    )
+
+    encoded = safe_json(
+        value={
+            "program": AnswerProgram(),
+            "example": example,
+        }
+    )
+    payload = json.loads(encoded)
+
+    assert payload["program"] == {
+        "name": "AnswerProgram",
+        "predictors": ["answer"],
+    }
+    assert payload["example"] == {
+        "values": {
+            "question": "What is DSPy?",
+            "answer": "A framework",
+        },
+        "inputs": {"question": "What is DSPy?"},
+        "labels": {"answer": "A framework"},
+    }
+    assert "__pydantic" not in encoded
+
+
+def test_safe_json_summarizes_nested_dspy_prediction():
+    import dspy
+
+    encoded = safe_json(
+        value={
+            "results": [
+                (
+                    dspy.Example(question="What is the capital?", answer="Paris"),
+                    dspy.Prediction(answer="Paris"),
+                    1,
+                )
+            ]
+        }
+    )
+    payload = json.loads(encoded)
+
+    assert payload == {
+        "results": [
+            [
+                {"question": "What is the capital?", "answer": "Paris"},
+                {"answer": "Paris"},
+                1,
+            ]
+        ]
+    }
+    assert "_store" not in encoded

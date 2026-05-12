@@ -10,15 +10,14 @@ from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
 
 from respan_instrumentation_dspy._constants import (
     ANTHROPIC_PROVIDER_PREFIX,
-    ASSISTANT_ROLE,
     AZURE_PROVIDER_PREFIX,
     BEDROCK_PROVIDER_PREFIX,
     CHAT_MODEL_TYPE,
     COMPLETION_TOKENS_KEY,
     DSPY_PROVIDER_NAME,
+    DSPY_USAGE_INPUT_TOKENS_ATTR,
+    DSPY_USAGE_OUTPUT_TOKENS_ATTR,
     GEMINI_PROVIDER_PREFIX,
-    GEN_AI_USAGE_INPUT_TOKENS,
-    GEN_AI_USAGE_OUTPUT_TOKENS,
     GOOGLE_PROVIDER_PREFIX,
     INPUT_TOKENS_KEY,
     OLLAMA_PROVIDER_PREFIX,
@@ -30,20 +29,13 @@ from respan_instrumentation_dspy._constants import (
     TOTAL_TOKENS_KEY,
     USER_ROLE,
 )
-from respan_sdk.constants.span_attributes import (
-    GEN_AI_SYSTEM,
-    LLM_REQUEST_MODEL,
-    LLM_REQUEST_TYPE,
-    LLM_USAGE_COMPLETION_TOKENS,
-    LLM_USAGE_PROMPT_TOKENS,
-)
 from respan_sdk.utils.serialization import serialize_value
 
 
 def safe_json(value: Any) -> str:
     """Serialize arbitrary DSPy payloads into OTEL-safe JSON strings."""
     try:
-        return json.dumps(serialize_value(value=value), default=str)
+        return json.dumps(_dspy_safe_value(value=value), default=str)
     except Exception:
         return str(value)
 
@@ -62,15 +54,19 @@ def output_to_plain_value(value: Any) -> Any:
     if value is None:
         return None
 
+    signature_value = _dspy_signature_value(value=value)
+    if signature_value is not None:
+        return signature_value
+
     for method_name in ("toDict", "to_dict", "model_dump", "dict"):
         method = getattr(value, method_name, None)
         if callable(method):
             try:
-                return method()
+                return _dspy_safe_value(value=method())
             except Exception:
                 continue
 
-    return serialize_value(value=value)
+    return _dspy_safe_value(value=value)
 
 
 def output_to_json(value: Any) -> str:
@@ -189,11 +185,11 @@ def add_lm_usage_attributes(
         total_tokens = (prompt_tokens or 0) + (completion_tokens or 0)
 
     if prompt_tokens is not None:
-        attributes[GEN_AI_USAGE_INPUT_TOKENS] = prompt_tokens
-        attributes[LLM_USAGE_PROMPT_TOKENS] = prompt_tokens
+        attributes[DSPY_USAGE_INPUT_TOKENS_ATTR] = prompt_tokens
+        attributes[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] = prompt_tokens
     if completion_tokens is not None:
-        attributes[GEN_AI_USAGE_OUTPUT_TOKENS] = completion_tokens
-        attributes[LLM_USAGE_COMPLETION_TOKENS] = completion_tokens
+        attributes[DSPY_USAGE_OUTPUT_TOKENS_ATTR] = completion_tokens
+        attributes[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] = completion_tokens
     if total_tokens is not None:
         attributes[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] = total_tokens
 
@@ -210,10 +206,14 @@ def add_lm_request_attributes(
     instance_kwargs = getattr(instance, "kwargs", None)
     request_kwargs = inputs.get("kwargs")
 
-    attributes[GEN_AI_SYSTEM] = extract_provider_name(model_name=model_name)
+    attributes[SpanAttributes.LLM_SYSTEM] = extract_provider_name(
+        model_name=model_name
+    )
     if isinstance(model_name, str) and model_name:
-        attributes[LLM_REQUEST_MODEL] = model_name
-    attributes[LLM_REQUEST_TYPE] = request_type_from_model_type(model_type=model_type)
+        attributes[SpanAttributes.LLM_REQUEST_MODEL] = model_name
+    attributes[SpanAttributes.LLM_REQUEST_TYPE] = request_type_from_model_type(
+        model_type=model_type
+    )
 
     merged_kwargs: dict[str, Any] = {}
     if isinstance(instance_kwargs, Mapping):
@@ -230,3 +230,130 @@ def add_lm_request_attributes(
     )
     if isinstance(max_tokens, int) and not isinstance(max_tokens, bool):
         attributes[SpanAttributes.LLM_REQUEST_MAX_TOKENS] = max_tokens
+
+
+def _dspy_safe_value(value: Any) -> Any:
+    module_value = _dspy_module_value(value=value)
+    if module_value is not None:
+        return module_value
+
+    signature_value = _dspy_signature_value(value=value)
+    if signature_value is not None:
+        return signature_value
+
+    field_value = _dspy_field_value(value=value)
+    if field_value is not None:
+        return field_value
+
+    example_value = _dspy_example_value(value=value)
+    if example_value is not None:
+        return example_value
+
+    method_value = _dspy_method_value(value=value)
+    if method_value is not None:
+        return method_value
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _dspy_safe_value(value=nested_value)
+            for key, nested_value in value.items()
+        }
+
+    if isinstance(value, (list, tuple, set)):
+        return [_dspy_safe_value(value=nested_value) for nested_value in value]
+
+    return serialize_value(value=value)
+
+
+def _dspy_module_value(value: Any) -> dict[str, Any] | None:
+    named_predictors = getattr(value, "named_predictors", None)
+    if not callable(named_predictors):
+        return None
+
+    result: dict[str, Any] = {
+        "name": type(value).__name__,
+    }
+    stage = getattr(value, "stage", None)
+    if isinstance(stage, str) and stage:
+        result["stage"] = stage
+
+    signature_value = _dspy_signature_value(value=getattr(value, "signature", None))
+    if signature_value is not None:
+        result["signature"] = signature_value
+
+    try:
+        predictors = [str(name) for name, _ in named_predictors()]
+    except Exception:
+        predictors = []
+    if predictors:
+        result["predictors"] = predictors
+
+    return result
+
+
+def _dspy_signature_value(value: Any) -> dict[str, Any] | None:
+    input_fields = getattr(value, "input_fields", None)
+    output_fields = getattr(value, "output_fields", None)
+    instructions = getattr(value, "instructions", None)
+    if not isinstance(input_fields, Mapping) or not isinstance(output_fields, Mapping):
+        return None
+
+    name = getattr(value, "__name__", None) or type(value).__name__
+    return {
+        "name": str(name),
+        "instructions": instructions,
+        "input_fields": _field_names(fields=input_fields),
+        "output_fields": _field_names(fields=output_fields),
+    }
+
+
+def _dspy_field_value(value: Any) -> dict[str, Any] | None:
+    json_schema_extra = getattr(value, "json_schema_extra", None)
+    annotation = getattr(value, "annotation", None)
+    if not isinstance(json_schema_extra, Mapping) or annotation is None:
+        return None
+
+    field_type = json_schema_extra.get("__dspy_field_type")
+    description = json_schema_extra.get("desc")
+    annotation_name = getattr(annotation, "__name__", None) or str(annotation)
+    return {
+        "field_type": field_type,
+        "annotation": annotation_name,
+        "description": description,
+    }
+
+
+def _dspy_example_value(value: Any) -> dict[str, Any] | None:
+    to_dict = getattr(value, "toDict", None)
+    inputs = getattr(value, "inputs", None)
+    labels = getattr(value, "labels", None)
+    if not callable(to_dict) or not callable(inputs) or not callable(labels):
+        return None
+
+    try:
+        return {
+            "values": _dspy_safe_value(value=to_dict()),
+            "inputs": _dspy_safe_value(value=inputs().toDict()),
+            "labels": _dspy_safe_value(value=labels().toDict()),
+        }
+    except Exception:
+        return None
+
+
+def _dspy_method_value(value: Any) -> Any | None:
+    module_name = type(value).__module__
+    if not module_name.startswith("dspy."):
+        return None
+
+    for method_name in ("toDict", "to_dict", "model_dump", "dict"):
+        method = getattr(value, method_name, None)
+        if callable(method):
+            try:
+                return _dspy_safe_value(value=method())
+            except Exception:
+                continue
+    return None
+
+
+def _field_names(*, fields: Mapping[str, Any]) -> list[str]:
+    return [str(field_name) for field_name in fields]
