@@ -1,4 +1,4 @@
-"""LangChain instrumentation constants shared by Respan SDK packages."""
+"""LangChain instrumentation constants."""
 
 from respan_sdk.constants.span_attributes import RESPAN_METADATA
 

@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 import respan_instrumentation_langchain._callback
 import respan_instrumentation_langchain._instrumentation
+from opentelemetry.semconv_ai import SpanAttributes
 from respan_instrumentation_langchain import (
     LangChainInstrumentor,
     RespanCallbackHandler,
@@ -16,16 +17,12 @@ from respan_sdk.constants.span_attributes import (
     GEN_AI_TOOL_CALL_ARGUMENTS,
     GEN_AI_TOOL_CALL_RESULT,
     GEN_AI_TOOL_NAME,
-    LLM_COMPLETIONS,
-    LLM_PROMPTS,
     LLM_REQUEST_MODEL,
     LLM_REQUEST_TYPE,
     LLM_USAGE_COMPLETION_TOKENS,
     LLM_USAGE_PROMPT_TOKENS,
     RESPAN_LOG_TYPE,
     RESPAN_SPAN_TOOL_CALLS,
-    TRACELOOP_ENTITY_OUTPUT,
-    TRACELOOP_SPAN_KIND,
 )
 
 
@@ -213,13 +210,13 @@ def test_chat_model_start_end_maps_messages_usage_model_and_tool_calls(monkeypat
 
     attrs = captured[0].attributes
     assert attrs[RESPAN_LOG_TYPE] == "chat"
-    assert attrs[TRACELOOP_SPAN_KIND] == LOG_TYPE_CHAT
+    assert attrs[SpanAttributes.TRACELOOP_SPAN_KIND] == LOG_TYPE_CHAT
     assert attrs[LLM_REQUEST_TYPE] == "chat"
     assert attrs[LLM_REQUEST_MODEL] == "gpt-4o-mini"
     assert attrs[LLM_USAGE_PROMPT_TOKENS] == 10
     assert attrs[LLM_USAGE_COMPLETION_TOKENS] == 3
-    assert attrs[f"{LLM_PROMPTS}.0.role"] == "user"
-    assert attrs[f"{LLM_COMPLETIONS}.0.role"] == "assistant"
+    assert attrs[f"{SpanAttributes.LLM_PROMPTS}.0.role"] == "user"
+    assert attrs[f"{SpanAttributes.LLM_COMPLETIONS}.0.role"] == "assistant"
     assert "calculator" in attrs[RESPAN_SPAN_TOOL_CALLS]
 
 
@@ -244,10 +241,10 @@ def test_llm_json_code_fence_output_is_unwrapped_for_logged_content(monkeypatch)
 
     attrs = captured[0].attributes
     assert (
-        attrs[f"{LLM_COMPLETIONS}.0.content"]
+        attrs[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"]
         == '{"owner": "Security Operations Team"}'
     )
-    assert "```" not in attrs[TRACELOOP_ENTITY_OUTPUT]
+    assert "```" not in attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
 
 
 def test_chain_json_code_fence_output_is_unwrapped_for_logged_output(monkeypatch):
@@ -260,8 +257,8 @@ def test_chain_json_code_fence_output_is_unwrapped_for_logged_output(monkeypatch
     handler.on_chain_end({"answer": fenced_json}, run_id=run_id)
 
     attrs = captured[0].attributes
-    assert "```" not in attrs[TRACELOOP_ENTITY_OUTPUT]
-    assert "Investigate login history" in attrs[TRACELOOP_ENTITY_OUTPUT]
+    assert "```" not in attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
+    assert "Investigate login history" in attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
 
 
 def test_llm_start_new_tokens_and_end_emit_completion_span(monkeypatch):
@@ -288,7 +285,7 @@ def test_llm_start_new_tokens_and_end_emit_completion_span(monkeypatch):
     assert attrs[LLM_REQUEST_TYPE] == "completion"
     assert attrs[LLM_REQUEST_MODEL] == "text-davinci"
     assert (
-        attrs[TRACELOOP_ENTITY_OUTPUT]
+        attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
         == '[[{"role": "assistant", "content": ""}]]'
     )
 
@@ -324,7 +321,7 @@ def test_retriever_start_end_serializes_documents(monkeypatch):
 
     attrs = captured[0].attributes
     assert attrs[RESPAN_LOG_TYPE] == "task"
-    assert "doc text" in attrs[TRACELOOP_ENTITY_OUTPUT]
+    assert "doc text" in attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
 
 
 def test_error_callbacks_mark_span_as_error(monkeypatch):
@@ -378,7 +375,7 @@ def test_on_text_uses_streamed_text_when_run_has_no_output(monkeypatch):
     handler.on_text("world", run_id=run_id)
     handler.on_chain_end(None, run_id=run_id)
 
-    assert captured[0].attributes[TRACELOOP_ENTITY_OUTPUT] == "hello world"
+    assert captured[0].attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] == "hello world"
 
 
 def test_agent_action_and_finish_emit_event_spans(monkeypatch):

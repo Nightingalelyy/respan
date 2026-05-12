@@ -12,7 +12,7 @@ from respan_instrumentation_langchain._callback import (
     _with_respan_callback,
     add_respan_callback,
 )
-from respan_sdk.constants.langchain_constants import (
+from respan_instrumentation_langchain._constants import (
     CALLBACK_MANAGER_CONFIGURE_METHOD,
     FRAMEWORK_LANGCHAIN,
     LANGCHAIN_CALLBACKS_MANAGER_MODULE,
