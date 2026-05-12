@@ -1,6 +1,8 @@
-"""Haystack instrumentation constants shared by Respan SDK packages."""
+"""Haystack instrumentation constants."""
 
+from opentelemetry.semconv_ai import SpanAttributes
 from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
+
 
 HAYSTACK_INSTRUMENTATION_NAME = "haystack"
 
@@ -54,15 +56,10 @@ RESPAN_HAYSTACK_COMPONENT_CONTEXT_VAR_NAME = "respan_haystack_component_run_cont
 RESPAN_HAYSTACK_MAIN_COMPONENT_PATCH_FLAG = "_respan_main_component_patch_applied"
 RESPAN_HAYSTACK_PIPELINE_CONTEXT_VAR_NAME = "respan_haystack_pipeline_run_context"
 
-TRACELOOP_ENTITY_NAME = "traceloop.entity.name"
-TRACELOOP_ENTITY_PATH = "traceloop.entity.path"
-TRACELOOP_SPAN_KIND = "traceloop.span.kind"
-TRACELOOP_WORKFLOW_NAME = "traceloop.workflow.name"
-
 HAYSTACK_NATIVE_PROCESSING_ATTRIBUTES = (
-    TRACELOOP_ENTITY_NAME,
-    TRACELOOP_ENTITY_PATH,
-    TRACELOOP_SPAN_KIND,
-    TRACELOOP_WORKFLOW_NAME,
+    SpanAttributes.TRACELOOP_ENTITY_NAME,
+    SpanAttributes.TRACELOOP_ENTITY_PATH,
+    SpanAttributes.TRACELOOP_SPAN_KIND,
+    SpanAttributes.TRACELOOP_WORKFLOW_NAME,
     RESPAN_LOG_TYPE,
 )

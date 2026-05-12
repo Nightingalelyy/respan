@@ -4,14 +4,10 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from opentelemetry.semconv_ai import SpanAttributes
 from respan_instrumentation_haystack import HaystackInstrumentor
 from respan_instrumentation_haystack import _instrumentation
-from respan_instrumentation_haystack._instrumentation import (
-    _HaystackParentSpanProcessor,
-    _register_haystack_parent_processor,
-    _remove_haystack_parent_processor,
-)
-from respan_sdk.constants.haystack_constants import (
+from respan_instrumentation_haystack._constants import (
     HAYSTACK_ASYNC_PIPELINE_CLASS_NAME,
     HAYSTACK_ASYNC_PIPELINE_MODULE,
     HAYSTACK_ASYNC_PIPELINE_RUN_ASYNC_GENERATOR_METHOD_SPAN_NAME,
@@ -25,9 +21,11 @@ from respan_sdk.constants.haystack_constants import (
     HAYSTACK_PIPELINE_RUN_METHOD_SPAN_NAME,
     HAYSTACK_PIPELINE_RUN_SPAN_NAME,
     OPENINFERENCE_HAYSTACK_MODULE,
-    TRACELOOP_ENTITY_NAME,
-    TRACELOOP_ENTITY_PATH,
-    TRACELOOP_WORKFLOW_NAME,
+)
+from respan_instrumentation_haystack._instrumentation import (
+    _HaystackParentSpanProcessor,
+    _register_haystack_parent_processor,
+    _remove_haystack_parent_processor,
 )
 from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
 from respan_tracing.core.tracer import RespanTracer
@@ -305,9 +303,9 @@ def test_haystack_parent_span_processor_suppresses_native_span_export():
         HAYSTACK_COMPONENT_RUN_SPAN_NAME,
         "3000000000000003",
         attributes={
-            TRACELOOP_ENTITY_NAME: HAYSTACK_COMPONENT_RUN_SPAN_NAME,
-            TRACELOOP_ENTITY_PATH: "haystack-example.Pipeline.run",
-            TRACELOOP_WORKFLOW_NAME: "haystack-example",
+            SpanAttributes.TRACELOOP_ENTITY_NAME: HAYSTACK_COMPONENT_RUN_SPAN_NAME,
+            SpanAttributes.TRACELOOP_ENTITY_PATH: "haystack-example.Pipeline.run",
+            SpanAttributes.TRACELOOP_WORKFLOW_NAME: "haystack-example",
             RESPAN_LOG_TYPE: "span",
             "haystack.component.name": "prompt_builder",
         },
@@ -328,7 +326,7 @@ def test_haystack_parent_span_processor_keeps_openinference_span_exportable():
         "PromptBuilder.run",
         "4000000000000004",
         attributes={
-            TRACELOOP_ENTITY_PATH: "haystack-example.PromptBuilder",
+            SpanAttributes.TRACELOOP_ENTITY_PATH: "haystack-example.PromptBuilder",
             RESPAN_LOG_TYPE: "task",
         },
     )
@@ -337,7 +335,7 @@ def test_haystack_parent_span_processor_keeps_openinference_span_exportable():
     processor.on_end(translated_component)
 
     assert translated_component.attributes == {
-        TRACELOOP_ENTITY_PATH: "haystack-example.PromptBuilder",
+        SpanAttributes.TRACELOOP_ENTITY_PATH: "haystack-example.PromptBuilder",
         RESPAN_LOG_TYPE: "task",
     }
     assert is_processable_span(translated_component) is True

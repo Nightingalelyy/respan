@@ -8,7 +8,7 @@ from typing import Any
 
 from opentelemetry import trace
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
-from respan_sdk.constants.haystack_constants import (
+from respan_instrumentation_haystack._constants import (
     HAYSTACK_ASYNC_PIPELINE_CLASS_NAME,
     HAYSTACK_ASYNC_PIPELINE_MODULE,
     HAYSTACK_COMPONENT_DECORATOR_ATTRIBUTE,

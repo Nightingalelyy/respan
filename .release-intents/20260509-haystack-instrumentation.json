@@ -1,7 +1,6 @@
 {
   "summary": "Rebuild Haystack instrumentation around OpenInference translation and add unit coverage",
   "packages": {
-    "respan-sdk": "patch",
     "respan-instrumentation-haystack": "patch"
   }
 }
