@@ -131,6 +131,12 @@
       "name": "respan-instrumentation-haystack",
       "path": "python-sdks/instrumentations/respan-instrumentation-haystack",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-superagent",
+      "path": "python-sdks/instrumentations/respan-instrumentation-superagent",
+      "registry": "pypi"
     }
   ]
 }
