@@ -1,0 +1,6 @@
+{
+  "summary": "Add the Respan AutoGen AgentChat instrumentation package",
+  "packages": {
+    "respan-instrumentation-autogen": "new"
+  }
+}
