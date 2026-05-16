@@ -150,6 +150,7 @@
       "path": "python-sdks/instrumentations/respan-instrumentation-smolagents",
     },
     {
+      "ecosystem": "python",
       "name": "respan-instrumentation-dspy",
       "path": "python-sdks/instrumentations/respan-instrumentation-dspy",
       "registry": "pypi"
