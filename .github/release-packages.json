@@ -143,6 +143,12 @@
       "name": "respan-instrumentation-haystack",
       "path": "python-sdks/instrumentations/respan-instrumentation-haystack",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-dspy",
+      "path": "python-sdks/instrumentations/respan-instrumentation-dspy",
+      "registry": "pypi"
     }
   ]
 }
