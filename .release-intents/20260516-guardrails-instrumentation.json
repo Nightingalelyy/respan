@@ -1,0 +1,6 @@
+{
+  "summary": "Initial release of the Guardrails AI instrumentation package",
+  "packages": {
+    "respan-instrumentation-guardrails": "new"
+  }
+}
