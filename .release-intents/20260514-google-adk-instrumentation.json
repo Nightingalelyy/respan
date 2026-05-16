@@ -1,0 +1,6 @@
+{
+  "summary": "Add Google ADK instrumentation package",
+  "packages": {
+    "respan-instrumentation-google-adk": "new"
+  }
+}
