@@ -1,0 +1,6 @@
+{
+  "summary": "Add native Agno instrumentation package and examples",
+  "packages": {
+    "respan-instrumentation-agno": "new"
+  }
+}

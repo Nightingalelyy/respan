@@ -86,6 +86,12 @@
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-autogen",
+      "path": "python-sdks/instrumentations/respan-instrumentation-autogen",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-claude-agent-sdk",
       "path": "python-sdks/instrumentations/respan-instrumentation-claude-agent-sdk",
       "registry": "pypi"
@@ -128,6 +134,12 @@
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-google-adk",
+      "path": "python-sdks/instrumentations/respan-instrumentation-google-adk",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-haystack",
       "path": "python-sdks/instrumentations/respan-instrumentation-haystack",
       "registry": "pypi"
@@ -136,6 +148,14 @@
       "ecosystem": "python",
       "name": "respan-instrumentation-guardrails",
       "path": "python-sdks/instrumentations/respan-instrumentation-guardrails",
+      "name": "respan-instrumentation-dspy",
+      "path": "python-sdks/instrumentations/respan-instrumentation-dspy",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-agno",
+      "path": "python-sdks/instrumentations/respan-instrumentation-agno",
       "registry": "pypi"
     }
   ]
