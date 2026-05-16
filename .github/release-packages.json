@@ -148,6 +148,10 @@
       "ecosystem": "python",
       "name": "respan-instrumentation-guardrails",
       "path": "python-sdks/instrumentations/respan-instrumentation-guardrails",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-dspy",
       "path": "python-sdks/instrumentations/respan-instrumentation-dspy",
       "registry": "pypi"
