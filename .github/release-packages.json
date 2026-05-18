@@ -155,6 +155,30 @@
       "name": "respan-instrumentation-agno",
       "path": "python-sdks/instrumentations/respan-instrumentation-agno",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-superagent",
+      "path": "python-sdks/instrumentations/respan-instrumentation-superagent",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-pipecat",
+      "path": "python-sdks/instrumentations/respan-instrumentation-pipecat",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-llama-index",
+      "path": "python-sdks/instrumentations/respan-instrumentation-llama-index",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-instructor",
+      "path": "python-sdks/instrumentations/respan-instrumentation-instructor",
+      "registry": "pypi"
     }
   ]
 }
