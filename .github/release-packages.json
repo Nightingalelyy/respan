@@ -161,6 +161,12 @@
       "name": "respan-instrumentation-superagent",
       "path": "python-sdks/instrumentations/respan-instrumentation-superagent",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-pipecat",
+      "path": "python-sdks/instrumentations/respan-instrumentation-pipecat",
+      "registry": "pypi"
     }
   ]
 }
