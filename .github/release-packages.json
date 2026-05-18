@@ -26,6 +26,12 @@
     },
     {
       "ecosystem": "javascript",
+      "name": "@respan/instrumentation-langchain",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-langchain",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
       "name": "@respan/instrumentation-openai",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-openai",
       "registry": "npm"
@@ -100,6 +106,12 @@
       "ecosystem": "python",
       "name": "respan-instrumentation-langfuse",
       "path": "python-sdks/instrumentations/respan-instrumentation-langfuse",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-langchain",
+      "path": "python-sdks/instrumentations/respan-instrumentation-langchain",
       "registry": "pypi"
     },
     {
