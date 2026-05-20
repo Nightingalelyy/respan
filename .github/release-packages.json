@@ -32,6 +32,12 @@
     },
     {
       "ecosystem": "javascript",
+      "name": "@respan/instrumentation-langchain",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-langchain",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
       "name": "@respan/instrumentation-openai",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-openai",
       "registry": "npm"
@@ -92,6 +98,12 @@
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-autogen",
+      "path": "python-sdks/instrumentations/respan-instrumentation-autogen",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-claude-agent-sdk",
       "path": "python-sdks/instrumentations/respan-instrumentation-claude-agent-sdk",
       "registry": "pypi"
@@ -100,6 +112,12 @@
       "ecosystem": "python",
       "name": "respan-instrumentation-langfuse",
       "path": "python-sdks/instrumentations/respan-instrumentation-langfuse",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-langchain",
+      "path": "python-sdks/instrumentations/respan-instrumentation-langchain",
       "registry": "pypi"
     },
     {
@@ -134,8 +152,50 @@
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-google-adk",
+      "path": "python-sdks/instrumentations/respan-instrumentation-google-adk",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-haystack",
       "path": "python-sdks/instrumentations/respan-instrumentation-haystack",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-dspy",
+      "path": "python-sdks/instrumentations/respan-instrumentation-dspy",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-agno",
+      "path": "python-sdks/instrumentations/respan-instrumentation-agno",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-superagent",
+      "path": "python-sdks/instrumentations/respan-instrumentation-superagent",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-pipecat",
+      "path": "python-sdks/instrumentations/respan-instrumentation-pipecat",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-llama-index",
+      "path": "python-sdks/instrumentations/respan-instrumentation-llama-index",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-instructor",
+      "path": "python-sdks/instrumentations/respan-instrumentation-instructor",
       "registry": "pypi"
     }
   ]
