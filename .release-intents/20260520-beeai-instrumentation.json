@@ -1,0 +1,6 @@
+{
+  "summary": "Add BeeAI Framework instrumentation package",
+  "packages": {
+    "respan-instrumentation-beeai": "new"
+  }
+}
