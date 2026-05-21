@@ -1,0 +1,6 @@
+{
+  "summary": "Initial release of the Pipecat instrumentation package",
+  "packages": {
+    "respan-instrumentation-pipecat": "new"
+  }
+}

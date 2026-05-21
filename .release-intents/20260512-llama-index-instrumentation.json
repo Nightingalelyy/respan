@@ -1,0 +1,6 @@
+{
+  "summary": "Initial release of native LlamaIndex instrumentation package",
+  "packages": {
+    "respan-instrumentation-llama-index": "new"
+  }
+}

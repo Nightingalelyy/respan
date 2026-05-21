@@ -1,0 +1,6 @@
+{
+  "summary": "Initial release of native Instructor instrumentation package",
+  "packages": {
+    "respan-instrumentation-instructor": "new"
+  }
+}

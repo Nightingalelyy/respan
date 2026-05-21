@@ -1,0 +1,6 @@
+{
+  "summary": "Add active Superagent safety-agent instrumentation",
+  "packages": {
+    "respan-instrumentation-superagent": "new"
+  }
+}
