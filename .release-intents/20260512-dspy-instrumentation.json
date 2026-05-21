@@ -1,0 +1,6 @@
+{
+  "summary": "Add native DSPy instrumentation package",
+  "packages": {
+    "respan-instrumentation-dspy": "new"
+  }
+}
