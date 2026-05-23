@@ -1,0 +1,7 @@
+{
+  "summary": "Add the Mastra TypeScript instrumentation package and shared JS LLM constants",
+  "packages": {
+    "@respan/instrumentation-mastra": "new",
+    "@respan/respan-sdk": "patch"
+  }
+}
