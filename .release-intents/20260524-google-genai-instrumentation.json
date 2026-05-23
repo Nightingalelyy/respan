@@ -1,0 +1,6 @@
+{
+  "summary": "Add Google Gen AI instrumentation package",
+  "packages": {
+    "respan-instrumentation-google-genai": "new"
+  }
+}
