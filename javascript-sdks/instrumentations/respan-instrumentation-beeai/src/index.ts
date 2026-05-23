@@ -18,6 +18,15 @@
 
 import { trace } from "@opentelemetry/api";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
+import {
+  ATTR_GEN_AI_COMPLETION,
+  ATTR_GEN_AI_PROMPT,
+  ATTR_GEN_AI_REQUEST_MODEL,
+  ATTR_GEN_AI_USAGE_COMPLETION_TOKENS,
+  ATTR_GEN_AI_USAGE_INPUT_TOKENS,
+  ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
+  ATTR_GEN_AI_USAGE_PROMPT_TOKENS,
+} from "@opentelemetry/semantic-conventions/incubating";
 import { BeeAIInstrumentation } from "@arizeai/openinference-instrumentation-beeai";
 import { RespanLogType, RespanSpanAttributes } from "@respan/respan-sdk";
 import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
@@ -144,17 +153,17 @@ function setTokenAttributes(
   );
 
   if (promptTokens !== undefined) {
-    setDefault(attrs, RespanSpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS, promptTokens);
-    setDefault(attrs, RespanSpanAttributes.GEN_AI_USAGE_INPUT_TOKENS, promptTokens);
+    setDefault(attrs, ATTR_GEN_AI_USAGE_PROMPT_TOKENS, promptTokens);
+    setDefault(attrs, ATTR_GEN_AI_USAGE_INPUT_TOKENS, promptTokens);
     setDefault(attrs, DIRECT_PROMPT_TOKENS, promptTokens);
   }
   if (completionTokens !== undefined) {
-    setDefault(attrs, RespanSpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS, completionTokens);
-    setDefault(attrs, RespanSpanAttributes.GEN_AI_USAGE_OUTPUT_TOKENS, completionTokens);
+    setDefault(attrs, ATTR_GEN_AI_USAGE_COMPLETION_TOKENS, completionTokens);
+    setDefault(attrs, ATTR_GEN_AI_USAGE_OUTPUT_TOKENS, completionTokens);
     setDefault(attrs, DIRECT_COMPLETION_TOKENS, completionTokens);
   }
   if (totalTokens !== undefined) {
-    setDefault(attrs, RespanSpanAttributes.LLM_USAGE_TOTAL_TOKENS, totalTokens);
+    setDefault(attrs, SpanAttributes.LLM_USAGE_TOTAL_TOKENS, totalTokens);
     setDefault(attrs, DIRECT_TOTAL_REQUEST_TOKENS, totalTokens);
   }
 }
@@ -614,7 +623,7 @@ function normalizeOutputValue(output: unknown): unknown {
 
 function clearChatPromptAttributes(attrs: Record<string, any>): void {
   for (const key of Object.keys(attrs)) {
-    if (key.startsWith("gen_ai.prompt.")) {
+    if (key.startsWith(`${ATTR_GEN_AI_PROMPT}.`)) {
       delete attrs[key];
     }
   }
@@ -648,7 +657,7 @@ function setChatPromptAttributes(
     const record = asRecord(message);
     if (!record) continue;
 
-    const prefix = `gen_ai.prompt.${index}`;
+    const prefix = `${ATTR_GEN_AI_PROMPT}.${index}`;
     if (typeof record.role === "string") {
       setPromptAttribute(`${prefix}.role`, record.role);
     }
@@ -682,10 +691,12 @@ function setChatCompletionAttributes(
     .find((message) => message?.role === "assistant");
   if (!assistantMessage) return;
 
-  setDefault(attrs, RespanSpanAttributes.GEN_AI_COMPLETION_ROLE, "assistant");
+  const completionPrefix = `${ATTR_GEN_AI_COMPLETION}.0`;
+
+  setDefault(attrs, `${completionPrefix}.role`, "assistant");
   setDefault(
     attrs,
-    RespanSpanAttributes.GEN_AI_COMPLETION_CONTENT,
+    `${completionPrefix}.content`,
     typeof assistantMessage.content === "string" ? assistantMessage.content : "",
   );
 
@@ -697,7 +708,7 @@ function setChatCompletionAttributes(
     );
     setDefault(
       attrs,
-      RespanSpanAttributes.GEN_AI_COMPLETION_TOOL_CALLS,
+      `${completionPrefix}.tool_calls`,
       assistantMessage.tool_calls,
     );
   }
@@ -893,7 +904,7 @@ function translateBeeAIEventSpan(span: ReadableSpan, exportSpan?: ProcessorOnEnd
 
   setDefault(attrs, RespanSpanAttributes.RESPAN_LOG_TYPE, logType);
   if (logType === RespanLogType.CHAT || logType === RespanLogType.EMBEDDING) {
-    setDefault(attrs, RespanSpanAttributes.LLM_REQUEST_TYPE, logType);
+    setDefault(attrs, SpanAttributes.LLM_REQUEST_TYPE, logType);
   }
 
   setDefault(
@@ -909,7 +920,7 @@ function translateBeeAIEventSpan(span: ReadableSpan, exportSpan?: ProcessorOnEnd
 
   const model = firstDefined(data?.model, value?.model);
   if (model !== undefined) {
-    setDefault(attrs, RespanSpanAttributes.GEN_AI_REQUEST_MODEL, model);
+    setDefault(attrs, ATTR_GEN_AI_REQUEST_MODEL, model);
     setDefault(attrs, DIRECT_MODEL, model);
   }
 
