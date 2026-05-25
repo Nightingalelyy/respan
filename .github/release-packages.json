@@ -86,6 +86,12 @@
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-agentspec",
+      "path": "python-sdks/instrumentations/respan-instrumentation-agentspec",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-anthropic",
       "path": "python-sdks/instrumentations/respan-instrumentation-anthropic",
       "registry": "pypi"
@@ -158,6 +164,12 @@
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-braintrust",
+      "path": "python-sdks/instrumentations/respan-instrumentation-braintrust",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-dspy",
       "path": "python-sdks/instrumentations/respan-instrumentation-dspy",
       "registry": "pypi"
@@ -190,6 +202,36 @@
       "ecosystem": "python",
       "name": "respan-instrumentation-instructor",
       "path": "python-sdks/instrumentations/respan-instrumentation-instructor",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-mcp",
+      "path": "python-sdks/instrumentations/respan-instrumentation-mcp",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-beeai",
+      "path": "python-sdks/instrumentations/respan-instrumentation-beeai",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-strands-agents",
+      "path": "python-sdks/instrumentations/respan-instrumentation-strands-agents",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-smolagents",
+      "path": "python-sdks/instrumentations/respan-instrumentation-smolagents",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-guardrails",
+      "path": "python-sdks/instrumentations/respan-instrumentation-guardrails",
       "registry": "pypi"
     }
   ]
