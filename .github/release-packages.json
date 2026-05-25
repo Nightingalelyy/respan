@@ -197,6 +197,12 @@
       "name": "respan-instrumentation-instructor",
       "path": "python-sdks/instrumentations/respan-instrumentation-instructor",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-mcp",
+      "path": "python-sdks/instrumentations/respan-instrumentation-mcp",
+      "registry": "pypi"
     }
   ]
 }

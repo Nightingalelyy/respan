@@ -1,0 +1,6 @@
+{
+  "summary": "Add first-party MCP instrumentation",
+  "packages": {
+    "respan-instrumentation-mcp": "new"
+  }
+}

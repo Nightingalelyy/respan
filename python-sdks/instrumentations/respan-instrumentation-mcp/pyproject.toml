@@ -1,0 +1,32 @@
+[tool.poetry]
+name = "respan-instrumentation-mcp"
+version = "0.1.0"
+description = "Respan instrumentation plugin for Model Context Protocol (MCP)"
+authors = ["Respan <team@respan.ai>"]
+license = "Apache 2.0"
+readme = "README.md"
+packages = [
+    { include = "respan_instrumentation_mcp", from = "./src" },
+]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.14"
+respan-tracing = "^2.16.1"
+respan-sdk = ">=2.5.0"
+respan-instrumentation-openinference = ">=1.2.2"
+mcp = ">=1.27.0"
+openinference-instrumentation-mcp = ">=2.0.0"
+opentelemetry-semantic-conventions-ai = ">=0.4.1"
+wrapt = ">=1.16.0"
+
+[tool.poetry.plugins."respan.instrumentations"]
+mcp = "respan_instrumentation_mcp:MCPInstrumentor"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: live network tests (requires API keys)",
+]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
