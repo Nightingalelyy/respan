@@ -1,0 +1,6 @@
+{
+  "summary": "Initial release of smolagents instrumentation package",
+  "packages": {
+    "respan-instrumentation-smolagents": "new"
+  }
+}

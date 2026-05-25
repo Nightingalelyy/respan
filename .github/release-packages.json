@@ -221,6 +221,12 @@
       "name": "respan-instrumentation-strands-agents",
       "path": "python-sdks/instrumentations/respan-instrumentation-strands-agents",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-smolagents",
+      "path": "python-sdks/instrumentations/respan-instrumentation-smolagents",
+      "registry": "pypi"
     }
   ]
 }
