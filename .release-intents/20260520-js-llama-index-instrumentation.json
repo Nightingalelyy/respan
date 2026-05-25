@@ -1,0 +1,6 @@
+{
+  "summary": "Add LlamaIndex TypeScript instrumentation package",
+  "packages": {
+    "@respan/instrumentation-llama-index": "new"
+  }
+}
