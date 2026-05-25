@@ -1,0 +1,6 @@
+{
+  "summary": "Initial release of the TypeScript MCP instrumentation package",
+  "packages": {
+    "@respan/instrumentation-mcp": "new"
+  }
+}
