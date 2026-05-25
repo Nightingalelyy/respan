@@ -158,6 +158,12 @@
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-braintrust",
+      "path": "python-sdks/instrumentations/respan-instrumentation-braintrust",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-dspy",
       "path": "python-sdks/instrumentations/respan-instrumentation-dspy",
       "registry": "pypi"

@@ -1,0 +1,29 @@
+[tool.poetry]
+name = "respan-instrumentation-braintrust"
+version = "0.1.0"
+description = "Respan instrumentation plugin for Braintrust"
+authors = ["Respan <team@respan.ai>"]
+license = "Apache 2.0"
+readme = "README.md"
+packages = [
+    { include = "respan_instrumentation_braintrust", from = "./src" },
+]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.14"
+braintrust = ">=0.5.0"
+opentelemetry-semantic-conventions-ai = ">=0.4.1"
+respan-sdk = ">=2.5.0"
+respan-tracing = "^2.16.1"
+
+[tool.poetry.plugins."respan.instrumentations"]
+braintrust = "respan_instrumentation_braintrust:BraintrustInstrumentor"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: live network tests (requires API keys)",
+]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
