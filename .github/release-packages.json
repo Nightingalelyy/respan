@@ -86,6 +86,12 @@
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-agentspec",
+      "path": "python-sdks/instrumentations/respan-instrumentation-agentspec",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-anthropic",
       "path": "python-sdks/instrumentations/respan-instrumentation-anthropic",
       "registry": "pypi"

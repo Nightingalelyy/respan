@@ -1,0 +1,6 @@
+{
+  "summary": "Add AgentSpec instrumentation package",
+  "packages": {
+    "respan-instrumentation-agentspec": "new"
+  }
+}
