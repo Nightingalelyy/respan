@@ -11,9 +11,12 @@ packages = [
 
 [tool.poetry.dependencies]
 python = ">=3.11,<3.14"
-respan-tracing = "^2.15.2"
+respan-sdk = ">=2.5.0"
+respan-tracing = "^2.17.0"
+respan-instrumentation-openinference = ">=1.2.2"
+opentelemetry-semantic-conventions-ai = ">=0.4.1"
 haystack-ai = ">=2.0.0"
-opentelemetry-instrumentation-haystack = ">=0.40.0"
+openinference-instrumentation-haystack = ">=0.1.20"
 
 [tool.poetry.plugins."respan.instrumentations"]
 haystack = "respan_instrumentation_haystack:HaystackInstrumentor"
