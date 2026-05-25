@@ -245,6 +245,12 @@
       "name": "respan-instrumentation-guardrails",
       "path": "python-sdks/instrumentations/respan-instrumentation-guardrails",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "javascript",
+      "name": "@respan/instrumentation-mastra",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-mastra",
+      "registry": "npm"
     }
   ]
 }
