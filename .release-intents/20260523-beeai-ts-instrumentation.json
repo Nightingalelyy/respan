@@ -1,0 +1,6 @@
+{
+  "summary": "Initial release of the BeeAI TypeScript instrumentation package",
+  "packages": {
+    "@respan/instrumentation-beeai": "new"
+  }
+}

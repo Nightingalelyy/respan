@@ -20,14 +20,32 @@
     },
     {
       "ecosystem": "javascript",
+      "name": "@respan/instrumentation-beeai",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-beeai",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
       "name": "@respan/instrumentation-claude-agent-sdk",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-claude-agent-sdk",
       "registry": "npm"
     },
     {
       "ecosystem": "javascript",
+      "name": "@respan/instrumentation-llama-index",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-llama-index",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
       "name": "@respan/instrumentation-langchain",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-langchain",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
+      "name": "@respan/instrumentation-mcp",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-mcp",
       "registry": "npm"
     },
     {
@@ -158,6 +176,12 @@
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-google-genai",
+      "path": "python-sdks/instrumentations/respan-instrumentation-google-genai",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-haystack",
       "path": "python-sdks/instrumentations/respan-instrumentation-haystack",
       "registry": "pypi"
@@ -233,6 +257,12 @@
       "name": "respan-instrumentation-guardrails",
       "path": "python-sdks/instrumentations/respan-instrumentation-guardrails",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "javascript",
+      "name": "@respan/instrumentation-mastra",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-mastra",
+      "registry": "npm"
     }
   ]
 }
