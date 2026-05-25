@@ -215,6 +215,12 @@
       "name": "respan-instrumentation-beeai",
       "path": "python-sdks/instrumentations/respan-instrumentation-beeai",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-strands-agents",
+      "path": "python-sdks/instrumentations/respan-instrumentation-strands-agents",
+      "registry": "pypi"
     }
   ]
 }
