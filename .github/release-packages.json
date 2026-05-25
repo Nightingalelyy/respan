@@ -227,6 +227,12 @@
       "name": "respan-instrumentation-smolagents",
       "path": "python-sdks/instrumentations/respan-instrumentation-smolagents",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-guardrails",
+      "path": "python-sdks/instrumentations/respan-instrumentation-guardrails",
+      "registry": "pypi"
     }
   ]
 }
