@@ -1,0 +1,31 @@
+[tool.poetry]
+name = "respan-instrumentation-beeai"
+version = "0.1.0"
+description = "Respan instrumentation plugin for BeeAI Framework"
+authors = ["Respan <team@respan.ai>"]
+license = "Apache 2.0"
+readme = "README.md"
+packages = [
+    { include = "respan_instrumentation_beeai", from = "./src" },
+]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.14"
+respan-tracing = "^2.16.1"
+respan-sdk = ">=2.5.0"
+respan-instrumentation-openinference = ">=1.2.2"
+opentelemetry-semantic-conventions-ai = ">=0.4.1"
+beeai-framework = ">=0.1.51"
+openinference-instrumentation-beeai = ">=0.1.16"
+
+[tool.poetry.plugins."respan.instrumentations"]
+beeai = "respan_instrumentation_beeai:BeeAIInstrumentor"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: live network tests (requires API keys)",
+]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
