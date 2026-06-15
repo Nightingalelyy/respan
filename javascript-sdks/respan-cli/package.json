@@ -50,6 +50,7 @@
     "@respan/respan-sdk": "^1.1.4"
   },
   "devDependencies": {
+    "@types/node": "^18",
     "esbuild": "^0.25",
     "oclif": "^4",
     "ts-node": "^10.9.2",

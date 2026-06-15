@@ -1,16 +1,222 @@
-# Tracing Reference
+# Tracing
 
-Advanced tracing configuration: decorators, context propagation, processors, and span attributes.
+Set up and configure Respan SDK tracing: instrument an app to capture LLM calls as
+structured traces, then refine with decorators, context propagation, and processors.
+
+This file covers **both** the initial setup steps and the advanced reference. Tracing
+is a separate setup from the gateway — do one at a time, never both in the same pass.
 
 Docs: `https://respan.ai/docs/documentation/features/tracing/traces/tracing-sdk.md`
+Full docs index: `https://www.respan.ai/docs/llms.txt`
 
 ---
 
-## Decorators
+## Setup
+
+Use this section when the user asks to set up Respan tracing in their project.
+
+### Hard Rules
+
+- **Interactive mode:** Ask the user questions when you need input. Do not assume.
+- **Only add Respan code.** Do not refactor or modify unrelated code.
+- **Pin exact versions.** Never use `latest` or unpinned ranges.
+- **Do not guess APIs.** Use only the patterns from the integration docs linked below.
+- **If Respan is already installed/configured, do not duplicate work.** Check for existing `respan` imports first.
+- **Read the code before proposing changes.** Understand the actual workflow, not just the dependencies.
+
+The API key is stored in `.env` as `RESPAN_API_KEY`.
+
+### 1. Analyze the Project
+
+**1a. Detect language and package manager:**
+- Check `package.json` (JS/TS) or `pyproject.toml` / `requirements.txt` (Python)
+- Detect package manager from lock files
+
+**1b. Detect libraries in priority order:**
+
+Check higher-priority categories first. If a match is found, use that instrumentation — do NOT also add lower-level SDK instrumentation.
+
+**Priority 1 — Agent Frameworks & High-Level SDKs:**
+
+| Library | Python package | JS/TS package | Respan instrumentation (Python) | Respan instrumentation (JS/TS) | Docs |
+|---------|---------------|---------------|--------------------------------|-------------------------------|------|
+| Vercel AI SDK | — | `ai` | — | `@respan/instrumentation-vercel` | [docs](https://respan.ai/docs/integrations/vercel-ai-sdk.md) |
+| OpenAI Agents SDK | `openai-agents` | `@openai/agents` | `respan-instrumentation-openai-agents` | `@respan/instrumentation-openai-agents` | [docs](https://respan.ai/docs/integrations/openai-agents-sdk.md) |
+| Claude Agent SDK | `claude-agent-sdk` | — | `respan-instrumentation-claude-agent-sdk` | — | [docs](https://respan.ai/docs/integrations/claude-agents-sdk.md) |
+| Pydantic AI | `pydantic-ai` | — | `respan-instrumentation-pydantic-ai` | — | [docs](https://respan.ai/docs/integrations/pydantic-ai.md) |
+| LangChain | `langchain` | `langchain` | via OpenInference | — | [docs](https://respan.ai/docs/integrations/langchain.md) |
+| LangGraph | `langgraph` | — | via OpenInference | — | [docs](https://respan.ai/docs/integrations/langgraph.md) |
+| CrewAI | `crewai` | — | `respan-instrumentation-crewai` | — | [docs](https://respan.ai/docs/integrations/crewai.md) |
+| LlamaIndex | `llama-index` | — | via OpenInference | — | [docs](https://respan.ai/docs/integrations/llama-index.md) |
+| Haystack | `haystack-ai` | — | `respan-instrumentation-haystack` | — | [docs](https://respan.ai/docs/integrations/haystack.md) |
+| Mastra | — | `mastra` | — | via OTEL | [docs](https://respan.ai/docs/integrations/mastra.md) |
+| Google ADK | `google-adk` | — | via OpenInference | — | [docs](https://respan.ai/docs/integrations/google-adk.md) |
+
+If a Priority 1 framework is found, use its instrumentation. Do NOT also add Priority 2 instrumentation for the same provider.
+
+**Priority 2 — Direct LLM SDKs** (only if no P1 framework covers this provider):
+
+These are **auto-instrumented** — just `Respan()` / `new Respan()`, no extra packages needed:
+
+| Library | Python package | JS/TS package | Docs |
+|---------|---------------|---------------|------|
+| OpenAI SDK | `openai` | `openai` | [docs](https://respan.ai/docs/integrations/openai-sdk.md) |
+| Anthropic SDK | `anthropic` | `@anthropic-ai/sdk` | [docs](https://respan.ai/docs/integrations/anthropic.md) |
+| Azure OpenAI | `openai` (azure config) | `openai` | [docs](https://respan.ai/docs/integrations/providers/azure.md) |
+| Google Vertex AI | `google-cloud-aiplatform` | — | [docs](https://respan.ai/docs/integrations/vertex-ai.md) |
+| AWS Bedrock | `boto3` | — | [docs](https://respan.ai/docs/integrations/aws-bedrock.md) |
+| Cohere | `cohere` | — | [docs](https://respan.ai/docs/integrations/providers/cohere.md) |
+| Together AI | `together` | — | [docs](https://respan.ai/docs/integrations/together-ai.md) |
+
+**Note:** LiteLLM in JS uses the OpenAI-compatible API, so the OpenAI auto-instrument covers it. For Python LiteLLM, see [LiteLLM guide](https://respan.ai/docs/integrations/litellm.md). For Google GenAI (`@google/genai`), see [Google GenAI guide](https://respan.ai/docs/integrations/google-genai.md).
+
+**1c. Read the actual code and understand the workflow:**
+
+This is the most important step. Read the entrypoint and all files that make LLM calls. Map out:
+
+- What is the **overall workflow**? (e.g. "user sends question → retrieve context → generate answer → format response")
+- What are the **individual steps/tasks**? (e.g. "embed query", "search DB", "call GPT", "parse output")
+- Are there **agent loops**? (e.g. a loop that calls tools until done)
+- Are there **tool calls**? (e.g. functions the LLM invokes)
+
+### 2. Propose an Implementation Plan
+
+Present the user with a concrete plan before making any changes. The plan should include:
+
+**a) Packages to install** — core SDK + instrumentation package (with exact versions)
+
+**b) Initialization code** — where to add it (which file, which line)
+
+**c) Workflow structure** — how to wrap the existing code:
+
+For **agent frameworks** (Priority 1): The framework instrumentation auto-captures the workflow structure. Usually just need init code, no manual wrapping needed. Fetch and follow the integration doc.
+
+For **direct LLM SDKs** (Priority 2): Individual LLM calls will be auto-traced as flat spans. Propose wrapping the logical workflow with Respan decorators/wrappers to get structured nested traces:
+
+TypeScript example:
+```typescript
+// Before: flat traces — each LLM call is an isolated span
+const outline = await openai.chat.completions.create({...});
+const draft = await openai.chat.completions.create({...});
+
+// After: structured traces — nested spans showing the workflow
+const result = await withWorkflow({ name: "write_article" }, async () => {
+  const outline = await withTask({ name: "generate_outline" }, async () => {
+    return await openai.chat.completions.create({...});
+  });
+  const draft = await withTask({ name: "write_draft" }, async () => {
+    return await openai.chat.completions.create({...});
+  });
+  return draft;
+});
+```
+
+Python example:
+```python
+# Before: flat traces
+outline = client.chat.completions.create(...)
+draft = client.chat.completions.create(...)
+
+# After: structured traces
+@workflow(name="write_article")
+def write_article(topic):
+    outline = generate_outline(topic)
+    return write_draft(outline)
+
+@task(name="generate_outline")
+def generate_outline(topic):
+    return client.chat.completions.create(...)
+
+@task(name="write_draft")
+def write_draft(outline):
+    return client.chat.completions.create(...)
+```
+
+**Ask the user which approach they prefer:**
+1. **Auto-trace only** — just add init code, every LLM call is automatically captured as a flat span. Zero code changes beyond initialization. Good for quick setup or simple projects.
+2. **Structured traces** — wrap existing code with workflow/task decorators for nested spans showing how the app flows. Better for complex projects with multiple LLM calls.
+
+If the user picks option 1, skip the wrappers entirely — just install + init code.
+
+If the user picks option 2:
+- **If multiple independent workflows are detected** (e.g. `writeArticle()`, `summarizeDoc()`, `classifyEmail()`), list them and ask which ones to instrument. Don't assume all of them.
+- **Show the user what the trace will look like** — describe the span hierarchy:
+```
+workflow: write_article
+  ├── task: generate_outline
+  │     └── llm: openai.chat (auto-captured)
+  └── task: write_draft
+        └── llm: openai.chat (auto-captured)
+```
+
+Wait for user confirmation before proceeding.
+
+### 3. Implement
+
+**a) Install packages:**
+
+For direct LLM SDKs (Priority 2) — just the core SDK:
+```bash
+# Python
+pip install respan-ai
+
+# TypeScript
+npm install @respan/respan
+```
+
+For agent frameworks (Priority 1) — also install the instrumentor. Check the docs link in the table above for the exact packages.
+
+**b) Add initialization code** — at the top of the entrypoint, before any LLM client is created:
+
+For **direct LLM SDKs** (auto-instrumented):
+```python
+# Python
+from respan import Respan
+Respan()
+```
+```typescript
+// TypeScript
+import { Respan } from "@respan/respan";
+const respan = new Respan();
+await respan.initialize();
+```
+
+For **agent frameworks** (explicit instrumentor — fetch the docs URL from the table for the exact pattern):
+```python
+# Python example (OpenAI Agents)
+from respan import Respan
+from respan_instrumentation_openai_agents import OpenAIAgentsInstrumentor
+Respan(instrumentations=[OpenAIAgentsInstrumentor()])
+```
+```typescript
+// TypeScript example (OpenAI Agents)
+import { Respan } from "@respan/respan";
+import { OpenAIAgentsInstrumentor } from "@respan/instrumentation-openai-agents";
+const respan = new Respan({ instrumentations: [new OpenAIAgentsInstrumentor()] });
+await respan.initialize();
+```
+
+**c) Add workflow wrappers** — if the user chose structured traces in the plan.
+
+### 4. Verify (final test — always run this)
+
+As the final step, **run the user's program once with a small request** and confirm tracing works end to end:
+
+- The app runs without errors
+- A trace appears at https://platform.respan.ai or via `respan traces list --limit 5`
+- If wrappers were added, the trace shows the expected nested span hierarchy
+
+If no trace appears, the instrumentation isn't taking effect — debug (init placement, missing `flush()`, wrong entrypoint) and re-run before declaring setup done.
+
+---
+
+## Reference
+
+Advanced tracing configuration: decorators, context propagation, processors, and span attributes.
+
+### Decorators
 
 Wrap functions to create structured span hierarchies. All decorators share the same signature.
-
-### Types
 
 | Decorator | Purpose |
 |-----------|---------|
@@ -19,7 +225,7 @@ Wrap functions to create structured span hierarchies. All decorators share the s
 | `@agent` / `withAgent` | Agent loop span |
 | `@tool` / `withTool` | Tool/function call span |
 
-### Python
+#### Python
 
 ```python
 from respan import Respan, workflow, task, agent, tool
@@ -40,7 +246,7 @@ def write_draft(outline: str):
     return client.chat.completions.create(...)
 ```
 
-### TypeScript
+#### TypeScript
 
 ```typescript
 import { Respan, withWorkflow, withTask } from "@respan/respan";
@@ -58,7 +264,7 @@ const result = await withWorkflow({ name: "write_article" }, async () => {
 });
 ```
 
-### Decorator Parameters
+#### Decorator Parameters
 
 ```python
 @workflow(
@@ -74,17 +280,15 @@ const result = await withWorkflow({ name: "write_article" }, async () => {
 
 All parameters are optional. Without any, the function name is used as the span name.
 
-### Async Support
+#### Async Support
 
 Decorators work with `async def`, generators, and async generators automatically.
 
----
-
-## Context Propagation
+### Context Propagation
 
 Attach attributes to **all spans** within a scope, including auto-instrumented LLM calls.
 
-### propagate_attributes
+#### propagate_attributes
 
 ```python
 from respan import Respan, propagate_attributes
@@ -101,7 +305,7 @@ with propagate_attributes(
     result = run_pipeline()
 ```
 
-#### Available attributes
+##### Available attributes
 
 | Attribute | Description |
 |-----------|-------------|
@@ -115,7 +319,7 @@ with propagate_attributes(
 | `metadata` | Dict of custom key-value pairs (merged in nested contexts) |
 | `prompt` | Dict with `prompt_id` and `variables` for prompt logging |
 
-#### TypeScript
+##### TypeScript
 
 ```typescript
 const result = await respan.propagateAttributes(
@@ -130,14 +334,14 @@ const result = await respan.propagateAttributes(
 );
 ```
 
-#### Nesting behavior
+##### Nesting behavior
 
 - Nested `propagate_attributes` calls merge with the outer context
 - `metadata` dicts are merged (not replaced)
 - For duplicate keys, inner values override outer
 - Async-safe via `contextvars`
 
-### respan_span_attributes
+#### respan_span_attributes
 
 Attaches attributes to the **current active span only** (not auto-instrumented child spans):
 
@@ -153,9 +357,7 @@ with respan_span_attributes({
 
 Use `propagate_attributes` when you need attributes on all nested spans (most common). Use `respan_span_attributes` when you only want to tag the current span.
 
----
-
-## Imperative Span Creation
+### Imperative Span Creation
 
 For runtime-determined span names, use the client API instead of decorators:
 
@@ -169,9 +371,7 @@ with client.start_span(name="dynamic_step", kind="task") as span:
     # span is automatically closed and exported
 ```
 
----
-
-## Updating the Current Span
+### Updating the Current Span
 
 Add attributes or change status on the active span at runtime:
 
@@ -199,9 +399,7 @@ except Exception as e:
     client.record_exception(e)
 ```
 
----
-
-## Custom Processors
+### Custom Processors
 
 Route spans to multiple destinations with filtering:
 
@@ -228,9 +426,7 @@ def sensitive_step():
     ...
 ```
 
----
-
-## Flush
+### Flush
 
 Always call `flush()` before process exit to ensure all spans are exported:
 
@@ -242,9 +438,7 @@ respan.flush()
 
 In serverless/Lambda: call `flush()` at the end of every handler invocation.
 
----
-
-## Trace Hierarchy Example
+### Trace Hierarchy Example
 
 ```
 workflow: handle_request
