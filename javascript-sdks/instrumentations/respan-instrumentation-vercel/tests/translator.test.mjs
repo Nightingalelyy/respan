@@ -72,6 +72,12 @@ test("ai.embed.doEmbed is classified as embedding without synthetic usage fields
   assert.equal(attrs["traceloop.span.kind"], undefined);
   assert.equal(attrs["ai.usage.tokens"], undefined);
   assert.equal(attrs["ai.embeddings"], undefined);
+
+  // The embedded text and the vector are captured into input/output (not
+  // dropped) — debuggable RAG data; vendor keys are remapped then stripped.
+  assert.ok(attrs["traceloop.entity.input"]?.includes("embed this"));
+  assert.ok(attrs["traceloop.entity.output"]?.includes("0.1"));
+  assert.equal(attrs["ai.values"], undefined);
 });
 
 test("LLM spans emit tool definitions and tool calls in canonical fields only", () => {

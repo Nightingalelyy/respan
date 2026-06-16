@@ -3,6 +3,8 @@ import {
   AI_OPERATION_ID,
   AI_EMBEDDING,
   AI_EMBEDDINGS,
+  AI_VALUE,
+  AI_VALUES,
   AI_PROMPT,
   AI_PROMPT_MESSAGES,
   AI_PROMPT_TOOL_CHOICE,
@@ -132,7 +134,8 @@ export function enrichTokens(attrs: SpanAttributes): void {
 }
 
 export function enrichPerformanceMetrics(attrs: SpanAttributes, spanName: string): void {
-  setDefault(attrs, metadataKey("stream"), String(spanName.includes("doStream")));
+  // Streaming is a first-class promoted attribute (llm.is_streaming), not metadata.
+  setDefault(attrs, "llm.is_streaming", spanName.includes("doStream"));
 
   const msToFinish = attrs[AI_RESPONSE_MS_TO_FINISH];
   if (msToFinish !== undefined) {
@@ -176,6 +179,8 @@ const VERCEL_ATTRS_TO_STRIP = [
   AI_RESPONSE_OBJECT,
   AI_EMBEDDING,
   AI_EMBEDDINGS,
+  AI_VALUE,
+  AI_VALUES,
   "ai.usage.promptTokens",
   "ai.usage.completionTokens",
   "ai.usage.inputTokens",
