@@ -87,7 +87,7 @@ test("redact attrs use tool contract without aliases", () => {
   assert.equal(attrs[RESPAN_LOG_TYPE], "tool");
   assert.equal(attrs[TRACELOOP_ENTITY_NAME], "superagent.redact");
   assert.equal(attrs[TRACELOOP_ENTITY_PATH], "superagent.redact");
-  assert.equal(attrs[SUPERAGENT_METADATA_REDACT_FINDINGS], "["email"]");
+  assert.equal(attrs[SUPERAGENT_METADATA_REDACT_FINDINGS], "[\"email\"]");
   assertNoOffContractAliases(attrs);
 });
 
@@ -115,5 +115,5 @@ test("serialization helpers handle option objects", () => {
     method: "guard",
     args: [{ input: "payload", model: "openai-compatible/gpt-4o-mini" }],
   });
-  assert.equal(safeJsonStringify({ value: 1 }), "{"value":1}");
+  assert.equal(safeJsonStringify({ value: 1 }), "{\"value\":1}");
 });
