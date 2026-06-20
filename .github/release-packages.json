@@ -68,6 +68,12 @@
     },
     {
       "ecosystem": "javascript",
+      "name": "@respan/instrumentation-superagent",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-superagent",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
       "name": "@respan/instrumentation-vercel",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-vercel",
       "registry": "npm"
