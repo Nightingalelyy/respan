@@ -13,6 +13,7 @@
     "instrumentations/respan-instrumentation-claude-agent-sdk",
     "instrumentations/respan-instrumentation-codex-sdk",
     "instrumentations/respan-instrumentation-cursor",
+    "instrumentations/respan-instrumentation-flue",
     "instrumentations/respan-instrumentation-langchain",
     "instrumentations/respan-instrumentation-llama-index",
     "instrumentations/respan-instrumentation-google-adk",

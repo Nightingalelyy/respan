@@ -62,6 +62,12 @@
     },
     {
       "ecosystem": "javascript",
+      "name": "@respan/instrumentation-flue",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-flue",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
       "name": "@respan/instrumentation-llama-index",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-llama-index",
       "registry": "npm"
