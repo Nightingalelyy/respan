@@ -50,6 +50,12 @@
     },
     {
       "ecosystem": "javascript",
+      "name": "@respan/instrumentation-codex-sdk",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-codex-sdk",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
       "name": "@respan/instrumentation-cursor",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-cursor",
       "registry": "npm"
