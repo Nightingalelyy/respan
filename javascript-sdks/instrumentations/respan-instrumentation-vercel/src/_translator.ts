@@ -38,8 +38,10 @@ import {
   isVercelAISpan,
   metadataKey,
   resolveLogType,
+  resolveSemanticSpanNameHint,
   safeJsonStr,
   setDefault,
+  setSemanticSpanNameHint,
 } from "./_translator/shared.js";
 import { enrichMetadata, enrichModel, enrichPerformanceMetrics, enrichTokens, stripRedundantAttrs } from "./_translator/span-enrichment.js";
 
@@ -83,6 +85,8 @@ export class VercelAITranslator implements SpanProcessor {
     const config = VERCEL_SPAN_CONFIG[name];
     const parentLogType = VERCEL_PARENT_SPANS[name];
     const logType = resolveLogType(name, attrs);
+    const semanticName = resolveSemanticSpanNameHint(name, attrs, logType);
+    setSemanticSpanNameHint(attrs, semanticName.kind, semanticName.detail);
 
     // Embedding spans (span-contract.md): input = embedded text, output = the
     // embedding vector(s) — captured, not dropped (debuggable RAG data; size is

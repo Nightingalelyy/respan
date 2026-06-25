@@ -39,6 +39,8 @@ test("ai.generateText.doGenerate is classified as LLM text, not task", () => {
   assert.equal(attrs["llm.request.type"], "chat");
   assert.equal(attrs["gen_ai.request.model"], "gpt-4o-mini");
   assert.equal(attrs["traceloop.span.kind"], undefined);
+  assert.equal(attrs["respan.internal.span_name.kind"], "generate");
+  assert.equal(attrs["respan.internal.span_name.detail"], "doGenerate");
 });
 
 test("ai.streamText.doStream is classified as LLM text, not task", () => {
@@ -48,6 +50,8 @@ test("ai.streamText.doStream is classified as LLM text, not task", () => {
   assert.equal(attrs["llm.request.type"], "chat");
   assert.equal(attrs["gen_ai.request.model"], "gpt-4o-mini");
   assert.equal(attrs["traceloop.span.kind"], undefined);
+  assert.equal(attrs["respan.internal.span_name.kind"], "stream");
+  assert.equal(attrs["respan.internal.span_name.detail"], "doStream");
 });
 
 test("ai.embed.doEmbed is classified as embedding without synthetic usage fields", () => {
@@ -78,6 +82,8 @@ test("ai.embed.doEmbed is classified as embedding without synthetic usage fields
   assert.ok(attrs["traceloop.entity.input"]?.includes("embed this"));
   assert.ok(attrs["traceloop.entity.output"]?.includes("0.1"));
   assert.equal(attrs["ai.values"], undefined);
+  assert.equal(attrs["respan.internal.span_name.kind"], "embed");
+  assert.equal(attrs["respan.internal.span_name.detail"], "doEmbed");
 });
 
 test("LLM spans emit tool definitions and tool calls in canonical fields only", () => {
@@ -200,4 +206,6 @@ test("ai.toolCall spans carry input/output only — no tool_calls aliases", () =
   assert.equal(attrs.tool_calls, undefined);
   assert.equal(attrs["respan.span.tool_calls"], undefined);
   assert.equal(attrs.span_tools, undefined);
+  assert.equal(attrs["respan.internal.span_name.kind"], "tool");
+  assert.equal(attrs["respan.internal.span_name.detail"], "weather");
 });

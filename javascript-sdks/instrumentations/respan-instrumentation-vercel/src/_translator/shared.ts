@@ -19,6 +19,8 @@ export const RESPAN_SPAN_TOOLS = RespanSpanAttributes.RESPAN_SPAN_TOOLS;
 export const RESPAN_SPAN_TOOL_CALLS = RespanSpanAttributes.RESPAN_SPAN_TOOL_CALLS;
 export const RESPAN_METADATA_AGENT_NAME = RespanSpanAttributes.RESPAN_METADATA_AGENT_NAME;
 export const RESPAN_METADATA_PREFIX = RespanSpanAttributes.RESPAN_METADATA;
+export const RESPAN_INTERNAL_SPAN_NAME_KIND = RespanSpanAttributes.RESPAN_INTERNAL_SPAN_NAME_KIND;
+export const RESPAN_INTERNAL_SPAN_NAME_DETAIL = RespanSpanAttributes.RESPAN_INTERNAL_SPAN_NAME_DETAIL;
 
 export const TL_SPAN_KIND = "traceloop.span.kind";
 export const TL_ENTITY_INPUT = "traceloop.entity.input";
@@ -69,6 +71,99 @@ export function setDefault(attrs: SpanAttributes, key: string, value: any): void
   if (attrs[key] === undefined && value !== undefined && value !== null) {
     attrs[key] = value;
   }
+}
+
+export function setSemanticSpanNameHint(
+  attrs: SpanAttributes,
+  kind: string,
+  detail: string
+): void {
+  setDefault(attrs, RESPAN_INTERNAL_SPAN_NAME_KIND, kind);
+  setDefault(attrs, RESPAN_INTERNAL_SPAN_NAME_DETAIL, detail);
+}
+
+export function resolveSemanticSpanNameHint(
+  name: string,
+  attrs: SpanAttributes,
+  logType: string
+): { kind: string; detail: string } {
+  if (logType === RespanLogType.TOOL) {
+    return {
+      kind: "tool",
+      detail: stringOrFallback(attrs[AI_TOOL_CALL_NAME], lastSegment(name)),
+    };
+  }
+
+  if (logType === RespanLogType.AGENT) {
+    return {
+      kind: "agent",
+      detail: stringOrFallback(attrs["ai.agent.name"] ?? attrs[AI_AGENT_ID], lastSegment(name)),
+    };
+  }
+
+  if (logType === RespanLogType.WORKFLOW) {
+    return {
+      kind: "workflow",
+      detail: stringOrFallback(attrs[AI_WORKFLOW_ID], lastSegment(name)),
+    };
+  }
+
+  const explicit = VERCEL_SEMANTIC_SPAN_NAMES[name];
+  if (explicit) {
+    return explicit;
+  }
+
+  const operationId = attrs[AI_OPERATION_ID]?.toString();
+  if (operationId && VERCEL_SEMANTIC_SPAN_NAMES[operationId]) {
+    return VERCEL_SEMANTIC_SPAN_NAMES[operationId];
+  }
+
+  if (logType === RespanLogType.EMBEDDING) {
+    return { kind: "embed", detail: lastSegment(name) };
+  }
+
+  if (logType === RespanLogType.TRANSCRIPTION) {
+    return { kind: "transcribe", detail: lastSegment(name) };
+  }
+
+  if (logType === RespanLogType.SPEECH) {
+    return { kind: "speech", detail: lastSegment(name) };
+  }
+
+  if (name.startsWith("ai.stream")) {
+    return { kind: "stream", detail: lastSegment(name) };
+  }
+
+  if (name.startsWith("ai.")) {
+    return { kind: "generate", detail: lastSegment(name) };
+  }
+
+  return { kind: logType || "span", detail: lastSegment(name) };
+}
+const VERCEL_SEMANTIC_SPAN_NAMES: Record<string, { kind: string; detail: string }> = {
+  "ai.generateText": { kind: "generate", detail: "generateText" },
+  "ai.generateText.doGenerate": { kind: "generate", detail: "doGenerate" },
+  "ai.streamText": { kind: "stream", detail: "streamText" },
+  "ai.streamText.doStream": { kind: "stream", detail: "doStream" },
+  "ai.generateObject": { kind: "generate", detail: "generateObject" },
+  "ai.generateObject.doGenerate": { kind: "generate", detail: "doGenerate" },
+  "ai.streamObject": { kind: "stream", detail: "streamObject" },
+  "ai.streamObject.doStream": { kind: "stream", detail: "doStream" },
+  "ai.embed": { kind: "embed", detail: "embed" },
+  "ai.embed.doEmbed": { kind: "embed", detail: "doEmbed" },
+  "ai.embedMany": { kind: "embed", detail: "embedMany" },
+  "ai.embedMany.doEmbed": { kind: "embed", detail: "doEmbed" },
+  "ai.toolCall": { kind: "tool", detail: "toolCall" },
+};
+
+function lastSegment(name: string): string {
+  const parts = name.split(".");
+  return parts[parts.length - 1] || name;
+}
+
+function stringOrFallback(value: unknown, fallback: string): string {
+  if (value === undefined || value === null || value === "") return fallback;
+  return String(value);
 }
 
 export function safeJsonStr(value: unknown): string {
