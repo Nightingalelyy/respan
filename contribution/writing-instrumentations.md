@@ -149,6 +149,102 @@ Examples of keys that stay inside the instrumentation package:
 - Vercel AI SDK `ai.*` raw attribute keys
 - n8n / Langflow / vendor-specific event payload keys
 
+## Semantic Span Name Prefixes
+
+Respan supports a semantic span-name style for integrations that want a
+consistent trace tree across SDKs. The exported name format is:
+
+```text
+<operation>.<detail>
+```
+
+Examples:
+
+- `generate.doGenerate`
+- `agent.triage-service`
+- `tool.send_notification`
+- `handoff.triage_to_identity`
+- `guardrail.content_safety`
+
+This is a naming rule only. Do not change log-type, span-kind, input/output,
+or metadata mapping just to make the name look right. A chat span should still
+be exported as a chat log type even when its semantic span name is
+`generate.chat`.
+
+### Prefix Rules
+
+Use the operation prefix to describe the span's function, not the vendor,
+package, product, or brand. Put stable details in the suffix.
+
+Recommended operation prefixes:
+
+- `workflow.<name>` for workflow/root spans
+- `agent.<name>` for agent execution spans
+- `task.<name>` for generic task spans
+- `generate.<operation>` for LLM chat/text/response/generation calls
+- `stream.<operation>` for streamed generation calls when the SDK exposes them
+- `embed.<operation>` for embedding calls
+- `transcribe.<operation>` for transcription calls
+- `speech.<operation>` for speech-generation calls
+- `tool.<name>` for tool/function-tool execution
+- `function.<name>` for non-tool function spans
+- `handoff.<from>_to_<to>` for agent handoffs
+- `guardrail.<name>` for guardrail checks
+- `span.<name>` only as a fallback when no better operation exists
+
+Suffixes should be stable, human-readable identifiers such as SDK operation
+names, agent names, tool names, or guardrail names. Do not put prompt text,
+user input, full URLs, request IDs, customer IDs, secrets, timestamps, or other
+high-cardinality values in `span.name`.
+
+The span-name transformer sanitizes whitespace and unsupported punctuation, but
+instrumentations should still provide concise suffixes up front.
+
+### Import And Hint Rules
+
+Prefer existing semantic attributes before adding Respan-specific naming hints:
+
+1. Set `traceloop.span.kind` and `traceloop.entity.name` from
+   `@traceloop/ai-semantic-conventions` when they accurately describe the span.
+2. Set `RespanSpanAttributes.RESPAN_LOG_TYPE` with `RespanLogType` from
+   `@respan/respan-sdk` for backend classification.
+3. Add semantic span-name hints only when the desired prefix/detail cannot be
+   derived from the normal span kind, entity name, log type, or raw SDK span
+   name.
+
+When hints are needed, import the keys from `@respan/respan-sdk`:
+
+```ts
+import {
+  RespanLogType,
+  RespanSpanAttributes,
+} from "@respan/respan-sdk";
+
+attrs[RespanSpanAttributes.RESPAN_LOG_TYPE] = RespanLogType.TOOL;
+attrs[RespanSpanAttributes.RESPAN_INTERNAL_SPAN_NAME_KIND] = "tool";
+attrs[RespanSpanAttributes.RESPAN_INTERNAL_SPAN_NAME_DETAIL] = toolName;
+```
+
+Rules:
+
+- Do not hard-code `respan.internal.span_name.kind` or
+  `respan.internal.span_name.detail` string literals in instrumentation code.
+- Do not use a brand or package prefix such as `respan.*`, `openai.*`, or
+  `vercel.*` for semantic span names.
+- Do not duplicate the internal hint constants locally. Import them from
+  `RespanSpanAttributes`.
+- Treat `RESPAN_INTERNAL_SPAN_NAME_KIND` and
+  `RESPAN_INTERNAL_SPAN_NAME_DETAIL` as exporter hints only. They must not
+  appear in exported customer-visible span attributes; `respan-tracing` strips
+  them before export.
+- Keep hints close to the translator/emitter code that knows the SDK event
+  shape. Do not promote SDK-specific name maps into `respan-sdk`.
+- Preserve legacy behavior. Semantic renaming must only apply when users set
+  `spanNameStyle: "semantic"` or `RESPAN_SPAN_NAME_STYLE=semantic`; the legacy
+  style preserves the original instrumentation span names.
+- Add focused tests for both semantic and legacy behavior when an
+  instrumentation sets span-name hints.
+
 ## JavaScript Guidance
 
 JS instrumentation packages should generally:

@@ -33,6 +33,10 @@ export enum RespanSpanAttributes {
     // Processor routing (used by decorators to target specific processors)
     RESPAN_PROCESSORS = "respan.processors",
 
+    // Internal runtime hints. These are stripped before export.
+    RESPAN_INTERNAL_SPAN_NAME_KIND = "respan.internal.span_name.kind",
+    RESPAN_INTERNAL_SPAN_NAME_DETAIL = "respan.internal.span_name.detail",
+
     // Logging
     RESPAN_LOG_METHOD = "respan.entity.log_method",
     RESPAN_LOG_TYPE = "respan.entity.log_type",
@@ -85,6 +89,8 @@ export const RESPAN_SPAN_ATTRIBUTES_MAP: { [key: string]: string } = {
     prompt: RespanSpanAttributes.RESPAN_PROMPT,
     environment: RespanSpanAttributes.RESPAN_ENVIRONMENT,
 };
+
+export type RespanSpanNameStyle = "legacy" | "semantic";
 
 // Type for valid span attribute values
 export type SpanAttributeValue = string | number | boolean | Array<string | number | boolean>;

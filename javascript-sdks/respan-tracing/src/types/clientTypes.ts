@@ -1,5 +1,6 @@
 import { SpanExporter, SpanProcessor } from "@opentelemetry/sdk-trace-base";
 import { TextMapPropagator, ContextManager } from "@opentelemetry/api";
+import type { RespanSpanNameStyle } from "@respan/respan-sdk";
 
 /**
  * Available instrumentation names for consistent camelCase naming.
@@ -115,6 +116,14 @@ export interface RespanOptions {
      * Defaults to true.
      */
     tracingEnabled?: boolean;
+
+    /**
+     * Controls exported span.name formatting.
+     * - legacy: preserve instrumentation span names
+     * - semantic: use operation-prefixed names like agent.triage or generate.doGenerate
+     * Defaults to legacy. Can also be set with RESPAN_SPAN_NAME_STYLE=semantic.
+     */
+    spanNameStyle?: RespanSpanNameStyle;
 
     /**
      * Additional resource attributes to attach to all spans. Optional.

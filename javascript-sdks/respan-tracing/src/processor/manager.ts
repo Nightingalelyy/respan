@@ -5,7 +5,14 @@ import {
   SpanExporter,
   BatchSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
-import { RespanSpanAttributes } from "@respan/respan-sdk";
+import {
+  RespanSpanAttributes,
+  type RespanSpanNameStyle,
+} from "@respan/respan-sdk";
+import {
+  resolveSpanNameStyle,
+  SpanNameTransformingExporter,
+} from "./spanName.js";
 
 /**
  * Configuration for a processor
@@ -52,13 +59,22 @@ export class MultiProcessorManager implements SpanProcessor {
     processor: SpanProcessor;
     config: ProcessorConfig;
   }> = [];
+  private readonly spanNameStyle: RespanSpanNameStyle;
+
+  constructor(options: { spanNameStyle?: RespanSpanNameStyle | string } = {}) {
+    this.spanNameStyle = resolveSpanNameStyle(options.spanNameStyle);
+  }
 
   /**
    * Add a new processor with routing configuration
    * @param config - Processor configuration
    */
   addProcessor(config: ProcessorConfig): void {
-    const processor = new BatchSpanProcessor(config.exporter);
+    const exporter = new SpanNameTransformingExporter(
+      config.exporter,
+      this.spanNameStyle
+    );
+    const processor = new BatchSpanProcessor(exporter);
     
     // Insert in priority order (higher priority first)
     const priority = config.priority ?? 0;

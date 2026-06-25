@@ -1,0 +1,8 @@
+{
+  "summary": "Add opt-in semantic span-name formatting for shared TypeScript tracing packages",
+  "packages": {
+    "@respan/respan-sdk": "minor",
+    "@respan/tracing": "minor",
+    "@respan/respan": "minor"
+  }
+}

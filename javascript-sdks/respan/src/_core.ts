@@ -1,6 +1,6 @@
 import { RespanTelemetry, propagateAttributes, buildReadableSpan, injectSpan, ensureSpanId } from "@respan/tracing";
 import { RespanSpanAttributes, RespanLogType } from "@respan/respan-sdk";
-import type { RespanParams } from "@respan/respan-sdk";
+import type { RespanParams, RespanSpanNameStyle } from "@respan/respan-sdk";
 import type { ProcessorConfig } from "@respan/tracing";
 import type { RespanInstrumentation } from "./_types.js";
 
@@ -13,6 +13,7 @@ export interface RespanOptions {
   traceContent?: boolean;
   logLevel?: "debug" | "info" | "warn" | "error";
   silenceInitializationMessage?: boolean;
+  spanNameStyle?: RespanSpanNameStyle;
 }
 
 /**
@@ -76,6 +77,7 @@ export class Respan {
       logLevel: options.logLevel,
       disabledInstrumentations,
       silenceInitializationMessage: options.silenceInitializationMessage,
+      spanNameStyle: options.spanNameStyle,
     });
   }
 
