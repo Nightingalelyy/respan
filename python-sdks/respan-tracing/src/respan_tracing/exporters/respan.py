@@ -58,12 +58,30 @@ from respan_sdk.constants.otlp_constants import (
 
 from opentelemetry.semconv_ai import SpanAttributes, LLMRequestTypeValues
 
-from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT
+from respan_sdk.constants.llm_logging import (
+    LOG_TYPE_AGENT,
+    LOG_TYPE_CHAT,
+    LOG_TYPE_COMPLETION,
+    LOG_TYPE_EMBEDDING,
+    LOG_TYPE_FUNCTION,
+    LOG_TYPE_GENERATION,
+    LOG_TYPE_GUARDRAIL,
+    LOG_TYPE_HANDOFF,
+    LOG_TYPE_RESPONSE,
+    LOG_TYPE_TASK,
+    LOG_TYPE_TEXT,
+    LOG_TYPE_TOOL,
+    LOG_TYPE_WORKFLOW,
+)
 from respan_sdk.constants.span_attributes import (
+    GEN_AI_AGENT_NAME,
+    GEN_AI_OPERATION_NAME,
     GEN_AI_SYSTEM,
+    GEN_AI_TOOL_NAME,
     LLM_REQUEST_MODEL,
     LLM_REQUEST_TYPE,
     RESPAN_LOG_TYPE,
+    RESPAN_METADATA_GUARDRAIL_NAME,
     RESPAN_METADATA_INTERNAL_TRACING_SDK_VERSION,
     RESPAN_SPAN_TOOL_CALLS,
     RESPAN_SPAN_TOOLS,
@@ -323,6 +341,232 @@ _STRIPPED_ATTRIBUTES = frozenset({
     RESPAN_SPAN_TOOL_CALLS,
     RESPAN_SPAN_TOOLS,
 })
+
+_SPAN_NAME_PREFIXES = frozenset({
+    LOG_TYPE_AGENT,
+    LOG_TYPE_CHAT,
+    LOG_TYPE_EMBEDDING,
+    LOG_TYPE_GUARDRAIL,
+    LOG_TYPE_HANDOFF,
+    LOG_TYPE_TASK,
+    LOG_TYPE_TEXT,
+    LOG_TYPE_TOOL,
+    LOG_TYPE_WORKFLOW,
+    "generate",
+})
+_LOG_TYPE_TO_SPAN_NAME_PREFIX = {
+    LOG_TYPE_AGENT: LOG_TYPE_AGENT,
+    LOG_TYPE_CHAT: LOG_TYPE_CHAT,
+    LOG_TYPE_COMPLETION: LOG_TYPE_TEXT,
+    LOG_TYPE_EMBEDDING: LOG_TYPE_EMBEDDING,
+    LOG_TYPE_FUNCTION: LOG_TYPE_TOOL,
+    LOG_TYPE_GENERATION: "generate",
+    LOG_TYPE_GUARDRAIL: LOG_TYPE_GUARDRAIL,
+    LOG_TYPE_HANDOFF: LOG_TYPE_HANDOFF,
+    LOG_TYPE_RESPONSE: LOG_TYPE_CHAT,
+    LOG_TYPE_TASK: LOG_TYPE_TASK,
+    LOG_TYPE_TEXT: LOG_TYPE_TEXT,
+    LOG_TYPE_TOOL: LOG_TYPE_TOOL,
+    LOG_TYPE_WORKFLOW: LOG_TYPE_WORKFLOW,
+}
+_REQUEST_TYPE_TO_SPAN_NAME_PREFIX = {
+    "chat": LOG_TYPE_CHAT,
+    "completion": LOG_TYPE_TEXT,
+    "embedding": LOG_TYPE_EMBEDDING,
+}
+_ENTITY_DETAIL_ATTRS_BY_PREFIX = {
+    LOG_TYPE_AGENT: (GEN_AI_AGENT_NAME, SpanAttributes.TRACELOOP_ENTITY_NAME),
+    LOG_TYPE_GUARDRAIL: (
+        RESPAN_METADATA_GUARDRAIL_NAME,
+        SpanAttributes.TRACELOOP_ENTITY_NAME,
+    ),
+    LOG_TYPE_HANDOFF: (SpanAttributes.TRACELOOP_ENTITY_NAME,),
+    LOG_TYPE_TASK: (SpanAttributes.TRACELOOP_ENTITY_NAME, GEN_AI_OPERATION_NAME),
+    LOG_TYPE_TOOL: (
+        GEN_AI_TOOL_NAME,
+        SpanAttributes.TRACELOOP_ENTITY_NAME,
+        GEN_AI_OPERATION_NAME,
+    ),
+    LOG_TYPE_WORKFLOW: (SpanAttributes.TRACELOOP_ENTITY_NAME,),
+}
+_LLM_DETAIL_ATTRS = (
+    SpanAttributes.TRACELOOP_ENTITY_NAME,
+    LLM_REQUEST_MODEL,
+    "model",
+    GEN_AI_SYSTEM,
+    GEN_AI_OPERATION_NAME,
+)
+_CHAT_NAME_MARKERS = ("chat", "response", "responses")
+_GENERATION_NAME_MARKERS = ("generate", "generation", "completion")
+_EMBEDDING_NAME_MARKERS = ("embedding", "embeddings", "embed")
+
+
+def _clean_span_name_part(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _first_present_attr(attrs: Mapping[str, Any], keys: Sequence[str]) -> Optional[str]:
+    for key in keys:
+        value = _clean_span_name_part(attrs.get(key))
+        if value:
+            return value
+    return None
+
+
+def _has_span_name_prefix(name: str, prefix: str) -> bool:
+    return name == prefix or name.startswith(f"{prefix}.")
+
+
+def _strip_token_from_span_name(name: str, tokens: Sequence[str]) -> Optional[str]:
+    normalized = name.strip()
+    lower_name = normalized.lower()
+
+    for token in tokens:
+        lower_token = token.lower()
+        dotted_prefix = f"{lower_token}."
+        if lower_name.startswith(dotted_prefix):
+            return normalized[len(dotted_prefix):].strip() or None
+
+        spaced_prefix = f"{lower_token} "
+        if lower_name.startswith(spaced_prefix):
+            return normalized[len(spaced_prefix):].strip() or None
+
+        dotted_suffix = f".{lower_token}"
+        if lower_name.endswith(dotted_suffix):
+            return normalized[: -len(dotted_suffix)].strip() or None
+
+        spaced_suffix = f" {lower_token}"
+        if lower_name.endswith(spaced_suffix):
+            return normalized[: -len(spaced_suffix)].strip() or None
+
+    return None
+
+
+def _span_name_looks_like_chat(name: str, attrs: Mapping[str, Any]) -> bool:
+    request_type = _clean_span_name_part(attrs.get(LLM_REQUEST_TYPE))
+    if request_type and request_type.lower() == "chat":
+        return True
+
+    operation_name = _clean_span_name_part(attrs.get(GEN_AI_OPERATION_NAME))
+    if operation_name and operation_name.lower() in _CHAT_NAME_MARKERS:
+        return True
+
+    if attrs.get(GEN_AI_SYSTEM):
+        return True
+
+    lower_name = name.lower()
+    return any(marker in lower_name for marker in _CHAT_NAME_MARKERS)
+
+
+def _infer_span_name_prefix(name: str, attrs: Mapping[str, Any]) -> Optional[str]:
+    log_type = _clean_span_name_part(attrs.get(RESPAN_LOG_TYPE))
+    if log_type:
+        prefix = _LOG_TYPE_TO_SPAN_NAME_PREFIX.get(log_type.lower())
+        if prefix == "generate" and _span_name_looks_like_chat(name, attrs):
+            return LOG_TYPE_CHAT
+        if prefix:
+            return prefix
+
+    span_kind = _clean_span_name_part(attrs.get(SpanAttributes.TRACELOOP_SPAN_KIND))
+    if span_kind:
+        prefix = _LOG_TYPE_TO_SPAN_NAME_PREFIX.get(span_kind.lower())
+        if prefix:
+            return prefix
+
+    request_type = _clean_span_name_part(attrs.get(LLM_REQUEST_TYPE))
+    if request_type:
+        prefix = _REQUEST_TYPE_TO_SPAN_NAME_PREFIX.get(request_type.lower())
+        if prefix:
+            return prefix
+
+    operation_name = _clean_span_name_part(attrs.get(GEN_AI_OPERATION_NAME))
+    if operation_name:
+        lower_operation = operation_name.lower()
+        if any(marker in lower_operation for marker in _EMBEDDING_NAME_MARKERS):
+            return LOG_TYPE_EMBEDDING
+        if any(marker in lower_operation for marker in _CHAT_NAME_MARKERS):
+            return LOG_TYPE_CHAT
+        if any(marker in lower_operation for marker in _GENERATION_NAME_MARKERS):
+            return "generate"
+
+    if attrs.get(GEN_AI_SYSTEM):
+        return LOG_TYPE_CHAT
+
+    lower_name = name.lower()
+    for prefix in _SPAN_NAME_PREFIXES:
+        if lower_name.startswith(f"{prefix} ") or lower_name.endswith(f".{prefix}"):
+            return prefix
+        if lower_name.endswith(f" {prefix}"):
+            return prefix
+
+    if any(marker in lower_name for marker in _EMBEDDING_NAME_MARKERS):
+        return LOG_TYPE_EMBEDDING
+    if any(marker in lower_name for marker in _CHAT_NAME_MARKERS):
+        return LOG_TYPE_CHAT
+    if any(marker in lower_name for marker in _GENERATION_NAME_MARKERS):
+        return "generate"
+
+    return None
+
+
+def _detail_tokens_for_prefix(prefix: str) -> Sequence[str]:
+    if prefix == LOG_TYPE_CHAT:
+        return (LOG_TYPE_CHAT, LOG_TYPE_RESPONSE, "responses", LOG_TYPE_GENERATION)
+    if prefix == LOG_TYPE_TEXT:
+        return (LOG_TYPE_TEXT, LOG_TYPE_COMPLETION, "completion")
+    if prefix == "generate":
+        return ("generate", LOG_TYPE_GENERATION, LOG_TYPE_COMPLETION)
+    if prefix == LOG_TYPE_EMBEDDING:
+        return (LOG_TYPE_EMBEDDING, "embeddings", "embed")
+    return (prefix,)
+
+
+def _span_name_detail(prefix: str, name: str, attrs: Mapping[str, Any]) -> Optional[str]:
+    attr_detail = _first_present_attr(
+        attrs,
+        _ENTITY_DETAIL_ATTRS_BY_PREFIX.get(prefix, ()),
+    )
+    if attr_detail:
+        return attr_detail
+
+    stripped_detail = _strip_token_from_span_name(
+        name,
+        _detail_tokens_for_prefix(prefix),
+    )
+    if stripped_detail:
+        return stripped_detail
+
+    if prefix in {LOG_TYPE_CHAT, LOG_TYPE_EMBEDDING, LOG_TYPE_TEXT, "generate"}:
+        llm_detail = _first_present_attr(attrs, _LLM_DETAIL_ATTRS)
+        if llm_detail:
+            return llm_detail
+
+    return _clean_span_name_part(name)
+
+
+def _export_span_name(span: ReadableSpan) -> str:
+    original_name = _clean_span_name_part(getattr(span, "name", None))
+    if not original_name:
+        return getattr(span, "name", "")
+
+    for prefix in _SPAN_NAME_PREFIXES:
+        if _has_span_name_prefix(original_name, prefix):
+            return original_name
+
+    attrs = span.attributes or {}
+    prefix = _infer_span_name_prefix(original_name, attrs)
+    if not prefix:
+        return original_name
+
+    detail = _span_name_detail(prefix, original_name, attrs)
+    if not detail:
+        return original_name
+    if _has_span_name_prefix(detail, prefix):
+        return detail
+    return f"{prefix}.{detail}"
 
 
 def _parse_structured_json_attr(value: Any) -> Any:
@@ -607,7 +851,7 @@ def _span_to_otlp_json(span: ReadableSpan) -> Dict[str, Any]:
     result = {
         OTLP_TRACE_ID_KEY: trace_id,
         OTLP_SPAN_ID_KEY: span_id,
-        OTLP_NAME_KEY: span.name,
+        OTLP_NAME_KEY: _export_span_name(span),
         OTLP_KIND_KEY: kind_value,
         OTLP_START_TIME_KEY: start_time_ns,
         OTLP_END_TIME_KEY: end_time_ns,

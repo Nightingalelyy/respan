@@ -1,0 +1,6 @@
+{
+  "summary": "Prefix Python exported span names by semantic span role",
+  "packages": {
+    "respan-tracing": "patch"
+  }
+}
