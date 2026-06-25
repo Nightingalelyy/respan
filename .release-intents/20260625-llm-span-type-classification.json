@@ -1,0 +1,7 @@
+{
+  "summary": "Fix LLM response span classification for Vercel AI SDK and Pydantic AI instrumentations",
+  "packages": {
+    "@respan/instrumentation-vercel": "patch",
+    "respan-instrumentation-pydantic-ai": "patch"
+  }
+}
