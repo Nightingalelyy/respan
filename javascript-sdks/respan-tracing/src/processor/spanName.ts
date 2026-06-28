@@ -20,6 +20,12 @@ const INTERNAL_SPAN_NAME_ATTRS = [
   INTERNAL_DETAIL_ATTR,
 ] as const;
 
+const SUFFIXED_OPERATIONS = new Set(["agent", "tool", "handoff"]);
+
+function formatOperationName(operation: string): string {
+  return operation.toUpperCase();
+}
+
 export function resolveSpanNameStyle(
   value?: RespanSpanNameStyle | string
 ): RespanSpanNameStyle {
@@ -50,11 +56,16 @@ export function semanticSpanNameForSpan(span: ReadableSpan): string {
   const hasInternalHint =
     attrs[INTERNAL_KIND_ATTR] !== undefined || attrs[INTERNAL_DETAIL_ATTR] !== undefined;
 
-  if (!hasInternalHint && span.name.startsWith(`${operation}.`)) {
+  const prefix = formatOperationName(operation);
+  if (!SUFFIXED_OPERATIONS.has(operation)) {
+    return prefix;
+  }
+
+  if (!hasInternalHint && span.name.startsWith(`${prefix}.`)) {
     return span.name;
   }
 
-  return `${operation}.${detail}`;
+  return `${prefix}.${detail}`;
 }
 
 export class SpanNameTransformingExporter implements SpanExporter {
@@ -193,8 +204,9 @@ function mapOperation(value: string): string {
     case RespanLogType.TEXT:
     case RespanLogType.RESPONSE:
     case RespanLogType.GENERATION:
+    case "generate":
     case "llm":
-      return "generate";
+      return "llm";
     case RespanLogType.CUSTOM:
     case RespanLogType.UNKNOWN:
       return "span";
@@ -204,10 +216,10 @@ function mapOperation(value: string): string {
 }
 
 function inferOperationFromName(spanName: string): string {
-  if (spanName.startsWith("ai.stream")) return "stream";
+  if (spanName.startsWith("ai.stream")) return "llm";
   if (spanName.startsWith("ai.embed")) return "embed";
   if (spanName.startsWith("ai.generate") || spanName.startsWith("ai.")) {
-    return "generate";
+    return "llm";
   }
 
   const suffix = spanName.split(".").at(-1);
@@ -229,6 +241,15 @@ function detailFromRawName(spanName: string, operation: string): string {
 
   if (spanName.startsWith(`${operation}.`)) {
     return spanName.slice(operation.length + 1);
+  }
+
+  if (operation === "llm") {
+    const parts = spanName.split(".").filter(Boolean);
+    const suffix = parts.at(-1)?.toLowerCase();
+    if (["chat", "generation", "completion", "response", "text", "llm"].includes(suffix ?? "")) {
+      return parts.slice(0, -1).join(".") || spanName;
+    }
+    return parts.at(-1) ?? spanName;
   }
 
   if (operation === "handoff") {

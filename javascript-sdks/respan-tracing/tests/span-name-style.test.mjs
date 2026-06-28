@@ -21,7 +21,7 @@ test("semantic span names use operation prefix and entity detail", () => {
         "traceloop.entity.name": "triage-service",
       })
     ),
-    "agent.triage-service"
+    "AGENT.triage-service"
   );
 
   assert.equal(
@@ -31,7 +31,7 @@ test("semantic span names use operation prefix and entity detail", () => {
         "traceloop.entity.name": "send_notification",
       })
     ),
-    "tool.send_notification"
+    "TOOL.send_notification"
   );
 });
 
@@ -45,10 +45,29 @@ test("semantic span names use integration hints and strip internal attrs", () =>
     "semantic"
   );
 
-  assert.equal(transformed.name, "generate.doGenerate");
+  assert.equal(transformed.name, "LLM");
   assert.equal(transformed.attributes["respan.internal.span_name.kind"], undefined);
   assert.equal(transformed.attributes["respan.internal.span_name.detail"], undefined);
   assert.equal(transformed.attributes["respan.entity.log_type"], "text");
+});
+test("semantic span names collapse LLM-like log types to capital LLM", () => {
+  assert.equal(
+    semanticSpanNameForSpan(
+      span("openai.chat", {
+        "respan.entity.log_type": "chat",
+      })
+    ),
+    "LLM"
+  );
+
+  assert.equal(
+    semanticSpanNameForSpan(
+      span("anthropic.generation", {
+        "respan.entity.log_type": "generation",
+      })
+    ),
+    "LLM"
+  );
 });
 
 test("legacy span names only strip internal semantic hint attrs", () => {
@@ -78,7 +97,7 @@ test("semantic span names let integration hints override generic operation-prefi
     "semantic"
   );
 
-  assert.equal(transformed.name, "handoff.triage-service_to_bank-service");
+  assert.equal(transformed.name, "HANDOFF.triage-service_to_bank-service");
   assert.equal(transformed.attributes["respan.internal.span_name.kind"], undefined);
   assert.equal(transformed.attributes["respan.internal.span_name.detail"], undefined);
 });

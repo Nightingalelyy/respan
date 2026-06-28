@@ -1,0 +1,7 @@
+{
+  "summary": "Normalize JavaScript core semantic span names",
+  "packages": {
+    "@respan/respan-sdk": "patch",
+    "@respan/tracing": "patch"
+  }
+}
