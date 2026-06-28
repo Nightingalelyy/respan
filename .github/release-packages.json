@@ -290,6 +290,12 @@
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-together",
+      "path": "python-sdks/instrumentations/respan-instrumentation-together",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-groq",
       "path": "python-sdks/instrumentations/respan-instrumentation-groq",
       "registry": "pypi"
