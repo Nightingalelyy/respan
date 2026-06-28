@@ -1,5 +1,5 @@
 {
-  "summary": "Prefix Python exported span names by semantic span role",
+  "summary": "Normalize Python exported span names to uppercase semantic roles",
   "packages": {
     "respan-tracing": "patch"
   }

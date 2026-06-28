@@ -342,36 +342,53 @@ _STRIPPED_ATTRIBUTES = frozenset({
     RESPAN_SPAN_TOOLS,
 })
 
+_LLM_SPAN_NAME_PREFIX = "llm"
 _SPAN_NAME_PREFIXES = frozenset({
     LOG_TYPE_AGENT,
-    LOG_TYPE_CHAT,
     LOG_TYPE_EMBEDDING,
     LOG_TYPE_GUARDRAIL,
     LOG_TYPE_HANDOFF,
+    _LLM_SPAN_NAME_PREFIX,
     LOG_TYPE_TASK,
-    LOG_TYPE_TEXT,
     LOG_TYPE_TOOL,
     LOG_TYPE_WORKFLOW,
-    "generate",
+})
+_LEGACY_SPAN_NAME_PREFIX_ALIASES = {
+    LOG_TYPE_CHAT: _LLM_SPAN_NAME_PREFIX,
+    LOG_TYPE_COMPLETION: _LLM_SPAN_NAME_PREFIX,
+    "generate": _LLM_SPAN_NAME_PREFIX,
+    LOG_TYPE_GENERATION: _LLM_SPAN_NAME_PREFIX,
+    LOG_TYPE_RESPONSE: _LLM_SPAN_NAME_PREFIX,
+    "responses": _LLM_SPAN_NAME_PREFIX,
+    LOG_TYPE_TEXT: _LLM_SPAN_NAME_PREFIX,
+}
+_SPAN_NAME_PREFIX_ALIASES = {
+    **{prefix: prefix for prefix in _SPAN_NAME_PREFIXES},
+    **_LEGACY_SPAN_NAME_PREFIX_ALIASES,
+}
+_SUFFIXED_SPAN_NAME_PREFIXES = frozenset({
+    LOG_TYPE_AGENT,
+    LOG_TYPE_HANDOFF,
+    LOG_TYPE_TOOL,
 })
 _LOG_TYPE_TO_SPAN_NAME_PREFIX = {
     LOG_TYPE_AGENT: LOG_TYPE_AGENT,
-    LOG_TYPE_CHAT: LOG_TYPE_CHAT,
-    LOG_TYPE_COMPLETION: LOG_TYPE_TEXT,
+    LOG_TYPE_CHAT: _LLM_SPAN_NAME_PREFIX,
+    LOG_TYPE_COMPLETION: _LLM_SPAN_NAME_PREFIX,
     LOG_TYPE_EMBEDDING: LOG_TYPE_EMBEDDING,
     LOG_TYPE_FUNCTION: LOG_TYPE_TOOL,
-    LOG_TYPE_GENERATION: "generate",
+    LOG_TYPE_GENERATION: _LLM_SPAN_NAME_PREFIX,
     LOG_TYPE_GUARDRAIL: LOG_TYPE_GUARDRAIL,
     LOG_TYPE_HANDOFF: LOG_TYPE_HANDOFF,
-    LOG_TYPE_RESPONSE: LOG_TYPE_CHAT,
+    LOG_TYPE_RESPONSE: _LLM_SPAN_NAME_PREFIX,
     LOG_TYPE_TASK: LOG_TYPE_TASK,
-    LOG_TYPE_TEXT: LOG_TYPE_TEXT,
+    LOG_TYPE_TEXT: _LLM_SPAN_NAME_PREFIX,
     LOG_TYPE_TOOL: LOG_TYPE_TOOL,
     LOG_TYPE_WORKFLOW: LOG_TYPE_WORKFLOW,
 }
 _REQUEST_TYPE_TO_SPAN_NAME_PREFIX = {
-    "chat": LOG_TYPE_CHAT,
-    "completion": LOG_TYPE_TEXT,
+    "chat": _LLM_SPAN_NAME_PREFIX,
+    "completion": _LLM_SPAN_NAME_PREFIX,
     "embedding": LOG_TYPE_EMBEDDING,
 }
 _ENTITY_DETAIL_ATTRS_BY_PREFIX = {
@@ -416,8 +433,25 @@ def _first_present_attr(attrs: Mapping[str, Any], keys: Sequence[str]) -> Option
     return None
 
 
-def _has_span_name_prefix(name: str, prefix: str) -> bool:
-    return name == prefix or name.startswith(f"{prefix}.")
+def _display_span_name_prefix(prefix: str) -> str:
+    return prefix.upper()
+
+
+def _normalize_existing_semantic_span_name(name: str) -> Optional[str]:
+    lower_name = name.lower()
+    for candidate, prefix in _SPAN_NAME_PREFIX_ALIASES.items():
+        display_prefix = _display_span_name_prefix(prefix)
+        for candidate_name in (candidate, candidate.upper()):
+            candidate_lower = candidate_name.lower()
+            if lower_name == candidate_lower:
+                return display_prefix
+            dotted_prefix = f"{candidate_lower}."
+            if lower_name.startswith(dotted_prefix):
+                if prefix not in _SUFFIXED_SPAN_NAME_PREFIXES:
+                    return display_prefix
+                detail = name[len(candidate_name) + 1 :].strip()
+                return f"{display_prefix}.{detail}" if detail else display_prefix
+    return None
 
 
 def _strip_token_from_span_name(name: str, tokens: Sequence[str]) -> Optional[str]:
@@ -445,28 +479,10 @@ def _strip_token_from_span_name(name: str, tokens: Sequence[str]) -> Optional[st
     return None
 
 
-def _span_name_looks_like_chat(name: str, attrs: Mapping[str, Any]) -> bool:
-    request_type = _clean_span_name_part(attrs.get(LLM_REQUEST_TYPE))
-    if request_type and request_type.lower() == "chat":
-        return True
-
-    operation_name = _clean_span_name_part(attrs.get(GEN_AI_OPERATION_NAME))
-    if operation_name and operation_name.lower() in _CHAT_NAME_MARKERS:
-        return True
-
-    if attrs.get(GEN_AI_SYSTEM):
-        return True
-
-    lower_name = name.lower()
-    return any(marker in lower_name for marker in _CHAT_NAME_MARKERS)
-
-
 def _infer_span_name_prefix(name: str, attrs: Mapping[str, Any]) -> Optional[str]:
     log_type = _clean_span_name_part(attrs.get(RESPAN_LOG_TYPE))
     if log_type:
         prefix = _LOG_TYPE_TO_SPAN_NAME_PREFIX.get(log_type.lower())
-        if prefix == "generate" and _span_name_looks_like_chat(name, attrs):
-            return LOG_TYPE_CHAT
         if prefix:
             return prefix
 
@@ -488,37 +504,43 @@ def _infer_span_name_prefix(name: str, attrs: Mapping[str, Any]) -> Optional[str
         if any(marker in lower_operation for marker in _EMBEDDING_NAME_MARKERS):
             return LOG_TYPE_EMBEDDING
         if any(marker in lower_operation for marker in _CHAT_NAME_MARKERS):
-            return LOG_TYPE_CHAT
+            return _LLM_SPAN_NAME_PREFIX
         if any(marker in lower_operation for marker in _GENERATION_NAME_MARKERS):
-            return "generate"
+            return _LLM_SPAN_NAME_PREFIX
 
     if attrs.get(GEN_AI_SYSTEM):
-        return LOG_TYPE_CHAT
+        return _LLM_SPAN_NAME_PREFIX
 
     lower_name = name.lower()
-    for prefix in _SPAN_NAME_PREFIXES:
-        if lower_name.startswith(f"{prefix} ") or lower_name.endswith(f".{prefix}"):
+    for candidate, prefix in _SPAN_NAME_PREFIX_ALIASES.items():
+        if lower_name.startswith(f"{candidate} ") or lower_name.endswith(f".{candidate}"):
             return prefix
-        if lower_name.endswith(f" {prefix}"):
+        if lower_name.endswith(f" {candidate}"):
             return prefix
 
     if any(marker in lower_name for marker in _EMBEDDING_NAME_MARKERS):
         return LOG_TYPE_EMBEDDING
     if any(marker in lower_name for marker in _CHAT_NAME_MARKERS):
-        return LOG_TYPE_CHAT
+        return _LLM_SPAN_NAME_PREFIX
     if any(marker in lower_name for marker in _GENERATION_NAME_MARKERS):
-        return "generate"
+        return _LLM_SPAN_NAME_PREFIX
 
     return None
 
 
 def _detail_tokens_for_prefix(prefix: str) -> Sequence[str]:
-    if prefix == LOG_TYPE_CHAT:
-        return (LOG_TYPE_CHAT, LOG_TYPE_RESPONSE, "responses", LOG_TYPE_GENERATION)
-    if prefix == LOG_TYPE_TEXT:
-        return (LOG_TYPE_TEXT, LOG_TYPE_COMPLETION, "completion")
-    if prefix == "generate":
-        return ("generate", LOG_TYPE_GENERATION, LOG_TYPE_COMPLETION)
+    if prefix == _LLM_SPAN_NAME_PREFIX:
+        return (
+            _LLM_SPAN_NAME_PREFIX,
+            LOG_TYPE_CHAT,
+            LOG_TYPE_COMPLETION,
+            "completion",
+            "generate",
+            LOG_TYPE_GENERATION,
+            LOG_TYPE_RESPONSE,
+            "responses",
+            LOG_TYPE_TEXT,
+        )
     if prefix == LOG_TYPE_EMBEDDING:
         return (LOG_TYPE_EMBEDDING, "embeddings", "embed")
     return (prefix,)
@@ -539,7 +561,7 @@ def _span_name_detail(prefix: str, name: str, attrs: Mapping[str, Any]) -> Optio
     if stripped_detail:
         return stripped_detail
 
-    if prefix in {LOG_TYPE_CHAT, LOG_TYPE_EMBEDDING, LOG_TYPE_TEXT, "generate"}:
+    if prefix in {_LLM_SPAN_NAME_PREFIX, LOG_TYPE_EMBEDDING}:
         llm_detail = _first_present_attr(attrs, _LLM_DETAIL_ATTRS)
         if llm_detail:
             return llm_detail
@@ -552,21 +574,28 @@ def _export_span_name(span: ReadableSpan) -> str:
     if not original_name:
         return getattr(span, "name", "")
 
-    for prefix in _SPAN_NAME_PREFIXES:
-        if _has_span_name_prefix(original_name, prefix):
-            return original_name
+    existing_semantic_name = _normalize_existing_semantic_span_name(original_name)
+    if existing_semantic_name:
+        return existing_semantic_name
 
     attrs = span.attributes or {}
     prefix = _infer_span_name_prefix(original_name, attrs)
     if not prefix:
         return original_name
 
+    display_prefix = _display_span_name_prefix(prefix)
+    if prefix not in _SUFFIXED_SPAN_NAME_PREFIXES:
+        return display_prefix
+
     detail = _span_name_detail(prefix, original_name, attrs)
     if not detail:
-        return original_name
-    if _has_span_name_prefix(detail, prefix):
-        return detail
-    return f"{prefix}.{detail}"
+        return display_prefix
+
+    existing_detail_semantic_name = _normalize_existing_semantic_span_name(detail)
+    if existing_detail_semantic_name:
+        return existing_detail_semantic_name
+
+    return f"{display_prefix}.{detail}"
 
 
 def _parse_structured_json_attr(value: Any) -> Any:

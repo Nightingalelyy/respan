@@ -167,9 +167,9 @@ def test_span_to_otlp_json_prefixes_decorator_span_names():
     ]
 
     assert [_span_to_otlp_json(span)["name"] for span in spans] == [
-        "workflow.access-recovery",
-        "agent.triage-service",
-        "tool.send_notification",
+        "WORKFLOW",
+        "AGENT.triage-service",
+        "TOOL.send_notification",
     ]
 
 
@@ -199,12 +199,17 @@ def test_span_to_otlp_json_prefixes_llm_span_names():
                 LLM_REQUEST_MODEL: "text-embedding-3-small",
             },
         ),
+        _make_span(
+            name="text.gpt-4o-mini",
+            span_id=2204,
+        ),
     ]
 
     assert [_span_to_otlp_json(span)["name"] for span in spans] == [
-        "chat.gpt-4o",
-        "chat.anthropic",
-        "embedding.openai",
+        "LLM",
+        "LLM",
+        "EMBEDDING",
+        "LLM",
     ]
 
 
@@ -479,6 +484,6 @@ def test_export_keeps_tool_helper_spans_in_single_otlp_pipeline():
     ]
     assert len(otlp_spans) == 2
     assert [span["name"] for span in otlp_spans] == [
-        "chat.anthropic",
+        "LLM",
         "http.request",
     ]
