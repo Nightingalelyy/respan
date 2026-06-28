@@ -25,8 +25,11 @@ import {
 import {
   AI_AGENT_ID,
   AI_MODEL_ID,
+  AI_OPERATION_ID,
   AI_PREFIX,
   LLM_REQUEST_TYPE,
+  RESPAN_INTERNAL_SPAN_NAME_DETAIL,
+  RESPAN_INTERNAL_SPAN_NAME_KIND,
   RESPAN_LOG_TYPE,
   RESPAN_METADATA_AGENT_NAME,
   TL_SPAN_KIND,
@@ -44,6 +47,52 @@ import {
   setSemanticSpanNameHint,
 } from "./_translator/shared.js";
 import { enrichMetadata, enrichModel, enrichPerformanceMetrics, enrichTokens, stripRedundantAttrs } from "./_translator/span-enrichment.js";
+
+function setVercelSpanNameHint(
+  attrs: Record<string, any>,
+  name: string,
+  logType: string,
+  isLLM = false
+): void {
+  attrs[RESPAN_INTERNAL_SPAN_NAME_KIND] = semanticKindForLogType(logType, isLLM);
+  attrs[RESPAN_INTERNAL_SPAN_NAME_DETAIL] = semanticDetailForVercelSpan(attrs, name);
+}
+
+function semanticKindForLogType(logType: string, isLLM: boolean): string {
+  if (isLLM) return "llm";
+
+  switch (logType) {
+    case RespanLogType.CHAT:
+    case RespanLogType.TEXT:
+    case RespanLogType.RESPONSE:
+    case RespanLogType.GENERATION:
+      return "llm";
+    case RespanLogType.EMBEDDING:
+      return "embed";
+    case RespanLogType.FUNCTION:
+      return "function";
+    default:
+      return logType;
+  }
+}
+
+function semanticDetailForVercelSpan(attrs: Record<string, any>, name: string): string {
+  const toolName = attrs["ai.toolCall.name"];
+  if (toolName !== undefined && toolName !== null && String(toolName).trim()) {
+    return String(toolName);
+  }
+
+  const agentName = attrs["ai.agent.name"] ?? attrs[AI_AGENT_ID];
+  if (agentName !== undefined && agentName !== null && String(agentName).trim()) {
+    return String(agentName);
+  }
+
+  const operationId = attrs[AI_OPERATION_ID];
+  const source = operationId !== undefined && operationId !== null ? String(operationId) : name;
+  const parts = source.split(".").filter(Boolean);
+  return parts.at(-1) ?? source;
+}
+
 
 /**
  * SpanProcessor that translates Vercel AI SDK attributes to Traceloop/OpenLLMetry.
@@ -110,11 +159,13 @@ export class VercelAITranslator implements SpanProcessor {
 
     if (parentLogType !== undefined && !config) {
       setDefault(attrs, RESPAN_LOG_TYPE, logType);
+      setVercelSpanNameHint(attrs, name, logType);
       stripRedundantAttrs(attrs);
       return;
     }
 
     attrs[RESPAN_LOG_TYPE] = logType;
+    setVercelSpanNameHint(attrs, name, logType, config?.isLLM ?? false);
 
     if (config) {
       // Do NOT set traceloop.span.kind for auto-emitted Vercel SDK spans.

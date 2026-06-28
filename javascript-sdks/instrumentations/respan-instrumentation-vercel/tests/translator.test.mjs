@@ -39,7 +39,7 @@ test("ai.generateText.doGenerate is classified as LLM text, not task", () => {
   assert.equal(attrs["llm.request.type"], "chat");
   assert.equal(attrs["gen_ai.request.model"], "gpt-4o-mini");
   assert.equal(attrs["traceloop.span.kind"], undefined);
-  assert.equal(attrs["respan.internal.span_name.kind"], "generate");
+  assert.equal(attrs["respan.internal.span_name.kind"], "llm");
   assert.equal(attrs["respan.internal.span_name.detail"], "doGenerate");
 });
 
@@ -50,8 +50,26 @@ test("ai.streamText.doStream is classified as LLM text, not task", () => {
   assert.equal(attrs["llm.request.type"], "chat");
   assert.equal(attrs["gen_ai.request.model"], "gpt-4o-mini");
   assert.equal(attrs["traceloop.span.kind"], undefined);
-  assert.equal(attrs["respan.internal.span_name.kind"], "stream");
+  assert.equal(attrs["respan.internal.span_name.kind"], "llm");
   assert.equal(attrs["respan.internal.span_name.detail"], "doStream");
+});
+
+test("sets semantic span-name hints for Vercel AI SDK spans", () => {
+  const llmAttrs = runTranslator("ai.generateText.doGenerate", baseLLMSpan);
+  assert.equal(llmAttrs["respan.internal.span_name.kind"], "llm");
+  assert.equal(llmAttrs["respan.internal.span_name.detail"], "doGenerate");
+
+  const parentAttrs = runTranslator("ai.generateText", {
+    "ai.model.id": "gpt-4o-mini",
+  });
+  assert.equal(parentAttrs["respan.internal.span_name.kind"], "llm");
+  assert.equal(parentAttrs["respan.internal.span_name.detail"], "generateText");
+
+  const toolAttrs = runTranslator("ai.toolCall", {
+    "ai.toolCall.name": "lookup_weather",
+  });
+  assert.equal(toolAttrs["respan.internal.span_name.kind"], "tool");
+  assert.equal(toolAttrs["respan.internal.span_name.detail"], "lookup_weather");
 });
 
 test("ai.embed.doEmbed is classified as embedding without synthetic usage fields", () => {
