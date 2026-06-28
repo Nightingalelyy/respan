@@ -200,6 +200,12 @@
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-watsonx",
+      "path": "python-sdks/instrumentations/respan-instrumentation-watsonx",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-vertexai",
       "path": "python-sdks/instrumentations/respan-instrumentation-vertexai",
       "registry": "pypi"
