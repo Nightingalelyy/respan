@@ -19,6 +19,9 @@ export const RESPAN_SPAN_TOOLS = RespanSpanAttributes.RESPAN_SPAN_TOOLS;
 export const RESPAN_SPAN_TOOL_CALLS = RespanSpanAttributes.RESPAN_SPAN_TOOL_CALLS;
 export const RESPAN_METADATA_AGENT_NAME = RespanSpanAttributes.RESPAN_METADATA_AGENT_NAME;
 export const RESPAN_METADATA_PREFIX = RespanSpanAttributes.RESPAN_METADATA;
+export const RESPAN_INTERNAL_SPAN_NAME_KIND = RespanSpanAttributes.RESPAN_INTERNAL_SPAN_NAME_KIND;
+export const RESPAN_INTERNAL_SPAN_NAME_DETAIL = RespanSpanAttributes.RESPAN_INTERNAL_SPAN_NAME_DETAIL;
+export const RESPAN_INTERNAL_DROP_SPAN = RespanSpanAttributes.RESPAN_INTERNAL_DROP_SPAN;
 
 export const TL_SPAN_KIND = "traceloop.span.kind";
 export const TL_ENTITY_INPUT = "traceloop.entity.input";

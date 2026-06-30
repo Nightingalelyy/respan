@@ -54,6 +54,13 @@ export const VERCEL_SPAN_CONFIG: Record<string, VercelSpanConfig> = {
 
 // ── Parent wrapper spans (structural only, no LLM data) ─────────────────────
 
+export const VERCEL_STRUCTURAL_LLM_PARENT_SPANS = new Set([
+  "ai.generateText",
+  "ai.streamText",
+  "ai.generateObject",
+  "ai.streamObject",
+]);
+
 export const VERCEL_PARENT_SPANS: Record<string, string> = {
   "ai.generateText":   RespanLogType.TEXT,
   "ai.streamText":     RespanLogType.TEXT,

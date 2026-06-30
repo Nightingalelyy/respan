@@ -1,0 +1,6 @@
+{
+  "summary": "Patch semantic span-name hints for Vercel AI SDK instrumentation",
+  "packages": {
+    "@respan/instrumentation-vercel": "patch"
+  }
+}

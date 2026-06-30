@@ -32,12 +32,26 @@ const baseLLMSpan = {
   "traceloop.span.kind": "task",
 };
 
+
+test("ai.generateText parent wrapper is marked as internal structural span", () => {
+  const attrs = runTranslator("ai.generateText", {
+    "ai.prompt.messages": JSON.stringify([{ role: "user", content: "hi" }]),
+  });
+
+  assert.equal(attrs["respan.internal.drop_span"], true);
+  assert.equal(attrs["respan.entity.log_type"], undefined);
+  assert.equal(attrs["respan.internal.span_name.kind"], undefined);
+  assert.equal(attrs["respan.internal.span_name.detail"], undefined);
+});
+
 test("ai.generateText.doGenerate is classified as LLM text, not task", () => {
   const attrs = runTranslator("ai.generateText.doGenerate", baseLLMSpan);
 
   assert.equal(attrs["respan.entity.log_type"], "text");
   assert.equal(attrs["llm.request.type"], "chat");
   assert.equal(attrs["gen_ai.request.model"], "gpt-4o-mini");
+  assert.equal(attrs["respan.internal.span_name.kind"], "llm");
+  assert.equal(attrs["respan.internal.span_name.detail"], "gpt-4o-mini");
   assert.equal(attrs["traceloop.span.kind"], undefined);
 });
 
@@ -47,7 +61,28 @@ test("ai.streamText.doStream is classified as LLM text, not task", () => {
   assert.equal(attrs["respan.entity.log_type"], "text");
   assert.equal(attrs["llm.request.type"], "chat");
   assert.equal(attrs["gen_ai.request.model"], "gpt-4o-mini");
+  assert.equal(attrs["respan.internal.span_name.kind"], "llm");
+  assert.equal(attrs["respan.internal.span_name.detail"], "gpt-4o-mini");
   assert.equal(attrs["traceloop.span.kind"], undefined);
+});
+
+test("sets semantic span-name hints for Vercel AI SDK spans", () => {
+  const llmAttrs = runTranslator("ai.generateText.doGenerate", baseLLMSpan);
+  assert.equal(llmAttrs["respan.internal.span_name.kind"], "llm");
+  assert.equal(llmAttrs["respan.internal.span_name.detail"], "gpt-4o-mini");
+
+  const parentAttrs = runTranslator("ai.generateText", {
+    "ai.model.id": "gpt-4o-mini",
+  });
+  assert.equal(parentAttrs["respan.internal.drop_span"], true);
+  assert.equal(parentAttrs["respan.internal.span_name.kind"], undefined);
+  assert.equal(parentAttrs["respan.internal.span_name.detail"], undefined);
+
+  const toolAttrs = runTranslator("ai.toolCall", {
+    "ai.toolCall.name": "lookup_weather",
+  });
+  assert.equal(toolAttrs["respan.internal.span_name.kind"], "tool");
+  assert.equal(toolAttrs["respan.internal.span_name.detail"], "lookup_weather");
 });
 
 test("ai.embed.doEmbed is classified as embedding without synthetic usage fields", () => {
@@ -62,6 +97,8 @@ test("ai.embed.doEmbed is classified as embedding without synthetic usage fields
   assert.equal(attrs["respan.entity.log_type"], "embedding");
   assert.equal(attrs["llm.request.type"], "embedding");
   assert.equal(attrs["gen_ai.request.model"], "text-embedding-3-small");
+  assert.equal(attrs["respan.internal.span_name.kind"], "embedding");
+  assert.equal(attrs["respan.internal.span_name.detail"], undefined);
   assert.equal(attrs["gen_ai.usage.input_tokens"], undefined);
   assert.equal(attrs["gen_ai.usage.prompt_tokens"], undefined);
   assert.equal(attrs["llm.model_name"], undefined);
@@ -78,6 +115,8 @@ test("ai.embed.doEmbed is classified as embedding without synthetic usage fields
   assert.ok(attrs["traceloop.entity.input"]?.includes("embed this"));
   assert.ok(attrs["traceloop.entity.output"]?.includes("0.1"));
   assert.equal(attrs["ai.values"], undefined);
+  assert.equal(attrs["respan.internal.span_name.kind"], "embedding");
+  assert.equal(attrs["respan.internal.span_name.detail"], undefined);
 });
 
 test("LLM spans emit tool definitions and tool calls in canonical fields only", () => {
@@ -119,6 +158,9 @@ test("LLM spans emit tool definitions and tool calls in canonical fields only", 
       },
     },
   ];
+
+  assert.equal(attrs["respan.internal.span_name.kind"], "llm");
+  assert.equal(attrs["respan.internal.span_name.detail"], "gpt-4o");
 
   // Canonical fields only (per docs/SPAN_CONTRACT.md):
   assert.equal(JSON.parse(attrs["llm.request.functions"]).length, 1);
@@ -200,4 +242,6 @@ test("ai.toolCall spans carry input/output only — no tool_calls aliases", () =
   assert.equal(attrs.tool_calls, undefined);
   assert.equal(attrs["respan.span.tool_calls"], undefined);
   assert.equal(attrs.span_tools, undefined);
+  assert.equal(attrs["respan.internal.span_name.kind"], "tool");
+  assert.equal(attrs["respan.internal.span_name.detail"], "weather");
 });

@@ -1,5 +1,5 @@
 /**
- * Translate Vercel AI SDK spans → Traceloop/OpenLLMetry format.
+ * Translate Vercel AI SDK spans -> Traceloop/OpenLLMetry format.
  *
  * The Vercel AI SDK emits OTEL spans with its own attribute schema (ai.model.id,
  * ai.prompt.messages, ai.response.text, etc.). This SpanProcessor enriches those
@@ -13,7 +13,7 @@
 import type { Context } from "@opentelemetry/api";
 import type { ReadableSpan, Span, SpanProcessor } from "@opentelemetry/sdk-trace-base";
 import { RespanLogType } from "@respan/respan-sdk";
-import { VERCEL_PARENT_SPANS, VERCEL_SPAN_CONFIG } from "./constants/index.js";
+import { VERCEL_PARENT_SPANS, VERCEL_SPAN_CONFIG, VERCEL_STRUCTURAL_LLM_PARENT_SPANS } from "./constants/index.js";
 import {
   formatCompletionOutput,
   formatPromptInput,
@@ -26,7 +26,12 @@ import {
   AI_AGENT_ID,
   AI_MODEL_ID,
   AI_PREFIX,
+  AI_TOOL_CALL_NAME,
+  GEN_AI_REQUEST_MODEL,
   LLM_REQUEST_TYPE,
+  RESPAN_INTERNAL_DROP_SPAN,
+  RESPAN_INTERNAL_SPAN_NAME_DETAIL,
+  RESPAN_INTERNAL_SPAN_NAME_KIND,
   RESPAN_LOG_TYPE,
   RESPAN_METADATA_AGENT_NAME,
   TL_SPAN_KIND,
@@ -43,11 +48,30 @@ import {
 } from "./_translator/shared.js";
 import { enrichMetadata, enrichModel, enrichPerformanceMetrics, enrichTokens, stripRedundantAttrs } from "./_translator/span-enrichment.js";
 
+function setSemanticLlmSpanNameHint(attrs: Record<string, any>): void {
+  setDefault(attrs, RESPAN_INTERNAL_SPAN_NAME_KIND, "llm");
+  setDefault(attrs, RESPAN_INTERNAL_SPAN_NAME_DETAIL, attrs[GEN_AI_REQUEST_MODEL]);
+}
+
+function setSemanticEmbeddingSpanNameHint(attrs: Record<string, any>): void {
+  setDefault(attrs, RESPAN_INTERNAL_SPAN_NAME_KIND, "embedding");
+  delete attrs[RESPAN_INTERNAL_SPAN_NAME_DETAIL];
+}
+
+function setSemanticNamedSpanNameHint(
+  attrs: Record<string, any>,
+  kind: string,
+  detail: unknown
+): void {
+  setDefault(attrs, RESPAN_INTERNAL_SPAN_NAME_KIND, kind);
+  setDefault(attrs, RESPAN_INTERNAL_SPAN_NAME_DETAIL, detail);
+}
+
 /**
  * SpanProcessor that translates Vercel AI SDK attributes to Traceloop/OpenLLMetry.
  *
  * Phase 1 (onStart): Sets RESPAN_LOG_TYPE so CompositeProcessor lets the span through.
- * Phase 2 (onEnd):   Full attribute enrichment — model, messages, tokens, metadata,
+ * Phase 2 (onEnd):   Full attribute enrichment -- model, messages, tokens, metadata,
  *                     tools, performance metrics, environment, etc.
  */
 export class VercelAITranslator implements SpanProcessor {
@@ -55,6 +79,11 @@ export class VercelAITranslator implements SpanProcessor {
     const writableSpan = span as any;
     const name: string = writableSpan.name ?? "";
     if (!name.startsWith(AI_PREFIX)) {
+      return;
+    }
+
+    if (VERCEL_STRUCTURAL_LLM_PARENT_SPANS.has(name)) {
+      writableSpan.setAttribute(RESPAN_INTERNAL_DROP_SPAN, true);
       return;
     }
 
@@ -79,22 +108,25 @@ export class VercelAITranslator implements SpanProcessor {
       return;
     }
 
+    if (attrs[RESPAN_INTERNAL_DROP_SPAN] === true || attrs[RESPAN_INTERNAL_DROP_SPAN] === "true") {
+      stripRedundantAttrs(attrs);
+      return;
+    }
+
     const name = span.name;
     const config = VERCEL_SPAN_CONFIG[name];
     const parentLogType = VERCEL_PARENT_SPANS[name];
     const logType = resolveLogType(name, attrs);
 
     // Embedding spans (span-contract.md): input = embedded text, output = the
-    // embedding vector(s) — captured, not dropped (debuggable RAG data; size is
-    // handled by storage tiering, not by deleting it here). Vercel's synthetic
-    // ai.usage.tokens is intentionally NOT surfaced as a token count; it's
-    // stripped. Extract up front, before any early-return or metadata move, so
-    // both the parent (ai.embed) and child (ai.embed.doEmbed) spans are covered.
+    // embedding vector(s). Vercel's synthetic ai.usage.tokens is intentionally
+    // NOT surfaced as a token count; it is stripped after promotion.
     if (
       logType === RespanLogType.EMBEDDING ||
       config?.logType === RespanLogType.EMBEDDING ||
       parentLogType === RespanLogType.EMBEDDING
     ) {
+      setSemanticEmbeddingSpanNameHint(attrs);
       const embInput = formatEmbeddingInput(attrs);
       if (embInput) setDefault(attrs, TL_ENTITY_INPUT, embInput);
       const embOutput = formatEmbeddingOutput(attrs);
@@ -116,18 +148,13 @@ export class VercelAITranslator implements SpanProcessor {
       // Do NOT set traceloop.span.kind for auto-emitted Vercel SDK spans.
       // In the Respan composite processor `traceloop.span.kind` is reserved
       // for user-decorated spans (withWorkflow / withTask / withAgent) and
-      // setting it on auto spans (a) flattens the parent/child tree and
-      // (b) causes LLM detail spans (doGenerate / doStream) to be classified
-      // as "task" instead of LLM in the backend. The respan.entity.log_type
-      // attribute (set above) carries the correct type for ingestion.
-      // Matches the patterns in respan-instrumentation-openinference (see
-      // _translator.ts:500) and respan-instrumentation-openai-agents
-      // (see _otel_emitter.ts:398).
+      // setting it on auto spans flattens the tree and misclassifies LLM spans.
 
       if (config.isLLM) {
         setDefault(attrs, LLM_REQUEST_TYPE, RespanLogType.CHAT);
 
         enrichModel(attrs, attrs[AI_MODEL_ID]);
+        setSemanticLlmSpanNameHint(attrs);
 
         const input = formatPromptInput(attrs);
         if (input) {
@@ -161,6 +188,8 @@ export class VercelAITranslator implements SpanProcessor {
       }
 
       if (config.logType === RespanLogType.TOOL || logType === RespanLogType.TOOL) {
+        setSemanticNamedSpanNameHint(attrs, "tool", attrs[AI_TOOL_CALL_NAME] ?? name.split(".").at(-1));
+
         const toolInput = formatToolInput(attrs);
         if (toolInput) {
           setDefault(attrs, TL_ENTITY_INPUT, toolInput);
@@ -174,11 +203,13 @@ export class VercelAITranslator implements SpanProcessor {
 
       if (config.logType === RespanLogType.AGENT || logType === RespanLogType.AGENT) {
         const agentName = attrs["ai.agent.name"] ?? attrs[AI_AGENT_ID] ?? name;
+        setSemanticNamedSpanNameHint(attrs, "agent", agentName);
         setDefault(attrs, RESPAN_METADATA_AGENT_NAME, String(agentName));
       }
     } else {
       if (logType === RespanLogType.TEXT) {
         enrichModel(attrs, attrs[AI_MODEL_ID]);
+        setSemanticLlmSpanNameHint(attrs);
 
         enrichTokens(attrs);
 
@@ -204,6 +235,8 @@ export class VercelAITranslator implements SpanProcessor {
       }
 
       if (logType === RespanLogType.TOOL) {
+        setSemanticNamedSpanNameHint(attrs, "tool", attrs[AI_TOOL_CALL_NAME] ?? name.split(".").at(-1));
+
         const toolInput = formatToolInput(attrs);
         if (toolInput) {
           setDefault(attrs, TL_ENTITY_INPUT, toolInput);
