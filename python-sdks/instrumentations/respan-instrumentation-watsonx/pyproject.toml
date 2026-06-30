@@ -1,23 +1,23 @@
 [tool.poetry]
-name = "respan-instrumentation-openai-agents"
-version = "1.1.1"
-description = "Respan instrumentation plugin for the OpenAI Agents SDK"
+name = "respan-instrumentation-watsonx"
+version = "0.1.0"
+description = "Respan instrumentation plugin for IBM watsonx.ai"
 authors = ["Respan <team@respan.ai>"]
 license = "Apache 2.0"
 readme = "README.md"
 packages = [
-    { include = "respan_instrumentation_openai_agents", from = "./src" },
+    { include = "respan_instrumentation_watsonx", from = "./src" },
 ]
 
 [tool.poetry.dependencies]
-python = ">=3.11,<3.14"
-respan-tracing = ">=2.3.0"
-respan-sdk = ">=2.5.0"
-openai-agents = ">=0.3.1"
+python = ">=3.11,<3.15"
+respan-tracing = "^2.17.0"
+respan-sdk = ">=2.6.1"
+ibm-watsonx-ai = ">=1.0.0"
 opentelemetry-semantic-conventions-ai = ">=0.4.1"
 
 [tool.poetry.plugins."respan.instrumentations"]
-openai-agents = "respan_instrumentation_openai_agents:OpenAIAgentsInstrumentor"
+watsonx = "respan_instrumentation_watsonx:WatsonxInstrumentor"
 
 [tool.pytest.ini_options]
 markers = [
