@@ -14,16 +14,36 @@ type SpanAttrs = Record<string, unknown>;
 
 const INTERNAL_KIND_ATTR = RespanSpanAttributes.RESPAN_INTERNAL_SPAN_NAME_KIND;
 const INTERNAL_DETAIL_ATTR = RespanSpanAttributes.RESPAN_INTERNAL_SPAN_NAME_DETAIL;
+const INTERNAL_DROP_ATTR = RespanSpanAttributes.RESPAN_INTERNAL_DROP_SPAN;
 
 const INTERNAL_SPAN_NAME_ATTRS = [
   INTERNAL_KIND_ATTR,
   INTERNAL_DETAIL_ATTR,
+  INTERNAL_DROP_ATTR,
 ] as const;
 
-const SUFFIXED_OPERATIONS = new Set(["agent", "tool", "handoff"]);
+const SUFFIXED_OPERATIONS = new Set(["agent", "tool", "handoff", "llm"]);
+
+const STRUCTURAL_LLM_PARENT_SPAN_NAMES = new Set([
+  "ai.generateText",
+  "ai.streamText",
+  "ai.generateObject",
+  "ai.streamObject",
+]);
+
+const STRUCTURAL_LLM_LOG_TYPES = new Set([
+  RespanLogType.TEXT,
+  RespanLogType.CHAT,
+  RespanLogType.RESPONSE,
+  RespanLogType.GENERATION,
+  "text",
+  "chat",
+  "response",
+  "generation",
+]);
 
 function formatOperationName(operation: string): string {
-  return operation.toUpperCase();
+  return operation;
 }
 
 export function resolveSpanNameStyle(
@@ -61,11 +81,61 @@ export function semanticSpanNameForSpan(span: ReadableSpan): string {
     return prefix;
   }
 
+  if (operation === "llm") {
+    return detail ? `${prefix}.${detail}` : prefix;
+  }
+
   if (!hasInternalHint && span.name.startsWith(`${prefix}.`)) {
     return span.name;
   }
 
   return `${prefix}.${detail}`;
+}
+
+export function transformReadableSpanBatch(
+  spans: ReadableSpan[],
+  style: RespanSpanNameStyle | string | undefined
+): ReadableSpan[] {
+  const droppedParentMap = new Map<string, string | undefined>();
+
+  for (const span of spans) {
+    if (isStructuralLlmWrapperSpan(span)) {
+      const spanId = span.spanContext?.().spanId;
+      if (spanId) {
+        droppedParentMap.set(spanId, (span as any).parentSpanId);
+      }
+    }
+  }
+
+  if (droppedParentMap.size === 0) {
+    return spans.map((span) => transformReadableSpanName(span, style));
+  }
+
+  return spans.flatMap((span) => {
+    const spanId = span.spanContext?.().spanId;
+    if (spanId && droppedParentMap.has(spanId)) {
+      return [];
+    }
+
+    const transformed = transformReadableSpanName(span, style);
+    const parentSpanId = resolveExportParentSpanId(
+      (span as any).parentSpanId,
+      droppedParentMap
+    );
+
+    if (parentSpanId === (transformed as any).parentSpanId) {
+      return [transformed];
+    }
+
+    return [
+      cloneReadableSpan(
+        transformed,
+        transformed.name,
+        transformed.attributes as SpanAttrs,
+        parentSpanId
+      ),
+    ];
+  });
 }
 
 export class SpanNameTransformingExporter implements SpanExporter {
@@ -79,7 +149,7 @@ export class SpanNameTransformingExporter implements SpanExporter {
     resultCallback: (result: ExportResult) => void
   ): void {
     this.delegate.export(
-      spans.map((span) => transformReadableSpanName(span, this.style)),
+      transformReadableSpanBatch(spans, this.style),
       resultCallback
     );
   }
@@ -93,6 +163,59 @@ export class SpanNameTransformingExporter implements SpanExporter {
       .forceFlush;
     return maybeFlush ? maybeFlush.call(this.delegate) : Promise.resolve();
   }
+}
+
+function isStructuralLlmWrapperSpan(span: ReadableSpan): boolean {
+  const attrs = span.attributes as SpanAttrs;
+
+  if (attrs[INTERNAL_DROP_ATTR] === true || attrs[INTERNAL_DROP_ATTR] === "true") {
+    return true;
+  }
+
+  if (STRUCTURAL_LLM_PARENT_SPAN_NAMES.has(span.name)) {
+    return true;
+  }
+
+  const logType = stringAttr(attrs, RespanSpanAttributes.RESPAN_LOG_TYPE);
+  if (!logType || !STRUCTURAL_LLM_LOG_TYPES.has(logType)) {
+    return false;
+  }
+
+  const hasVercelTelemetry =
+    attrs["ai.telemetry.functionId"] !== undefined ||
+    attrs["resource.name"] !== undefined;
+  if (!hasVercelTelemetry) {
+    return false;
+  }
+
+  const hasInputOrOutput =
+    hasNonEmptyAttr(attrs, SpanAttributes.TRACELOOP_ENTITY_INPUT) ||
+    hasNonEmptyAttr(attrs, SpanAttributes.TRACELOOP_ENTITY_OUTPUT);
+
+  return !hasInputOrOutput && semanticSpanNameForSpan(span) === "llm";
+}
+
+function resolveExportParentSpanId(
+  parentSpanId: string | undefined,
+  droppedParentMap: Map<string, string | undefined>
+): string | undefined {
+  let next = parentSpanId;
+  const seen = new Set<string>();
+
+  while (next && droppedParentMap.has(next) && !seen.has(next)) {
+    seen.add(next);
+    next = droppedParentMap.get(next);
+  }
+
+  return next;
+}
+
+function hasNonEmptyAttr(attrs: SpanAttrs, key: string): boolean {
+  const value = attrs[key];
+  if (value === undefined || value === null) return false;
+  if (typeof value === "string") return value.trim() !== "";
+  if (Array.isArray(value)) return value.length > 0;
+  return true;
 }
 
 function stripInternalSemanticNameAttrs(attrs: SpanAttrs): SpanAttrs {
@@ -111,7 +234,8 @@ function stripInternalSemanticNameAttrs(attrs: SpanAttrs): SpanAttrs {
 function cloneReadableSpan(
   span: ReadableSpan,
   name: string,
-  attributes: SpanAttrs
+  attributes: SpanAttrs,
+  parentSpanId?: string
 ): ReadableSpan {
   const clone = Object.create(Object.getPrototypeOf(span));
   Object.assign(clone, span);
@@ -125,6 +249,13 @@ function cloneReadableSpan(
     enumerable: true,
     configurable: true,
   });
+  if (parentSpanId !== undefined && parentSpanId !== (span as any).parentSpanId) {
+    Object.defineProperty(clone, "parentSpanId", {
+      value: parentSpanId,
+      enumerable: true,
+      configurable: true,
+    });
+  }
   return clone as ReadableSpan;
 }
 
@@ -152,6 +283,11 @@ function resolveDetail(
   spanName: string,
   operation: string
 ): string {
+  if (operation === "llm") {
+    const model = resolveLlmModel(attrs);
+    return model ? sanitizeNamePart(model, "operation") : "";
+  }
+
   const hintedDetail = stringAttr(attrs, INTERNAL_DETAIL_ATTR);
   if (hintedDetail) {
     return sanitizeNamePart(hintedDetail, "operation");
@@ -163,6 +299,26 @@ function resolveDetail(
   }
 
   return sanitizeNamePart(detailFromRawName(spanName, operation), "operation");
+}
+
+function resolveLlmModel(attrs: SpanAttrs): string | undefined {
+  return firstStringAttr(attrs, [
+    RespanSpanAttributes.GEN_AI_REQUEST_MODEL,
+    RespanSpanAttributes.OPENINFERENCE_LLM_MODEL_NAME,
+    "llm.model_name",
+    "model",
+    "ai.model.id",
+    "ai.response.model",
+    SpanAttributes.LLM_REQUEST_MODEL,
+  ]);
+}
+
+function firstStringAttr(attrs: SpanAttrs, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = stringAttr(attrs, key);
+    if (value) return value;
+  }
+  return undefined;
 }
 
 function stringAttr(attrs: SpanAttrs, key: string): string | undefined {
@@ -195,7 +351,8 @@ function mapOperation(value: string): string {
       return "guardrail";
     case RespanLogType.EMBEDDING:
     case "embedding":
-      return "embed";
+    case "embed":
+      return "embedding";
     case RespanLogType.TRANSCRIPTION:
       return "transcribe";
     case RespanLogType.SPEECH:
@@ -217,7 +374,7 @@ function mapOperation(value: string): string {
 
 function inferOperationFromName(spanName: string): string {
   if (spanName.startsWith("ai.stream")) return "llm";
-  if (spanName.startsWith("ai.embed")) return "embed";
+  if (spanName.startsWith("ai.embed")) return "embedding";
   if (spanName.startsWith("ai.generate") || spanName.startsWith("ai.")) {
     return "llm";
   }

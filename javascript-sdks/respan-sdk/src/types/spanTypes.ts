@@ -36,6 +36,7 @@ export enum RespanSpanAttributes {
     // Internal runtime hints. These are stripped before export.
     RESPAN_INTERNAL_SPAN_NAME_KIND = "respan.internal.span_name.kind",
     RESPAN_INTERNAL_SPAN_NAME_DETAIL = "respan.internal.span_name.detail",
+    RESPAN_INTERNAL_DROP_SPAN = "respan.internal.drop_span",
 
     // Logging
     RESPAN_LOG_METHOD = "respan.entity.log_method",

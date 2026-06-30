@@ -61,7 +61,7 @@ export interface TracingOptions {
   /**
    * Controls exported span.name formatting.
    * - legacy: preserve instrumentation span names
-   * - semantic: use operation-prefixed names like agent.triage or llm.doGenerate
+   * - semantic: use operation-prefixed names like agent.triage or llm.gpt-4o
    * Defaults to legacy. Can also be set with RESPAN_SPAN_NAME_STYLE=semantic.
    */
   spanNameStyle?: RespanSpanNameStyle;
