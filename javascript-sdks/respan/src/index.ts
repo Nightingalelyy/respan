@@ -4,6 +4,10 @@ export type { RespanOptions } from "./_core.js";
 
 // Plugin protocol
 export type { RespanInstrumentation } from "./_types.js";
+export type {
+  AutoInstrumentationEntry,
+  InstrumentationStatusEntry,
+} from "./_auto_instrumentation_registry.js";
 
 // Instrumentor wrappers
 export { OTELInstrumentor } from "./_otel_instrumentor.js";

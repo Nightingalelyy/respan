@@ -1,0 +1,7 @@
+{
+  "summary": "Expand the TypeScript Respan facade auto-discovery path to use a direct LLM instrumentation registry, add status reporting, include Vertex AI and OpenRouter direct-provider instrumentors, and resolve the OpenAI SDK from the application runtime when patching",
+  "packages": {
+    "@respan/respan": "minor",
+    "@respan/instrumentation-openai": "patch"
+  }
+}
