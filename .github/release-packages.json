@@ -86,6 +86,12 @@
     },
     {
       "ecosystem": "javascript",
+      "name": "@respan/instrumentation-superagent",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-superagent",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
       "name": "@respan/instrumentation-openrouter",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-openrouter",
       "registry": "npm"
