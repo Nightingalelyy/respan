@@ -21,6 +21,7 @@
     "instrumentations/respan-instrumentation-vertexai",
     "instrumentations/respan-instrumentation-vercel",
     "respan-sdk",
-    "respan-tracing"
+    "respan-tracing",
+    "instrumentations/respan-instrumentation-openrouter"
   ]
 }
