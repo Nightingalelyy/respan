@@ -74,6 +74,12 @@
     },
     {
       "ecosystem": "javascript",
+      "name": "@respan/instrumentation-livekit",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-livekit",      
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
       "name": "@respan/instrumentation-strands-agents",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-strands-agents",
       "registry": "npm"
