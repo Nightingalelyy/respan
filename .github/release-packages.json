@@ -392,6 +392,12 @@
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-replicate",
+      "path": "python-sdks/instrumentations/respan-instrumentation-replicate",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-writer",
       "path": "python-sdks/instrumentations/respan-instrumentation-writer",
       "registry": "pypi"
