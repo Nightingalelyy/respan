@@ -23,7 +23,7 @@
       "name": "@respan/instrumentation-arize",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-arize",
       "registry": "npm"
-    }
+    },
     {
       "ecosystem": "javascript",
       "name": "@respan/instrumentation-azure-openai",
