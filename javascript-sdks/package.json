@@ -11,6 +11,7 @@
     "instrumentations/respan-instrumentation-beeai",
     "instrumentations/respan-instrumentation-braintrust",
     "instrumentations/respan-instrumentation-claude-agent-sdk",
+    "instrumentations/respan-instrumentation-codex-sdk",
     "instrumentations/respan-instrumentation-cursor",
     "instrumentations/respan-instrumentation-langchain",
     "instrumentations/respan-instrumentation-llama-index",
