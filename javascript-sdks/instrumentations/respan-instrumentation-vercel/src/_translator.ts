@@ -33,6 +33,8 @@ import {
   TL_ENTITY_INPUT,
   TL_ENTITY_OUTPUT,
   TL_REQUEST_FUNCTIONS,
+  formatEmbeddingInput,
+  formatEmbeddingOutput,
   isVercelAISpan,
   metadataKey,
   resolveLogType,
@@ -81,6 +83,23 @@ export class VercelAITranslator implements SpanProcessor {
     const config = VERCEL_SPAN_CONFIG[name];
     const parentLogType = VERCEL_PARENT_SPANS[name];
     const logType = resolveLogType(name, attrs);
+
+    // Embedding spans (span-contract.md): input = embedded text, output = the
+    // embedding vector(s) — captured, not dropped (debuggable RAG data; size is
+    // handled by storage tiering, not by deleting it here). Vercel's synthetic
+    // ai.usage.tokens is intentionally NOT surfaced as a token count; it's
+    // stripped. Extract up front, before any early-return or metadata move, so
+    // both the parent (ai.embed) and child (ai.embed.doEmbed) spans are covered.
+    if (
+      logType === RespanLogType.EMBEDDING ||
+      config?.logType === RespanLogType.EMBEDDING ||
+      parentLogType === RespanLogType.EMBEDDING
+    ) {
+      const embInput = formatEmbeddingInput(attrs);
+      if (embInput) setDefault(attrs, TL_ENTITY_INPUT, embInput);
+      const embOutput = formatEmbeddingOutput(attrs);
+      if (embOutput) setDefault(attrs, TL_ENTITY_OUTPUT, embOutput);
+    }
 
     enrichMetadata(attrs);
     delete attrs[TL_SPAN_KIND];
@@ -136,6 +155,7 @@ export class VercelAITranslator implements SpanProcessor {
       }
 
       if (config.logType === RespanLogType.EMBEDDING || logType === RespanLogType.EMBEDDING) {
+        // input/output/tokens are mapped in the up-front embedding block.
         setDefault(attrs, LLM_REQUEST_TYPE, RespanLogType.EMBEDDING);
         enrichModel(attrs, attrs[AI_MODEL_ID]);
       }
@@ -178,6 +198,7 @@ export class VercelAITranslator implements SpanProcessor {
       }
 
       if (logType === RespanLogType.EMBEDDING) {
+        // input/output/tokens are mapped in the up-front embedding block.
         setDefault(attrs, LLM_REQUEST_TYPE, RespanLogType.EMBEDDING);
         enrichModel(attrs, attrs[AI_MODEL_ID]);
       }
