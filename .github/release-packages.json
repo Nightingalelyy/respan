@@ -20,8 +20,20 @@
     },
     {
       "ecosystem": "javascript",
+      "name": "@respan/instrumentation-azure-openai",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-azure-openai",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
       "name": "@respan/instrumentation-beeai",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-beeai",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
+      "name": "@respan/instrumentation-braintrust",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-braintrust",
       "registry": "npm"
     },
     {
@@ -50,6 +62,12 @@
     },
     {
       "ecosystem": "javascript",
+      "name": "@respan/instrumentation-strands-agents",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-strands-agents",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
       "name": "@respan/instrumentation-openai",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-openai",
       "registry": "npm"
@@ -74,8 +92,20 @@
     },
     {
       "ecosystem": "javascript",
+      "name": "@respan/instrumentation-openrouter",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-openrouter",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
       "name": "@respan/instrumentation-vercel",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-vercel",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
+      "name": "@respan/instrumentation-vertexai",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-vertexai",
       "registry": "npm"
     },
     {
@@ -116,14 +146,32 @@
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-aleph-alpha",
+      "path": "python-sdks/instrumentations/respan-instrumentation-aleph-alpha",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-anthropic",
       "path": "python-sdks/instrumentations/respan-instrumentation-anthropic",
       "registry": "pypi"
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-arize",
+      "path": "python-sdks/instrumentations/respan-instrumentation-arize",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-aws-bedrock",
       "path": "python-sdks/instrumentations/respan-instrumentation-aws-bedrock",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-sagemaker",
+      "path": "python-sdks/instrumentations/respan-instrumentation-sagemaker",
       "registry": "pypi"
     },
     {
@@ -142,6 +190,12 @@
       "ecosystem": "python",
       "name": "respan-instrumentation-cohere",
       "path": "python-sdks/instrumentations/respan-instrumentation-cohere",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-chroma",
+      "path": "python-sdks/instrumentations/respan-instrumentation-chroma",
       "registry": "pypi"
     },
     {
@@ -166,6 +220,12 @@
       "ecosystem": "python",
       "name": "respan-instrumentation-openinference",
       "path": "python-sdks/instrumentations/respan-instrumentation-openinference",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-openrouter",
+      "path": "python-sdks/instrumentations/respan-instrumentation-openrouter",
       "registry": "pypi"
     },
     {
@@ -206,6 +266,12 @@
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-watsonx",
+      "path": "python-sdks/instrumentations/respan-instrumentation-watsonx",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-vertexai",
       "path": "python-sdks/instrumentations/respan-instrumentation-vertexai",
       "registry": "pypi"
@@ -218,8 +284,20 @@
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-huggingface",
+      "path": "python-sdks/instrumentations/respan-instrumentation-huggingface",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-braintrust",
       "path": "python-sdks/instrumentations/respan-instrumentation-braintrust",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-dify",
+      "path": "python-sdks/instrumentations/respan-instrumentation-dify",
       "registry": "pypi"
     },
     {
@@ -290,6 +368,12 @@
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-together",
+      "path": "python-sdks/instrumentations/respan-instrumentation-together",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-groq",
       "path": "python-sdks/instrumentations/respan-instrumentation-groq",
       "registry": "pypi"
@@ -311,6 +395,18 @@
       "name": "respan-instrumentation-mistralai",
       "path": "python-sdks/instrumentations/respan-instrumentation-mistralai",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-replicate",
+      "path": "python-sdks/instrumentations/respan-instrumentation-replicate",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "javascript",
+      "name": "@respan/instrumentation-google-adk",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-google-adk",
+      "registry": "npm"
     },
     {
       "ecosystem": "javascript",
