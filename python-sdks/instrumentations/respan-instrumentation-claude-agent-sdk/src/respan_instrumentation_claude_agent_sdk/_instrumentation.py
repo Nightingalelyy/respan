@@ -295,6 +295,71 @@ class ClaudeAgentSDKInstrumentor:
             module, attr_name, original = self._patched_modules.pop()
             setattr(module, attr_name, original)
 
+    def _patch_standalone_query_seam(self, *, strip_module_query_wrap: bool) -> None:
+        """Make ``from claude_agent_sdk import query`` traceable (issue A6).
+
+        Upstream wraps ``claude_agent_sdk.query`` — a *module attribute*. Code that
+        does ``from claude_agent_sdk import query`` binds the original function before
+        instrumentation runs, so a bare ``query(...)`` is never traced. The standalone
+        ``query()`` always delegates to ``InternalClient.process_query`` — a method
+        resolved at call time and used *only* by the standalone path — so wrapping that
+        seam (with upstream's own span logic) captures the call regardless of how
+        ``query`` was imported, without touching the ``ClaudeSDKClient`` path. The
+        now-redundant module-level wrap is then dropped so each call yields one span.
+
+        Both patches are recorded in ``self._patched_modules`` so the generic
+        ``_restore_upstream_helpers`` loop undoes them. Best-effort: on failure the
+        upstream module-level wrap is left intact, so behaviour is no worse than before.
+        """
+        try:
+            import wrapt
+            import claude_agent_sdk
+            from claude_agent_sdk._internal.client import InternalClient
+        except ImportError as exc:
+            logger.warning(
+                "Claude Agent SDK: could not instrument the internal query seam; "
+                "`from claude_agent_sdk import query` may not be traced: %s",
+                exc,
+            )
+            return
+
+        # Idempotency: a second activation (or an already-wrapped seam) must not
+        # stack another wrapper, which would emit two spans per standalone query().
+        # getattr (not __dict__) so an inherited process_query is still found.
+        process_query = getattr(InternalClient, "process_query", None)
+        if process_query is None or hasattr(process_query, "__wrapped__"):
+            return
+
+        # Record the original before wrapping so the restore loop unwraps the seam.
+        self._patched_modules.append((InternalClient, "process_query", process_query))
+        try:
+            wrapt.wrap_function_wrapper(
+                "claude_agent_sdk._internal.client",
+                "InternalClient.process_query",
+                self._otel_instrumentor._wrap_query,
+            )
+        except Exception as exc:
+            self._patched_modules.pop()
+            logger.warning(
+                "Claude Agent SDK: could not instrument the internal query seam; "
+                "`from claude_agent_sdk import query` may not be traced: %s",
+                exc,
+            )
+            return
+
+        # Drop the now-redundant module-level `query` wrap so module-qualified and
+        # from-imported calls behave identically (one span). Only strip a wrap our
+        # own instrument() added — never a user's or another vendor's pre-existing
+        # wrap — and record the pristine original so the restore loop puts it back.
+        if not strip_module_query_wrap:
+            return
+        module_query = getattr(claude_agent_sdk, "query", None)
+        if hasattr(module_query, "__wrapped__"):
+            self._patched_modules.append(
+                (claude_agent_sdk, "query", module_query.__wrapped__)
+            )
+            claude_agent_sdk.query = module_query.__wrapped__
+
     def activate(self) -> None:
         if self._is_instrumented:
             return
@@ -317,6 +382,19 @@ class ClaudeAgentSDKInstrumentor:
         self._register_processor(tracer_provider=tracer_provider, processor=self._processor)
 
         self._otel_instrumentor = upstream_instrumentor_class()
+
+        # Note whether a module-level `query` wrap already exists *before* we
+        # instrument, so the seam patch below only strips a wrap our own
+        # instrument() adds — never a user's or another vendor's pre-existing wrap.
+        try:
+            import claude_agent_sdk as _claude_agent_sdk
+
+            module_query_prewrapped = hasattr(
+                getattr(_claude_agent_sdk, "query", None), "__wrapped__"
+            )
+        except Exception:
+            module_query_prewrapped = False
+
         try:
             self._otel_instrumentor.instrument(
                 tracer_provider=tracer_provider,
@@ -335,6 +413,12 @@ class ClaudeAgentSDKInstrumentor:
                 exc,
             )
             return
+
+        # Cover `from claude_agent_sdk import query` (A6) by instrumenting the
+        # internal seam instead of the bypassable module-level `query` attribute.
+        self._patch_standalone_query_seam(
+            strip_module_query_wrap=not module_query_prewrapped
+        )
 
         self._is_instrumented = True
         logger.info("Claude Agent SDK instrumentation activated")
