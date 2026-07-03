@@ -29,6 +29,7 @@
     "instrumentations/respan-instrumentation-superagent",
     "instrumentations/respan-instrumentation-vertexai",
     "instrumentations/respan-instrumentation-vercel",
+    "instrumentations/respan-instrumentation-writer",
     "respan-sdk",
     "respan-tracing",
     "instrumentations/respan-instrumentation-openrouter"

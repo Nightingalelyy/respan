@@ -146,6 +146,12 @@
     },
     {
       "ecosystem": "javascript",
+      "name": "@respan/instrumentation-writer",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-writer",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
       "name": "@respan/instrumentation-vertexai",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-vertexai",
       "registry": "npm"
