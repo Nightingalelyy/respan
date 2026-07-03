@@ -355,9 +355,19 @@ class TogetherInstrumentor:
                 TOGETHER_RERANK_MODULE,
                 ASYNC_RERANK_RESOURCE_CLASS_NAME,
             )
-        except (AttributeError, ImportError) as exc:
+        except ImportError as exc:
+            # SDK genuinely absent - expected when the app doesn't use Together
+            # (the together SDK is an optional extra).
+            logger.debug(
+                "Together instrumentation inactive - missing dependency: %s",
+                exc,
+            )
+            return
+        except AttributeError as exc:
+            # SDK installed but incompatible (a class moved/renamed) - surface it
+            # so a broken install isn't silently left untraced.
             logger.warning(
-                "Failed to activate Together instrumentation - missing dependency: %s",
+                "together is installed but incompatible - instrumentation inactive: %s",
                 exc,
             )
             return
