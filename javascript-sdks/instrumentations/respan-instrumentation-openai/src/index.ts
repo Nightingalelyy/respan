@@ -43,6 +43,7 @@ export class OpenAIInstrumentor {
       sharedState.instrumentor.setTracerProvider(trace.getTracerProvider());
       sharedState.openAI = (await importOpenAISdk()).default;
       sharedState.instrumentor.manuallyInstrument(sharedState.openAI);
+      installAzureOpenAISkipGuard(sharedState.openAI);
     }
 
     sharedState.activeInstances += 1;
@@ -59,7 +60,9 @@ export class OpenAIInstrumentor {
     if (sharedState.activeInstances > 0 || !sharedState.instrumentor) return;
 
     try {
-      sharedState.instrumentor.unpatch({ OpenAI: sharedState.openAI });
+      if (hasOpenAIUnwrapMarkers(sharedState.openAI)) {
+        sharedState.instrumentor.unpatch({ OpenAI: sharedState.openAI });
+      }
     } catch {
       /* ignore */
     }
@@ -67,6 +70,74 @@ export class OpenAIInstrumentor {
     sharedState.instrumentor = null;
     sharedState.openAI = null;
   }
+}
+
+function hasOpenAIUnwrapMarkers(OpenAI: any): boolean {
+  return [
+    OpenAI?.Chat?.Completions?.prototype?.create,
+    OpenAI?.Completions?.prototype?.create,
+  ].some((method) => Boolean(method?.__original || method?.__wrapped));
+}
+
+const AZURE_OPENAI_SKIP_GUARD = Symbol.for("respan.instrumentation.openai.azureSkipGuard");
+
+function installAzureOpenAISkipGuard(OpenAI: any): void {
+  guardOpenAIMethod(OpenAI?.Chat?.Completions?.prototype, "create", OpenAI);
+  guardOpenAIMethod(OpenAI?.Completions?.prototype, "create", OpenAI);
+}
+
+function guardOpenAIMethod(target: any, methodName: string, OpenAI: any): void {
+  if (!target) return;
+
+  const tracedMethod = target[methodName];
+  if (typeof tracedMethod !== "function" || tracedMethod[AZURE_OPENAI_SKIP_GUARD]) {
+    return;
+  }
+
+  const original = tracedMethod.__original;
+  if (typeof original !== "function") {
+    return;
+  }
+
+  const guardedMethod = function respanOpenAIAzureSkipGuard(this: any, ...args: any[]) {
+    if (isAzureOpenAIResource(this, OpenAI)) {
+      return original.apply(this, args);
+    }
+    return tracedMethod.apply(this, args);
+  };
+
+  Object.defineProperty(guardedMethod, "__original", {
+    configurable: true,
+    value: original,
+  });
+  Object.defineProperty(guardedMethod, "__wrapped", {
+    configurable: true,
+    value: tracedMethod.__wrapped ?? true,
+  });
+  Object.defineProperty(guardedMethod, AZURE_OPENAI_SKIP_GUARD, {
+    configurable: true,
+    value: true,
+  });
+
+  target[methodName] = guardedMethod;
+}
+
+function isAzureOpenAIResource(receiver: any, OpenAI: any): boolean {
+  const client = receiver?._client ?? receiver;
+  if (!client) return false;
+
+  const AzureOpenAI = OpenAI?.AzureOpenAI;
+  if (typeof AzureOpenAI === "function" && client instanceof AzureOpenAI) {
+    return true;
+  }
+
+  const constructorName = client.constructor?.name;
+  if (constructorName === "AzureOpenAI" || constructorName?.endsWith("AzureOpenAI")) {
+    return true;
+  }
+
+  const baseURL = typeof client.baseURL === "string" ? client.baseURL.toLowerCase() : "";
+  return typeof client.apiVersion === "string" && (baseURL.includes("azure") || Boolean(client.deploymentName));
 }
 
 async function importOpenAISdk(): Promise<any> {

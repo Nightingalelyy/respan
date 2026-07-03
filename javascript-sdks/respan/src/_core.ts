@@ -1,10 +1,12 @@
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import { RespanTelemetry, propagateAttributes, buildReadableSpan, injectSpan, ensureSpanId } from "@respan/tracing";
 import { RespanSpanAttributes, RespanLogType } from "@respan/respan-sdk";
 import type { RespanParams } from "@respan/respan-sdk";
 import type { ProcessorConfig } from "@respan/tracing";
 import type { RespanInstrumentation } from "./_types.js";
 import {
-  DIRECT_LLM_AUTO_INSTRUMENTATIONS,
+  AUTO_INSTRUMENTATION_REGISTRY,
   directLlmGenericTracingNames,
   matchesAutoInstrumentationSelector,
   statusFromEntry,
@@ -113,14 +115,29 @@ export class Respan {
   }
 
   private async _autoDiscoverInstrumentations(): Promise<void> {
-    const discoveries = [...DIRECT_LLM_AUTO_INSTRUMENTATIONS].sort(
+    const discoveries = [...AUTO_INSTRUMENTATION_REGISTRY].sort(
       (a, b) => b.priority - a.priority,
     );
 
     for (const entry of discoveries) {
-      if (entry.category !== "direct-llm" || !entry.enabledByDefault) {
+      if (entry.category !== "direct-llm") {
         this._recordInstrumentationStatus(
-          statusFromEntry(entry, "disabled", "not enabled by default"),
+          statusFromEntry(
+            entry,
+            "disabled",
+            entry.autoDisabledReason ?? "not a direct LLM SDK auto-instrumentation",
+          ),
+        );
+        continue;
+      }
+
+      if (!entry.enabledByDefault) {
+        this._recordInstrumentationStatus(
+          statusFromEntry(
+            entry,
+            "disabled",
+            entry.autoDisabledReason ?? "not enabled by default",
+          ),
         );
         continue;
       }
@@ -133,7 +150,7 @@ export class Respan {
       }
 
       try {
-        const mod = await import(entry.instrumentationPackage);
+        const mod = await this._importInstrumentationPackage(entry.instrumentationPackage);
         const InstrumentorClass = mod[entry.instrumentorClass] ?? mod.default;
         if (InstrumentorClass) {
           await this._activate(new InstrumentorClass());
@@ -383,6 +400,15 @@ export class Respan {
   }
 
   // ── Private helpers ───────────────────────────────────────────────────
+
+  private async _importInstrumentationPackage(packageName: string): Promise<any> {
+    try {
+      const hostRequire = createRequire(`${process.cwd()}/package.json`);
+      return await import(pathToFileURL(hostRequire.resolve(packageName)).href);
+    } catch {
+      return await import(packageName);
+    }
+  }
 
   private _isDisabled(entry: AutoInstrumentationEntry): boolean {
     return this._disabledInstrumentations.some((disabled) =>

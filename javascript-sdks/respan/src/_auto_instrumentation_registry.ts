@@ -3,6 +3,7 @@ export type AutoInstrumentationCategory =
   | "agent-framework"
   | "app-framework"
   | "protocol-or-tooling"
+  | "observability"
   | "vector-db";
 
 export type InstrumentationStatus =
@@ -23,6 +24,7 @@ export interface AutoInstrumentationEntry {
   aliases?: string[];
   conflictsWith?: string[];
   genericTracingNames?: string[];
+  autoDisabledReason?: string;
   docsUrl?: string;
 }
 
@@ -37,7 +39,14 @@ export interface InstrumentationStatusEntry {
   reason?: string;
 }
 
-export const DIRECT_LLM_AUTO_INSTRUMENTATIONS: AutoInstrumentationEntry[] = [
+const FRAMEWORK_DISABLED_REASON =
+  "not auto-discovered; add explicitly when you want framework-level tracing to avoid duplicate LLM spans";
+const OBSERVABILITY_DISABLED_REASON =
+  "not auto-discovered; add explicitly because it translates an existing tracing/observability pipeline";
+const TOOLING_DISABLED_REASON =
+  "not auto-discovered; add explicitly because it is not a direct LLM SDK";
+
+export const AUTO_INSTRUMENTATION_REGISTRY: AutoInstrumentationEntry[] = [
   {
     id: "openai",
     category: "direct-llm",
@@ -48,7 +57,7 @@ export const DIRECT_LLM_AUTO_INSTRUMENTATIONS: AutoInstrumentationEntry[] = [
     enabledByDefault: true,
     priority: 100,
     aliases: ["openAI", "OpenAIInstrumentor"],
-    conflictsWith: ["openai-agents"],
+    conflictsWith: ["openai-agents", "vercel-ai", "langchain", "llama-index"],
     genericTracingNames: ["openAI"],
     docsUrl: "https://respan.ai/docs/integrations/openai-sdk",
   },
@@ -62,7 +71,7 @@ export const DIRECT_LLM_AUTO_INSTRUMENTATIONS: AutoInstrumentationEntry[] = [
     enabledByDefault: true,
     priority: 100,
     aliases: ["AnthropicInstrumentor"],
-    conflictsWith: ["claude-agent-sdk"],
+    conflictsWith: ["claude-agent-sdk", "vercel-ai", "langchain", "llama-index"],
     genericTracingNames: ["anthropic"],
     docsUrl: "https://respan.ai/docs/integrations/anthropic",
   },
@@ -76,6 +85,7 @@ export const DIRECT_LLM_AUTO_INSTRUMENTATIONS: AutoInstrumentationEntry[] = [
     enabledByDefault: true,
     priority: 100,
     aliases: ["azureOpenAI", "AzureOpenAIInstrumentor"],
+    conflictsWith: ["vercel-ai", "langchain", "llama-index"],
     genericTracingNames: ["azureOpenAI"],
     docsUrl: "https://respan.ai/docs/integrations/providers/azure",
   },
@@ -89,6 +99,7 @@ export const DIRECT_LLM_AUTO_INSTRUMENTATIONS: AutoInstrumentationEntry[] = [
     enabledByDefault: true,
     priority: 100,
     aliases: ["googleVertexAI", "vertex-ai", "VertexAIInstrumentor"],
+    conflictsWith: ["google-adk", "vercel-ai", "langchain", "llama-index"],
     genericTracingNames: ["googleVertexAI"],
     docsUrl: "https://respan.ai/docs/integrations/vertex-ai",
   },
@@ -102,9 +113,171 @@ export const DIRECT_LLM_AUTO_INSTRUMENTATIONS: AutoInstrumentationEntry[] = [
     enabledByDefault: true,
     priority: 100,
     aliases: ["OpenRouterInstrumentor"],
+    conflictsWith: ["vercel-ai", "langchain", "llama-index"],
     docsUrl: "https://respan.ai/docs/integrations/openrouter",
   },
+  {
+    id: "vercel-ai",
+    category: "app-framework",
+    sdkPackage: "ai",
+    instrumentationPackage: "@respan/instrumentation-vercel",
+    instrumentorClass: "VercelAIInstrumentor",
+    enabledByDefault: false,
+    priority: 50,
+    aliases: ["vercel", "VercelAIInstrumentor"],
+    autoDisabledReason: FRAMEWORK_DISABLED_REASON,
+  },
+  {
+    id: "langchain",
+    category: "app-framework",
+    sdkPackage: "@langchain/core",
+    instrumentationPackage: "@respan/instrumentation-langchain",
+    instrumentorClass: "LangChainInstrumentor",
+    enabledByDefault: false,
+    priority: 50,
+    aliases: ["langChain", "LangChainInstrumentor"],
+    genericTracingNames: ["langChain"],
+    autoDisabledReason: FRAMEWORK_DISABLED_REASON,
+  },
+  {
+    id: "llama-index",
+    category: "app-framework",
+    sdkPackage: "llamaindex",
+    instrumentationPackage: "@respan/instrumentation-llama-index",
+    instrumentorClass: "LlamaIndexInstrumentor",
+    enabledByDefault: false,
+    priority: 50,
+    aliases: ["llamaIndex", "LlamaIndexInstrumentor"],
+    genericTracingNames: ["llamaIndex"],
+    autoDisabledReason: FRAMEWORK_DISABLED_REASON,
+  },
+  {
+    id: "openai-agents",
+    category: "agent-framework",
+    sdkPackage: "@openai/agents",
+    instrumentationPackage: "@respan/instrumentation-openai-agents",
+    instrumentorClass: "OpenAIAgentsInstrumentor",
+    enabledByDefault: false,
+    priority: 40,
+    aliases: ["OpenAIAgentsInstrumentor"],
+    autoDisabledReason: FRAMEWORK_DISABLED_REASON,
+  },
+  {
+    id: "claude-agent-sdk",
+    category: "agent-framework",
+    sdkPackage: "@anthropic-ai/claude-agent-sdk",
+    instrumentationPackage: "@respan/instrumentation-claude-agent-sdk",
+    instrumentorClass: "ClaudeAgentSDKInstrumentor",
+    enabledByDefault: false,
+    priority: 40,
+    aliases: ["ClaudeAgentSDKInstrumentor"],
+    autoDisabledReason: FRAMEWORK_DISABLED_REASON,
+  },
+  {
+    id: "google-adk",
+    category: "agent-framework",
+    sdkPackage: "@google/adk",
+    instrumentationPackage: "@respan/instrumentation-google-adk",
+    instrumentorClass: "GoogleADKInstrumentor",
+    enabledByDefault: false,
+    priority: 40,
+    aliases: ["GoogleADKInstrumentor"],
+    autoDisabledReason: FRAMEWORK_DISABLED_REASON,
+  },
+  {
+    id: "strands-agents",
+    category: "agent-framework",
+    sdkPackage: "@strands-agents/sdk",
+    instrumentationPackage: "@respan/instrumentation-strands-agents",
+    instrumentorClass: "StrandsAgentsInstrumentor",
+    enabledByDefault: false,
+    priority: 40,
+    aliases: ["StrandsAgentsInstrumentor"],
+    autoDisabledReason: FRAMEWORK_DISABLED_REASON,
+  },
+  {
+    id: "beeai",
+    category: "agent-framework",
+    sdkPackage: "beeai-framework",
+    instrumentationPackage: "@respan/instrumentation-beeai",
+    instrumentorClass: "BeeAIInstrumentor",
+    enabledByDefault: false,
+    priority: 40,
+    aliases: ["BeeAIInstrumentor"],
+    autoDisabledReason: FRAMEWORK_DISABLED_REASON,
+  },
+  {
+    id: "mastra",
+    category: "agent-framework",
+    sdkPackage: "@mastra/core",
+    instrumentationPackage: "@respan/instrumentation-mastra",
+    instrumentorClass: "MastraInstrumentor",
+    enabledByDefault: false,
+    priority: 40,
+    aliases: ["MastraInstrumentor"],
+    autoDisabledReason: FRAMEWORK_DISABLED_REASON,
+  },
+  {
+    id: "mcp",
+    category: "protocol-or-tooling",
+    sdkPackage: "@modelcontextprotocol/sdk",
+    instrumentationPackage: "@respan/instrumentation-mcp",
+    instrumentorClass: "MCPInstrumentor",
+    enabledByDefault: false,
+    priority: 30,
+    aliases: ["MCPInstrumentor"],
+    autoDisabledReason: TOOLING_DISABLED_REASON,
+  },
+  {
+    id: "superagent",
+    category: "protocol-or-tooling",
+    sdkPackage: "safety-agent",
+    instrumentationPackage: "@respan/instrumentation-superagent",
+    instrumentorClass: "SuperagentInstrumentor",
+    enabledByDefault: false,
+    priority: 30,
+    aliases: ["SuperagentInstrumentor"],
+    autoDisabledReason: TOOLING_DISABLED_REASON,
+  },
+  {
+    id: "arize",
+    category: "observability",
+    sdkPackage: "@arizeai/phoenix-otel",
+    instrumentationPackage: "@respan/instrumentation-arize",
+    instrumentorClass: "ArizeInstrumentor",
+    enabledByDefault: false,
+    priority: 20,
+    aliases: ["ArizeInstrumentor"],
+    autoDisabledReason: OBSERVABILITY_DISABLED_REASON,
+  },
+  {
+    id: "braintrust",
+    category: "observability",
+    sdkPackage: "braintrust",
+    instrumentationPackage: "@respan/instrumentation-braintrust",
+    instrumentorClass: "BraintrustInstrumentor",
+    enabledByDefault: false,
+    priority: 20,
+    aliases: ["BraintrustInstrumentor"],
+    autoDisabledReason: OBSERVABILITY_DISABLED_REASON,
+  },
+  {
+    id: "openinference",
+    category: "observability",
+    sdkPackage: "@arizeai/openinference-instrumentation-*",
+    instrumentationPackage: "@respan/instrumentation-openinference",
+    instrumentorClass: "OpenInferenceInstrumentor",
+    enabledByDefault: false,
+    priority: 20,
+    aliases: ["OpenInferenceInstrumentor"],
+    autoDisabledReason: OBSERVABILITY_DISABLED_REASON,
+  },
 ];
+
+export const DIRECT_LLM_AUTO_INSTRUMENTATIONS: AutoInstrumentationEntry[] =
+  AUTO_INSTRUMENTATION_REGISTRY.filter(
+    (entry) => entry.category === "direct-llm",
+  );
 
 export function directLlmGenericTracingNames(): string[] {
   return DIRECT_LLM_AUTO_INSTRUMENTATIONS.flatMap(

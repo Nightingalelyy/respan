@@ -1,3 +1,8 @@
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
+
 /**
  * Respan instrumentation plugin for Azure OpenAI TypeScript clients.
  *
@@ -162,23 +167,14 @@ export class AzureOpenAIInstrumentor {
     if (this._options.openAIModule) {
       return this._options.openAIModule;
     }
-    try {
-      return await import("openai");
-    } catch {
-      return null;
-    }
+    return await importSdkModule("openai", "index.mjs");
   }
 
   private async _loadLegacyAzureOpenAIModule(): Promise<AnyRecord | null> {
     if (this._options.azureOpenAIModule) {
       return this._options.azureOpenAIModule;
     }
-    try {
-      const legacyPackageName = "@azure/openai";
-      return await import(legacyPackageName);
-    } catch {
-      return null;
-    }
+    return await importSdkModule("@azure/openai");
   }
 
   private _patchModernOpenAI(openAI: AnyRecord, patches: PatchRecord[]): void {
@@ -987,4 +983,19 @@ function finalizeStreamState(state: StreamState): AnyRecord {
     usage: state.usage,
     data: [],
   };
+}
+
+async function importSdkModule(packageName: string, esmEntryFile?: string): Promise<AnyRecord | null> {
+  try {
+    const hostRequire = createRequire(`${process.cwd()}/package.json`);
+    const resolved = hostRequire.resolve(packageName);
+    const entry = esmEntryFile ? join(dirname(resolved), esmEntryFile) : resolved;
+    return await import(pathToFileURL(existsSync(entry) ? entry : resolved).href);
+  } catch {
+    try {
+      return await import(packageName);
+    } catch {
+      return null;
+    }
+  }
 }

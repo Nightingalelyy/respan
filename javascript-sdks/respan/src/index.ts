@@ -9,6 +9,11 @@ export type {
   InstrumentationStatusEntry,
 } from "./_auto_instrumentation_registry.js";
 
+export {
+  AUTO_INSTRUMENTATION_REGISTRY,
+  DIRECT_LLM_AUTO_INSTRUMENTATIONS,
+} from "./_auto_instrumentation_registry.js";
+
 // Instrumentor wrappers
 export { OTELInstrumentor } from "./_otel_instrumentor.js";
 export { OpenInferenceInstrumentor } from "./_openinference_instrumentor.js";
