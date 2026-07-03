@@ -50,6 +50,24 @@
     },
     {
       "ecosystem": "javascript",
+      "name": "@respan/instrumentation-codex-sdk",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-codex-sdk",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
+      "name": "@respan/instrumentation-cursor",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-cursor",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
+      "name": "@respan/instrumentation-flue",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-flue",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
       "name": "@respan/instrumentation-llama-index",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-llama-index",
       "registry": "npm"
@@ -64,6 +82,12 @@
       "ecosystem": "javascript",
       "name": "@respan/instrumentation-mcp",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-mcp",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
+      "name": "@respan/instrumentation-livekit",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-livekit",
       "registry": "npm"
     },
     {
@@ -224,6 +248,12 @@
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-livekit",
+      "path": "python-sdks/instrumentations/respan-instrumentation-livekit",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-openinference",
       "path": "python-sdks/instrumentations/respan-instrumentation-openinference",
       "registry": "pypi"
@@ -256,6 +286,12 @@
       "ecosystem": "python",
       "name": "respan-instrumentation-crewai",
       "path": "python-sdks/instrumentations/respan-instrumentation-crewai",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-cursor-sdk",
+      "path": "python-sdks/instrumentations/respan-instrumentation-cursor-sdk",
       "registry": "pypi"
     },
     {
