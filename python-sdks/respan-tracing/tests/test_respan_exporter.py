@@ -214,7 +214,7 @@ def test_prepare_spans_adds_claude_agent_final_chat_child_for_tool_turn():
             "gen_ai.request.model": "claude-sonnet-4-5",
             "traceloop.entity.input": "Use the weather tool.",
             "traceloop.entity.output": "Tokyo is sunny and 22C.",
-            RESPAN_SPAN_TOOL_CALLS: json.dumps([
+            "gen_ai.completion.0.tool_calls": json.dumps([
                 {
                     "id": "call_1",
                     "type": "function",
@@ -243,6 +243,16 @@ def test_prepare_spans_adds_claude_agent_final_chat_child_for_tool_turn():
         synthetic_child.attributes["gen_ai.completion.0.content"]
         == "Tokyo is sunny and 22C."
     )
+    assert synthetic_child.attributes["gen_ai.completion.0.tool_calls"] == [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "lookup_weather",
+                "arguments": '{"city":"Tokyo"}',
+            },
+        }
+    ]
     assert synthetic_child.attributes["traceloop.entity.input"] == "Use the weather tool."
 
 
@@ -327,7 +337,7 @@ def test_prepare_spans_backfills_completion_content_from_output_when_needed():
             "gen_ai.system": "anthropic",
             "gen_ai.completion.0.role": "assistant",
             "gen_ai.completion.0.content": "",
-            RESPAN_SPAN_TOOL_CALLS: json.dumps(tool_calls),
+            "gen_ai.completion.0.tool_calls": json.dumps(tool_calls),
             SpanAttributes.TRACELOOP_ENTITY_OUTPUT: json.dumps(final_text),
         },
         scope_name="openinference.instrumentation.claude_agent_sdk",
@@ -336,7 +346,7 @@ def test_prepare_spans_backfills_completion_content_from_output_when_needed():
     prepared = _prepare_spans_for_export(spans=[chat_span])
     prepared_attrs = prepared[0].attributes
 
-    assert prepared_attrs["gen_ai.completion.0.tool_calls"] == tool_calls
+    assert json.loads(prepared_attrs["gen_ai.completion.0.tool_calls"]) == tool_calls
     assert prepared_attrs["gen_ai.completion.0.content"] == final_text
     assert prepared_attrs["gen_ai.completion.0.role"] == "assistant"
 
