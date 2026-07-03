@@ -145,6 +145,7 @@ def _install_fake_claude_agent_sdk_modules(
     )
     constants_module.GEN_AI_OUTPUT_MESSAGES = output_messages_attr
     constants_module.GEN_AI_USAGE_INPUT_TOKENS = usage_input_tokens_attr
+    constants_module.GEN_AI_USAGE_OUTPUT_TOKENS = usage_output_tokens_attr
     constants_module.GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS = (
         usage_cache_creation_tokens_attr
     )
@@ -416,7 +417,14 @@ def test_activate_patches_helpers_and_restores_originals(monkeypatch):
         },
     ]
     assert span.attributes["gen_ai.usage.input_tokens"] == 4
-    assert span.attributes["cost"] == 0.04241955
+    assert span.attributes["gen_ai.usage.output_tokens"] == 121
+    # Cost is emitted as respan.metadata.response_cost (string), matching the
+    # LiteLLM/OpenAI instrumentors, not a bare "cost" attribute (A7).
+    assert span.attributes["respan.metadata.response_cost"] == "0.04241955"
+    assert "cost" not in span.attributes
+    # The helper writes only raw input/output; the span processor owns
+    # prompt/completion/total, so the helper must not pre-empt them here.
+    assert "gen_ai.usage.total_tokens" not in span.attributes
 
     instrumentor.deactivate()
 

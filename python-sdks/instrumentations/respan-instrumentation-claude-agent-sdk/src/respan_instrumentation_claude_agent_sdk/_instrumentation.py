@@ -14,6 +14,7 @@ from respan_instrumentation_claude_agent_sdk._processor import (  # type: ignore
     ClaudeAgentSDKSpanProcessor,
     _safe_json_loads,
 )
+from respan_sdk.constants.span_attributes import RESPAN_METADATA
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,9 @@ class ClaudeAgentSDKInstrumentor:
         )
 
     def _patch_upstream_helpers(self) -> bool:
+        if self._patched_modules:
+            return True
+
         try:
             query_module = importlib.import_module("claude_agent_sdk._internal.query")
             Query = getattr(query_module, "Query")
@@ -117,6 +121,19 @@ class ClaudeAgentSDKInstrumentor:
                 "opentelemetry.instrumentation.claude_agent_sdk._spans"
             )
             instrumentor_class = _load_upstream_instrumentor_class()
+
+            # Read the upstream constant names inside the guarded block so a version
+            # that renames or drops one degrades to a logged no-op instead of an
+            # uncaught AttributeError out of activate().
+            output_messages_attr = constants_module.GEN_AI_OUTPUT_MESSAGES
+            usage_input_tokens_attr = constants_module.GEN_AI_USAGE_INPUT_TOKENS
+            usage_output_tokens_attr = constants_module.GEN_AI_USAGE_OUTPUT_TOKENS
+            usage_cache_creation_tokens_attr = (
+                constants_module.GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS
+            )
+            usage_cache_read_tokens_attr = (
+                constants_module.GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS
+            )
         except (AttributeError, ImportError) as exc:
             logger.warning(
                 "Failed to patch Claude Agent SDK helpers — missing dependency: %s",
@@ -124,17 +141,6 @@ class ClaudeAgentSDKInstrumentor:
             )
             return False
 
-        if self._patched_modules:
-            return True
-
-        output_messages_attr = constants_module.GEN_AI_OUTPUT_MESSAGES
-        usage_input_tokens_attr = constants_module.GEN_AI_USAGE_INPUT_TOKENS
-        usage_cache_creation_tokens_attr = (
-            constants_module.GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS
-        )
-        usage_cache_read_tokens_attr = (
-            constants_module.GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS
-        )
         serialize_value = getattr(spans_module, "_to_serializable", lambda value: value)
 
         original_set_response_content = spans_module.set_response_content
@@ -175,25 +181,37 @@ class ClaudeAgentSDKInstrumentor:
 
             usage = getattr(result_message, "usage", None)
             if isinstance(usage, dict):
-                input_tokens = usage.get("input_tokens", 0) or 0
-                cache_creation_tokens = usage.get("cache_creation_input_tokens", 0) or 0
-                cache_read_tokens = usage.get("cache_read_input_tokens", 0) or 0
+                input_tokens = int(usage.get("input_tokens", 0) or 0)
+                output_tokens = int(usage.get("output_tokens", 0) or 0)
+                cache_creation_tokens = int(
+                    usage.get("cache_creation_input_tokens", 0) or 0
+                )
+                cache_read_tokens = int(usage.get("cache_read_input_tokens", 0) or 0)
 
-                span.set_attribute(usage_input_tokens_attr, int(input_tokens))
+                # Emit the raw Anthropic input/output token counts. The span
+                # processor (ClaudeAgentSDKSpanProcessor) derives prompt/completion/
+                # total from these — with cache-token normalization and the override
+                # attr that rolls up into total_request_tokens — so writing those here
+                # would only pre-empt it. output_tokens was previously missing, which
+                # starved that roll-up and left total_request_tokens at 0 (A7).
+                span.set_attribute(usage_input_tokens_attr, input_tokens)
+                span.set_attribute(usage_output_tokens_attr, output_tokens)
                 if cache_creation_tokens > 0:
                     span.set_attribute(
                         usage_cache_creation_tokens_attr,
-                        int(cache_creation_tokens),
+                        cache_creation_tokens,
                     )
                 if cache_read_tokens > 0:
                     span.set_attribute(
                         usage_cache_read_tokens_attr,
-                        int(cache_read_tokens),
+                        cache_read_tokens,
                     )
 
             total_cost = getattr(result_message, "total_cost_usd", None)
-            if isinstance(total_cost, int | float):
-                span.set_attribute("cost", float(total_cost))
+            if isinstance(total_cost, (int, float)) and not isinstance(total_cost, bool):
+                # The backend reads cost from respan.metadata.response_cost (matches the
+                # LiteLLM/OpenAI instrumentors), not a bare "cost" attribute (A7).
+                span.set_attribute(f"{RESPAN_METADATA}.response_cost", str(total_cost))
 
         def patched_wrap_client_query(
             instrumentor: Any,
