@@ -29,3 +29,4 @@ EVENT_GEN_AI_TOOL_MESSAGE = "gen_ai.tool.message"
 EVENT_GEN_AI_CHOICE = "gen_ai.choice"
 
 LIVEKIT_RESPAN_TOOL_DEFINITIONS_ATTR = "lk.respan.function_tools"
+
