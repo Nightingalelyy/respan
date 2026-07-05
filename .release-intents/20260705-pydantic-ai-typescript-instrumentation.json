@@ -1,0 +1,9 @@
+{
+  "summary": "Refresh TypeScript agent instrumentations for current SDK telemetry and add Pydantic AI span translation",
+  "packages": {
+    "@respan/instrumentation-openai-agents": "minor",
+    "@respan/instrumentation-claude-agent-sdk": "minor",
+    "@respan/instrumentation-vercel": "minor",
+    "@respan/instrumentation-pydantic-ai": "new"
+  }
+}

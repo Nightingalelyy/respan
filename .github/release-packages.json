@@ -128,6 +128,12 @@
     },
     {
       "ecosystem": "javascript",
+      "name": "@respan/instrumentation-pydantic-ai",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-pydantic-ai",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
       "name": "@respan/instrumentation-superagent",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-superagent",
       "registry": "npm"
