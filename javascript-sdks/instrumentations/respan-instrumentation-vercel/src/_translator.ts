@@ -35,13 +35,16 @@ import {
   TL_REQUEST_FUNCTIONS,
   formatEmbeddingInput,
   formatEmbeddingOutput,
+  instrumentationScopeName,
+  isModernVercelAISpanName,
   isVercelAISpan,
+  isVercelAIScope,
   metadataKey,
   resolveLogType,
   safeJsonStr,
   setDefault,
 } from "./_translator/shared.js";
-import { enrichMetadata, enrichModel, enrichPerformanceMetrics, enrichTokens, stripRedundantAttrs } from "./_translator/span-enrichment.js";
+import { enrichMetadata, enrichModel, enrichPerformanceMetrics, enrichSystem, enrichTokens, stripRedundantAttrs } from "./_translator/span-enrichment.js";
 
 /**
  * SpanProcessor that translates Vercel AI SDK attributes to Traceloop/OpenLLMetry.
@@ -54,7 +57,8 @@ export class VercelAITranslator implements SpanProcessor {
   onStart(span: Span, _parentContext: Context): void {
     const writableSpan = span as any;
     const name: string = writableSpan.name ?? "";
-    if (!name.startsWith(AI_PREFIX)) {
+    const scopeName = instrumentationScopeName(writableSpan);
+    if (!name.startsWith(AI_PREFIX) && !isModernVercelAISpanName(name) && !isVercelAIScope(scopeName)) {
       return;
     }
 
@@ -104,12 +108,6 @@ export class VercelAITranslator implements SpanProcessor {
     enrichMetadata(attrs);
     delete attrs[TL_SPAN_KIND];
 
-    if (parentLogType !== undefined && !config) {
-      setDefault(attrs, RESPAN_LOG_TYPE, logType);
-      stripRedundantAttrs(attrs);
-      return;
-    }
-
     attrs[RESPAN_LOG_TYPE] = logType;
 
     if (config) {
@@ -127,6 +125,7 @@ export class VercelAITranslator implements SpanProcessor {
       if (config.isLLM) {
         setDefault(attrs, LLM_REQUEST_TYPE, RespanLogType.CHAT);
 
+        enrichSystem(attrs);
         enrichModel(attrs, attrs[AI_MODEL_ID]);
 
         const input = formatPromptInput(attrs);
@@ -157,6 +156,7 @@ export class VercelAITranslator implements SpanProcessor {
       if (config.logType === RespanLogType.EMBEDDING || logType === RespanLogType.EMBEDDING) {
         // input/output/tokens are mapped in the up-front embedding block.
         setDefault(attrs, LLM_REQUEST_TYPE, RespanLogType.EMBEDDING);
+        enrichSystem(attrs);
         enrichModel(attrs, attrs[AI_MODEL_ID]);
       }
 
@@ -178,6 +178,7 @@ export class VercelAITranslator implements SpanProcessor {
       }
     } else {
       if (logType === RespanLogType.TEXT) {
+        enrichSystem(attrs);
         enrichModel(attrs, attrs[AI_MODEL_ID]);
 
         enrichTokens(attrs);
@@ -194,12 +195,23 @@ export class VercelAITranslator implements SpanProcessor {
           setDefault(attrs, TL_ENTITY_OUTPUT, output);
         }
 
+        const toolsValue = parseToolsValue(attrs);
+        if (toolsValue) {
+          attrs[TL_REQUEST_FUNCTIONS] = safeJsonStr(toolsValue);
+        }
+
+        const toolChoice = parseToolChoice(attrs);
+        if (toolChoice) {
+          setDefault(attrs, metadataKey("tool_choice"), toolChoice);
+        }
+
         enrichPerformanceMetrics(attrs, name);
       }
 
       if (logType === RespanLogType.EMBEDDING) {
         // input/output/tokens are mapped in the up-front embedding block.
         setDefault(attrs, LLM_REQUEST_TYPE, RespanLogType.EMBEDDING);
+        enrichSystem(attrs);
         enrichModel(attrs, attrs[AI_MODEL_ID]);
       }
 
