@@ -20,7 +20,7 @@ import {
 import { RespanLogType, RespanSpanAttributes } from "@respan/respan-sdk";
 import type { Span, Trace } from "@openai/agents";
 
-const PACKAGE_VERSION = "1.0.3";
+const PACKAGE_VERSION = "1.0.6";
 const GEN_AI_USAGE_INPUT_TOKENS = ATTR_GEN_AI_USAGE_INPUT_TOKENS;
 const GEN_AI_USAGE_OUTPUT_TOKENS = ATTR_GEN_AI_USAGE_OUTPUT_TOKENS;
 const LLM_USAGE_CACHE_READ_INPUT_TOKENS = "llm.usage.cache_read_input_tokens";

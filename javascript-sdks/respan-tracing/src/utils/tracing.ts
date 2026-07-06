@@ -135,7 +135,7 @@ export const startTracing = async (options: RespanOptions) => {
     
     const instrumentationsList = getInstrumentations();
     console.debug(
-      `[Respan Debug] Total instrumentations ready for SDK: ${instrumentationsList.length}`
+      `[Respan Debug] Total OTEL auto-instrumentations ready for SDK: ${instrumentationsList.length}`
     );
   } catch (error) {
     console.error(
@@ -237,7 +237,7 @@ export const startTracing = async (options: RespanOptions) => {
 
   // Initialize SDK
   console.debug(
-    `[Respan Debug] Initializing NodeSDK with ${instrumentationsList.length} successfully loaded instrumentations:`,
+    `[Respan Debug] Initializing NodeSDK with ${instrumentationsList.length} successfully loaded OTEL auto-instrumentations:`,
     instrumentationsList.map((inst: any) => inst.constructor.name)
   );
 
