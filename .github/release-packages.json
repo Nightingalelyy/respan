@@ -20,6 +20,12 @@
     },
     {
       "ecosystem": "javascript",
+      "name": "@respan/instrumentation-aws-bedrock",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-aws-bedrock",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
       "name": "@respan/instrumentation-arize",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-arize",
       "registry": "npm"
@@ -46,6 +52,12 @@
       "ecosystem": "javascript",
       "name": "@respan/instrumentation-claude-agent-sdk",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-claude-agent-sdk",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
+      "name": "@respan/instrumentation-cohere",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-cohere",
       "registry": "npm"
     },
     {
@@ -87,7 +99,7 @@
     {
       "ecosystem": "javascript",
       "name": "@respan/instrumentation-livekit",
-      "path": "javascript-sdks/instrumentations/respan-instrumentation-livekit",      
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-livekit",
       "registry": "npm"
     },
     {
@@ -130,6 +142,12 @@
       "ecosystem": "javascript",
       "name": "@respan/instrumentation-vercel",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-vercel",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
+      "name": "@respan/instrumentation-writer",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-writer",
       "registry": "npm"
     },
     {
@@ -452,8 +470,8 @@
     },
     {
       "ecosystem": "python",
-      "name": "respan-instrumentation-agentscope",
-      "path": "python-sdks/instrumentations/respan-instrumentation-agentscope",
+      "name": "respan-instrumentation-watson-orchestrate-adk",
+      "path": "python-sdks/instrumentations/respan-instrumentation-watson-orchestrate-adk",
       "registry": "pypi"
     },
     {
@@ -467,6 +485,30 @@
       "name": "@respan/instrumentation-mastra",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-mastra",
       "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
+      "name": "@respan/instrumentation-together-ai",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-together-ai",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-semantic-kernel",
+      "path": "python-sdks/instrumentations/respan-instrumentation-semantic-kernel",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-microsoft-agent-framework",
+      "path": "python-sdks/instrumentations/respan-instrumentation-microsoft-agent-framework",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-agentscope",
+      "path": "python-sdks/instrumentations/respan-instrumentation-agentscope",
+      "registry": "pypi"
     }
   ]
 }
