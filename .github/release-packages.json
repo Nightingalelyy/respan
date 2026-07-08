@@ -503,6 +503,12 @@
       "name": "respan-instrumentation-microsoft-agent-framework",
       "path": "python-sdks/instrumentations/respan-instrumentation-microsoft-agent-framework",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-agentscope",
+      "path": "python-sdks/instrumentations/respan-instrumentation-agentscope",
+      "registry": "pypi"
     }
   ]
 }
