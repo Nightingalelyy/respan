@@ -491,6 +491,12 @@
       "name": "@respan/instrumentation-together-ai",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-together-ai",
       "registry": "npm"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-semantic-kernel",
+      "path": "python-sdks/instrumentations/respan-instrumentation-semantic-kernel",
+      "registry": "pypi"
     }
   ]
 }
