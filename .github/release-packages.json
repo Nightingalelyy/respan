@@ -497,6 +497,12 @@
       "name": "respan-instrumentation-semantic-kernel",
       "path": "python-sdks/instrumentations/respan-instrumentation-semantic-kernel",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-microsoft-agent-framework",
+      "path": "python-sdks/instrumentations/respan-instrumentation-microsoft-agent-framework",
+      "registry": "pypi"
     }
   ]
 }
