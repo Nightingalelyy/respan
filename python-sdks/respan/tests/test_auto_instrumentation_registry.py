@@ -333,6 +333,39 @@ class TestAutoInstrumentationRegistry(unittest.TestCase):
         self.assertEqual(respan.auto_instrumentation_status, ())
         self.assertIn("explicit", respan._instrumentations)
 
+    def test_shutdown_deactivates_instrumentations_and_flushes_telemetry(self):
+        events = []
+
+        class FakeTelemetry:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def flush(self):
+                events.append("flush")
+
+        class ExplicitInstrumentor:
+            name = "explicit"
+
+            def __init__(self):
+                self._is_instrumented = False
+
+            def activate(self):
+                self._is_instrumented = True
+
+            def deactivate(self):
+                events.append("deactivate")
+                self._is_instrumented = False
+
+        with patch.object(_core, "RespanTelemetry", FakeTelemetry):
+            respan = _core.Respan(
+                api_key="test",
+                instrumentations=[ExplicitInstrumentor()],
+            )
+            respan.shutdown()
+
+        self.assertEqual(events, ["deactivate", "flush"])
+        self.assertEqual(respan._instrumentations, {})
+
 
 if __name__ == "__main__":
     unittest.main()

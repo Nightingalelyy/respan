@@ -167,9 +167,9 @@ def test_span_to_otlp_json_prefixes_decorator_span_names():
     ]
 
     assert [_span_to_otlp_json(span)["name"] for span in spans] == [
-        "WORKFLOW",
-        "AGENT.triage-service",
-        "TOOL.send_notification",
+        "workflow",
+        "agent.triage-service",
+        "tool.send_notification",
     ]
 
 
@@ -203,13 +203,40 @@ def test_span_to_otlp_json_prefixes_llm_span_names():
             name="text.gpt-4o-mini",
             span_id=2204,
         ),
+        _make_span(
+            name="ai.generateText.doGenerate",
+            span_id=2205,
+            attributes={
+                RESPAN_LOG_TYPE: "generation",
+                "ai.model.id": "claude-3-5-sonnet",
+            },
+        ),
+        _make_span(
+            name="llm.doGenerate",
+            span_id=2206,
+            attributes={
+                RESPAN_LOG_TYPE: "text",
+                LLM_REQUEST_MODEL: "gpt-4.1",
+            },
+        ),
+        _make_span(
+            name="openai.chat",
+            span_id=2207,
+            attributes={
+                RESPAN_LOG_TYPE: "chat",
+                LLM_REQUEST_MODEL: "gpt-5.5",
+            },
+        ),
     ]
 
     assert [_span_to_otlp_json(span)["name"] for span in spans] == [
-        "LLM",
-        "LLM",
-        "EMBEDDING",
-        "LLM",
+        "llm.gpt-4o",
+        "llm",
+        "embedding",
+        "llm.gpt-4o-mini",
+        "llm.claude-3-5-sonnet",
+        "llm.gpt-4.1",
+        "llm.gpt-5.5",
     ]
 
 
@@ -484,6 +511,6 @@ def test_export_keeps_tool_helper_spans_in_single_otlp_pipeline():
     ]
     assert len(otlp_spans) == 2
     assert [span["name"] for span in otlp_spans] == [
-        "LLM",
+        "llm",
         "http.request",
     ]

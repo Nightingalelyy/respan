@@ -1,4 +1,4 @@
-"""Shared runtime helpers for Anthropic Agent SDK examples."""
+"""Shared runtime helpers for Claude Agent SDK examples."""
 
 import asyncio
 import os
@@ -40,7 +40,7 @@ async def query_for_result(
     Claude Code can emit noisy hook callback errors to stderr and sometimes
     exit non-zero after already yielding a final ResultMessage.
 
-    query() is auto-instrumented by ``AnthropicAgentsInstrumentor`` — no
+    query() is auto-instrumented by ``ClaudeAgentSDKInstrumentor`` — no
     exporter argument needed.
     """
     result: ResultMessage | None = None

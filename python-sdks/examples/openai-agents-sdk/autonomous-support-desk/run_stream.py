@@ -82,7 +82,6 @@ async def main() -> None:
             await asyncio.sleep(0.02)  # gentle animation pacing
 
     await asyncio.gather(*tasks)
-    telemetry.flush()
     print(f"\nWrote event stream to {NDJSON_PATH}. Traces at https://platform.respan.ai")
 
 
