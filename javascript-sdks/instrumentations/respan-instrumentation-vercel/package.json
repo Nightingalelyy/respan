@@ -29,7 +29,9 @@
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/sdk-trace-base": "^1.29.0",
-    "@respan/respan-sdk": "^1.0.0"
+    "@opentelemetry/semantic-conventions": "^1.40.0",
+    "@respan/respan-sdk": "^1.0.0",
+    "@traceloop/ai-semantic-conventions": "^0.13.0"
   },
   "devDependencies": {
     "@types/node": "^22.15.29",

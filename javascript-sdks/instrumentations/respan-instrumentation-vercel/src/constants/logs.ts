@@ -40,12 +40,12 @@ export const VERCEL_SPAN_CONFIG: Record<string, VercelSpanConfig> = {
   "ai.workflow":   { kind: RespanLogType.WORKFLOW,  logType: RespanLogType.WORKFLOW, isLLM: false },
 
   // Function / handoff
-  "ai.function": { kind: RespanLogType.TOOL, logType: RespanLogType.FUNCTION, isLLM: false },
-  "ai.handoff":  { kind: RespanLogType.TASK, logType: RespanLogType.HANDOFF,  isLLM: false },
+  "ai.function": { kind: RespanLogType.TOOL, logType: RespanLogType.TOOL, isLLM: false },
+  "ai.handoff":  { kind: RespanLogType.TASK, logType: RespanLogType.TASK, isLLM: false },
 
   // Media
-  "ai.transcript": { kind: RespanLogType.TASK, logType: RespanLogType.TRANSCRIPTION, isLLM: false },
-  "ai.speech":     { kind: RespanLogType.TASK, logType: RespanLogType.SPEECH,        isLLM: false },
+  "ai.transcript": { kind: RespanLogType.TASK, logType: RespanLogType.TEXT, isLLM: false },
+  "ai.speech":     { kind: RespanLogType.TASK, logType: RespanLogType.TEXT, isLLM: false },
 
   // Other
   "ai.response":          { kind: RespanLogType.TASK, logType: RespanLogType.TEXT,     isLLM: true },

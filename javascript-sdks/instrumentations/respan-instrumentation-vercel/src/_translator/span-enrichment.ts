@@ -1,27 +1,21 @@
 import {
-  AI_MODEL_ID,
-  AI_OPERATION_ID,
-  AI_EMBEDDING,
-  AI_EMBEDDINGS,
-  AI_VALUE,
-  AI_VALUES,
-  AI_PROMPT,
-  AI_PROMPT_MESSAGES,
-  AI_PROMPT_TOOL_CHOICE,
-  AI_PROMPT_TOOLS,
-  AI_RESPONSE_OBJECT,
   AI_RESPONSE_MS_TO_FINISH,
-  AI_RESPONSE_TEXT,
-  AI_RESPONSE_TOOL_CALLS,
-  AI_SDK,
+  AI_PREFIX,
+  AI_MODEL_PROVIDER,
   AI_TELEMETRY_METADATA_PREFIX,
-  AI_TOOL_CALL_ARGS,
-  AI_TOOL_CALL_ID,
-  AI_TOOL_CALL_NAME,
-  AI_TOOL_CALL_RESULT,
+  AI_USAGE_CACHED_INPUT_TOKENS,
+  AI_USAGE_COMPLETION_TOKENS,
+  AI_USAGE_INPUT_TOKENS,
+  AI_USAGE_OUTPUT_TOKENS,
+  AI_USAGE_PROMPT_TOKENS,
+  AI_USAGE_TOTAL_TOKENS,
   CUSTOMER_EMAIL,
   CUSTOMER_ID,
   CUSTOMER_NAME,
+  GEN_AI_SYSTEM,
+  GEN_AI_PROVIDER_NAME,
+  GEN_AI_RESPONSE_FINISH_REASONS,
+  GEN_AI_RESPONSE_ID,
   GEN_AI_USAGE_COST,
   GEN_AI_USAGE_GENERATION_TIME,
   GEN_AI_USAGE_INPUT_TOKENS,
@@ -32,6 +26,11 @@ import {
   GEN_AI_USAGE_WARNINGS,
   GEN_AI_USAGE_COMPLETION_TOKENS,
   GEN_AI_USAGE_PROMPT_TOKENS,
+  LLM_USAGE_CACHE_READ_INPUT_TOKENS,
+  LLM_USAGE_TOTAL_TOKENS,
+  RESPAN_SPAN_HANDOFFS,
+  RESPAN_SPAN_TOOL_CALLS,
+  RESPAN_SPAN_TOOLS,
   SESSION_ID,
   THREAD_ID,
   TRACE_GROUP_ID,
@@ -111,31 +110,90 @@ export function enrichModel(attrs: SpanAttributes, modelId: unknown): void {
   setDefault(attrs, GEN_AI_REQUEST_MODEL, model);
 }
 
+function normalizeSystem(system: unknown): string | undefined {
+  if (!system) {
+    return undefined;
+  }
+
+  const value = String(system).trim().toLowerCase();
+  if (!value) {
+    return undefined;
+  }
+
+  if (value.includes("openai")) return "openai";
+  if (value.includes("anthropic")) return "anthropic";
+  if (value.includes("google") || value.includes("gemini")) return "google";
+  if (value.includes("bedrock")) return "bedrock";
+  if (value.includes("azure")) return "azure";
+  if (value.includes("mistral")) return "mistral";
+  if (value.includes("cohere")) return "cohere";
+  if (value.includes("groq")) return "groq";
+  if (value.includes("xai")) return "xai";
+  if (value.includes("deepseek")) return "deepseek";
+
+  return value.split(/[.:/]/, 1)[0] || value;
+}
+
+export function enrichSystem(attrs: SpanAttributes): void {
+  const system = normalizeSystem(attrs[GEN_AI_SYSTEM] ?? attrs[GEN_AI_PROVIDER_NAME] ?? attrs[AI_MODEL_PROVIDER]);
+  if (system) {
+    setDefault(attrs, GEN_AI_SYSTEM, system);
+  }
+}
+
+function numberAttr(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : undefined;
+}
+
 export function enrichTokens(attrs: SpanAttributes): void {
   const inputTokens =
     attrs[GEN_AI_USAGE_INPUT_TOKENS] ??
-    attrs["gen_ai.usage.prompt_tokens"] ??
-    attrs["ai.usage.promptTokens"];
+    attrs[GEN_AI_USAGE_PROMPT_TOKENS] ??
+    attrs[AI_USAGE_INPUT_TOKENS] ??
+    attrs[AI_USAGE_PROMPT_TOKENS];
   const outputTokens =
     attrs[GEN_AI_USAGE_OUTPUT_TOKENS] ??
-    attrs["gen_ai.usage.completion_tokens"] ??
-    attrs["ai.usage.completionTokens"];
+    attrs[GEN_AI_USAGE_COMPLETION_TOKENS] ??
+    attrs[AI_USAGE_OUTPUT_TOKENS] ??
+    attrs[AI_USAGE_COMPLETION_TOKENS];
+  const totalTokens = attrs[LLM_USAGE_TOTAL_TOKENS] ?? attrs[AI_USAGE_TOTAL_TOKENS];
+  const cacheReadInputTokens = attrs[LLM_USAGE_CACHE_READ_INPUT_TOKENS] ?? attrs[AI_USAGE_CACHED_INPUT_TOKENS];
 
-  if (inputTokens !== undefined) {
-    const promptTokens = Number(inputTokens);
+  const promptTokens = numberAttr(inputTokens);
+  const completionTokens = numberAttr(outputTokens);
+
+  if (promptTokens !== undefined) {
     setDefault(attrs, GEN_AI_USAGE_INPUT_TOKENS, promptTokens);
     setDefault(attrs, GEN_AI_USAGE_PROMPT_TOKENS, promptTokens);
   }
-  if (outputTokens !== undefined) {
-    const completionTokens = Number(outputTokens);
+  if (completionTokens !== undefined) {
     setDefault(attrs, GEN_AI_USAGE_OUTPUT_TOKENS, completionTokens);
     setDefault(attrs, GEN_AI_USAGE_COMPLETION_TOKENS, completionTokens);
+  }
+
+  const resolvedTotalTokens = numberAttr(totalTokens) ?? (
+    promptTokens !== undefined && completionTokens !== undefined
+      ? promptTokens + completionTokens
+      : undefined
+  );
+  if (resolvedTotalTokens !== undefined) {
+    setDefault(attrs, LLM_USAGE_TOTAL_TOKENS, resolvedTotalTokens);
+  }
+
+  const resolvedCacheReadInputTokens = numberAttr(cacheReadInputTokens);
+  if (resolvedCacheReadInputTokens !== undefined) {
+    setDefault(attrs, LLM_USAGE_CACHE_READ_INPUT_TOKENS, resolvedCacheReadInputTokens);
   }
 }
 
 export function enrichPerformanceMetrics(attrs: SpanAttributes, spanName: string): void {
   // Streaming is a first-class promoted attribute (llm.is_streaming), not metadata.
-  setDefault(attrs, "llm.is_streaming", spanName.includes("doStream"));
+  setDefault(attrs, "llm.is_streaming", spanName.toLowerCase().includes("stream"));
 
   const msToFinish = attrs[AI_RESPONSE_MS_TO_FINISH];
   if (msToFinish !== undefined) {
@@ -168,52 +226,10 @@ export function enrichPerformanceMetrics(attrs: SpanAttributes, spanName: string
   }
 }
 
-const VERCEL_ATTRS_TO_STRIP = [
-  AI_MODEL_ID,
-  "ai.model.provider",
-  "ai.response.model",
-  AI_PROMPT,
-  AI_PROMPT_MESSAGES,
-  "ai.prompt.format",
-  AI_RESPONSE_TEXT,
-  AI_RESPONSE_OBJECT,
-  AI_EMBEDDING,
-  AI_EMBEDDINGS,
-  AI_VALUE,
-  AI_VALUES,
-  "ai.usage.promptTokens",
-  "ai.usage.completionTokens",
-  "ai.usage.inputTokens",
-  "ai.usage.outputTokens",
-  "ai.usage.totalTokens",
-  "ai.usage.reasoningTokens",
-  "ai.usage.cachedInputTokens",
-  "ai.usage.tokens",
-  "ai.response.finishReason",
-  "ai.response.id",
-  "ai.response.timestamp",
-  "ai.response.providerMetadata",
-  AI_RESPONSE_MS_TO_FINISH,
-  "ai.response.msToFirstChunk",
-  "ai.response.avgOutputTokensPerSecond",
-  "ai.response.avgCompletionTokensPerSecond",
-  "ai.request.headers.user-agent",
-  AI_PROMPT_TOOL_CHOICE,
-  AI_OPERATION_ID,
-  "ai.settings.maxRetries",
-  "ai.settings.maxSteps",
-  AI_SDK,
+const NON_CONTRACT_ATTRS_TO_STRIP = [
   "operation.name",
-  AI_TOOL_CALL_ID,
-  AI_TOOL_CALL_NAME,
-  AI_TOOL_CALL_ARGS,
-  AI_TOOL_CALL_RESULT,
-  AI_RESPONSE_TOOL_CALLS,
-  "gen_ai.response.finish_reasons",
-  "gen_ai.response.id",
-  "gen_ai.system",
-  "traceloop.entity.name",
-  "traceloop.entity.path",
+  GEN_AI_RESPONSE_FINISH_REASONS,
+  GEN_AI_RESPONSE_ID,
   "service.name",
   "telemetry.sdk.language",
   "telemetry.sdk.name",
@@ -239,23 +255,33 @@ const VERCEL_ATTRS_TO_STRIP = [
   "net.peer.name",
 ];
 
+const OFF_CONTRACT_ALIAS_ATTRS_TO_STRIP = [
+  "tools",
+  "tool_calls",
+  "model",
+  "prompt_tokens",
+  "completion_tokens",
+  "total_request_tokens",
+  "span_tools",
+  "has_tool_calls",
+  "parallel_tool_calls",
+  RESPAN_SPAN_TOOLS,
+  RESPAN_SPAN_TOOL_CALLS,
+  RESPAN_SPAN_HANDOFFS,
+];
+
 export function stripRedundantAttrs(attrs: SpanAttributes): void {
-  for (const key of VERCEL_ATTRS_TO_STRIP) {
+  for (const key of NON_CONTRACT_ATTRS_TO_STRIP) {
+    delete attrs[key];
+  }
+
+  for (const key of OFF_CONTRACT_ALIAS_ATTRS_TO_STRIP) {
     delete attrs[key];
   }
 
   for (const key of Object.keys(attrs)) {
-    if (key.startsWith(AI_TELEMETRY_METADATA_PREFIX)) {
-      delete attrs[key];
-      continue;
-    }
-
-    if (key.startsWith("ai.usage.") && key.includes("Details.")) {
+    if (key.startsWith(AI_PREFIX)) {
       delete attrs[key];
     }
-  }
-
-  if (attrs[AI_PROMPT_TOOLS] !== undefined) {
-    delete attrs[AI_PROMPT_TOOLS];
   }
 }
