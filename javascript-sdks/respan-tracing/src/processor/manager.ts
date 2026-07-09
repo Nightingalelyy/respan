@@ -4,6 +4,7 @@ import {
   ReadableSpan,
   SpanExporter,
   BatchSpanProcessor,
+  SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 import { RespanSpanAttributes } from "@respan/respan-sdk";
 
@@ -19,6 +20,13 @@ export interface ProcessorConfig {
   filter?: (span: ReadableSpan) => boolean;
   /** Optional priority (higher = processed first) */
   priority?: number;
+  /** Send spans immediately without batching. Useful for short-lived scripts. */
+  disableBatch?: boolean;
+}
+
+export interface MultiProcessorManagerOptions {
+  /** Send spans immediately without batching. Useful for short-lived scripts. */
+  disableBatch?: boolean;
 }
 
 /**
@@ -53,12 +61,17 @@ export class MultiProcessorManager implements SpanProcessor {
     config: ProcessorConfig;
   }> = [];
 
+  constructor(private readonly options: MultiProcessorManagerOptions = {}) {}
+
   /**
    * Add a new processor with routing configuration
    * @param config - Processor configuration
    */
   addProcessor(config: ProcessorConfig): void {
-    const processor = new BatchSpanProcessor(config.exporter);
+    const disableBatch = config.disableBatch ?? this.options.disableBatch ?? false;
+    const processor = disableBatch
+      ? new SimpleSpanProcessor(config.exporter)
+      : new BatchSpanProcessor(config.exporter);
     
     // Insert in priority order (higher priority first)
     const priority = config.priority ?? 0;
@@ -73,7 +86,7 @@ export class MultiProcessorManager implements SpanProcessor {
     }
 
     console.debug(
-      `[Respan] Added processor "${config.name}" with priority ${priority}`
+      `[Respan] Added processor "${config.name}" with priority ${priority} (${disableBatch ? "simple" : "batch"} mode)`
     );
   }
 
