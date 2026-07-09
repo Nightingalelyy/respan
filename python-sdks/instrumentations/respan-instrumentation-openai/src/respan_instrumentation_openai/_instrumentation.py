@@ -13,7 +13,9 @@ from __future__ import annotations
 import importlib
 import logging
 import time
-from typing import Any, Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Callable, Iterator
 
 from respan_instrumentation_openai._constants import (
     ASYNC_CHAT_CLASS,
@@ -35,6 +37,23 @@ from respan_instrumentation_openai import _otel_emitter as emitter
 logger = logging.getLogger(__name__)
 
 _original_methods: dict[tuple[type[Any], str], Any] = {}
+_SUPPRESS_OPENAI_INSTRUMENTATION: ContextVar[bool] = ContextVar(
+    "respan_suppress_openai_instrumentation",
+    default=False,
+)
+
+
+def _is_openai_instrumentation_suppressed() -> bool:
+    return bool(_SUPPRESS_OPENAI_INSTRUMENTATION.get())
+
+
+@contextmanager
+def suppress_openai_instrumentation() -> Iterator[None]:
+    token = _SUPPRESS_OPENAI_INSTRUMENTATION.set(True)
+    try:
+        yield
+    finally:
+        _SUPPRESS_OPENAI_INSTRUMENTATION.reset(token)
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +202,9 @@ def _make_sync_wrapper(original: Any, *, kind: str) -> Any:
     emit_fn, _ = _KINDS[kind]
 
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if _is_openai_instrumentation_suppressed():
+            return original(self, *args, **kwargs)
+
         start_ns = time.time_ns()
         try:
             response = original(self, *args, **kwargs)
@@ -201,6 +223,10 @@ def _make_async_wrapper(original: Any, *, kind: str) -> Any:
     emit_fn, _ = _KINDS[kind]
 
     async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if _is_openai_instrumentation_suppressed():
+            pending = original(self, *args, **kwargs)
+            return pending if hasattr(pending, "__aiter__") else await pending
+
         start_ns = time.time_ns()
         try:
             pending = original(self, *args, **kwargs)

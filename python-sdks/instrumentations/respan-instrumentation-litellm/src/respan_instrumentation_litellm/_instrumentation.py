@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import importlib
 import logging
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Iterator
 
 from respan_instrumentation_litellm._callback import RespanLiteLLMCallback
 from respan_instrumentation_litellm._callback import _current_otel_parent
@@ -89,6 +90,20 @@ def _callback_list(callbacks: Any) -> list[Any]:
     if isinstance(callbacks, tuple):
         return list(callbacks)
     return [callbacks]
+
+
+@contextmanager
+def _suppress_nested_openai_spans() -> Iterator[None]:
+    try:
+        from respan_instrumentation_openai._instrumentation import (
+            suppress_openai_instrumentation,
+        )
+    except Exception:
+        yield
+        return
+
+    with suppress_openai_instrumentation():
+        yield
 
 
 def _with_skip_marker(kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -279,13 +294,15 @@ class LiteLLMInstrumentor:
 
             def completion_wrapper(*args: Any, **kwargs: Any) -> Any:
                 if not kwargs.get(STREAM_KEY):
-                    return original_completion(*args, **kwargs)
+                    with _suppress_nested_openai_spans():
+                        return original_completion(*args, **kwargs)
 
                 event_kwargs = dict(kwargs)
                 start_time = datetime.now(timezone.utc)
                 parent_context = _current_otel_parent()
                 try:
-                    stream = original_completion(*args, **_with_skip_marker(kwargs))
+                    with _suppress_nested_openai_spans():
+                        stream = original_completion(*args, **_with_skip_marker(kwargs))
                 except Exception as exc:
                     callback._emit_event(
                         kwargs=event_kwargs,
@@ -311,15 +328,17 @@ class LiteLLMInstrumentor:
 
             async def acompletion_wrapper(*args: Any, **kwargs: Any) -> Any:
                 if not kwargs.get(STREAM_KEY):
-                    return await original_acompletion(*args, **kwargs)
+                    with _suppress_nested_openai_spans():
+                        return await original_acompletion(*args, **kwargs)
 
                 event_kwargs = dict(kwargs)
                 start_time = datetime.now(timezone.utc)
                 parent_context = _current_otel_parent()
                 try:
-                    stream = await original_acompletion(
-                        *args, **_with_skip_marker(kwargs)
-                    )
+                    with _suppress_nested_openai_spans():
+                        stream = await original_acompletion(
+                            *args, **_with_skip_marker(kwargs)
+                        )
                 except Exception as exc:
                     callback._emit_event(
                         kwargs=event_kwargs,
