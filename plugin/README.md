@@ -5,20 +5,43 @@ installable Claude Code plugin. One install gives a user the Respan know-how
 (tracing, gateway, prompts, evals, datasets) **and** live access to the Respan
 platform via MCP tools — no separate `claude mcp add` step.
 
-## What's inside
+## Install
+
+From inside Claude Code:
 
 ```
-plugin/
+/plugin marketplace add respanai/respan
+/plugin install respan@respan
+```
+
+You'll be prompted for a Respan API key at install time (create one at
+https://platform.respan.ai); it's stored in your OS keychain, never in a settings
+file. Once installed, the `/respan` skill auto-activates by description and the
+hosted MCP tools (`mcp__respan__*`) are live in the session.
+
+> The plugin skill is namespaced by Claude Code as `/respan:respan` if you invoke
+> it explicitly — but you rarely need to type it, since it fires automatically
+> when a task matches its description.
+
+## What's inside
+
+The marketplace manifest lives at the **repo root** and points at this plugin
+directory, so `respanai/respan` resolves as a marketplace on its own:
+
+```
+<repo root>/
 ├── .claude-plugin/
-│   ├── plugin.json         # manifest: name, version, api_key user config
-│   └── marketplace.json    # single-plugin marketplace (source: "./")
-├── .mcp.json               # connects the hosted MCP server at mcp.respan.ai
-├── scripts/
-│   └── build-plugin.mjs    # copies the shared skill into skills/ (see below)
-└── skills/
-    └── respan/             # GENERATED — do not hand-edit
-        ├── SKILL.md
-        └── references/*.md
+│   └── marketplace.json    # marketplace entry → source: "./plugin"
+└── plugin/
+    ├── .claude-plugin/
+    │   └── plugin.json     # plugin manifest: name, version, api_key user config
+    ├── .mcp.json           # connects the hosted MCP server at mcp.respan.ai
+    ├── scripts/
+    │   └── build-plugin.mjs  # copies the shared skill into skills/ (see below)
+    └── skills/
+        └── respan/         # GENERATED — do not hand-edit
+            ├── SKILL.md
+            └── references/*.md
 ```
 
 ## Single source of truth
@@ -40,7 +63,7 @@ CLI's copy.
 
 ## Test locally
 
-From the monorepo root, load the plugin without publishing anything:
+From the monorepo root, load the plugin directly without a marketplace:
 
 ```bash
 claude --plugin-dir ./plugin
@@ -49,10 +72,18 @@ claude --plugin-dir ./plugin
 You'll be prompted for a Respan API key (create one at https://platform.respan.ai).
 Then invoke the skill and confirm the MCP tools are live (`mcp__respan__*`).
 
-Validate the manifest before publishing:
+To exercise the full marketplace path (add + install) exactly as end users do,
+point Claude Code at the repo root:
 
 ```bash
-claude plugin validate ./plugin --strict
+claude plugin marketplace add ./
+claude plugin install respan@respan
+```
+
+Validate the marketplace + plugin from the repo root before publishing:
+
+```bash
+claude plugin validate . --strict
 ```
 
 ## Authentication
@@ -63,24 +94,21 @@ injects it as `Authorization: Bearer ${user_config.api_key}` against the hosted
 server `https://mcp.respan.ai/mcp`. The server also supports OAuth browser
 sign-in; API-key config is what this plugin ships with first.
 
-## Publishing to the community marketplace
+## Distribution
+
+The repo root ships a `.claude-plugin/marketplace.json` that references this
+plugin via `source: "./plugin"`, so `respanai/respan` resolves as a marketplace
+directly — that's the self-hosted install path shown under [Install](#install)
+above, and it's the canonical way to get the plugin. It needs no Anthropic review
+and updates the moment you push.
+
+To also list it in Anthropic's community catalog for discoverability at
+https://claude.com/plugins:
 
 1. `node plugin/scripts/build-plugin.mjs` and commit the result.
-2. `claude plugin validate ./plugin --strict`.
-3. Submit the plugin to Anthropic's community marketplace via
-   https://platform.claude.com/plugins/submit (the catalog pins to a commit SHA;
-   CI bumps the pin as you push).
-
-Users then install with:
-
-```
-/plugin marketplace add anthropics/claude-plugins-community
-/plugin install respan
-```
-
-Or, to self-host from this repo, point at the bundled `marketplace.json`:
-
-```
-/plugin marketplace add respanai/respan
-/plugin install respan
-```
+2. `claude plugin validate . --strict` (from the repo root).
+3. Submit at https://platform.claude.com/plugins/submit, pointing at
+   `respanai/respan`. Anthropic runs automated validation + safety screening,
+   pins your commit SHA in the catalog, and syncs nightly. **Don't** open a PR
+   against `anthropics/claude-plugins-community` — it's read-only and PRs are
+   auto-closed.
