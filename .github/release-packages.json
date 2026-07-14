@@ -248,6 +248,12 @@
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-marqo",
+      "path": "python-sdks/instrumentations/respan-instrumentation-marqo",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-langfuse",
       "path": "python-sdks/instrumentations/respan-instrumentation-langfuse",
       "registry": "pypi"
