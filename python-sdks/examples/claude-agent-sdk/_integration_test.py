@@ -21,9 +21,9 @@ from claude_agent_sdk import (
 from claude_agent_sdk.types import TextBlock
 
 from respan import Respan
-from respan_instrumentation_anthropic_agents import AnthropicAgentsInstrumentor
+from respan_instrumentation_claude_agent_sdk import ClaudeAgentSDKInstrumentor
 
-instrumentor = AnthropicAgentsInstrumentor()
+instrumentor = ClaudeAgentSDKInstrumentor()
 respan = Respan(instrumentations=[instrumentor])
 
 
@@ -76,13 +76,12 @@ async def main():
     # Run the auto-instrumented query with propagated attributes
     with respan.propagate_attributes(
         customer_identifier="integration-test-user",
-        metadata={"test": "anthropic-agents-instrumentation"},
+        metadata={"test": "claude-agent-sdk-instrumentation"},
     ):
         async for msg in claude_agent_sdk.query(prompt="What is 2 + 2?"):
             print(f"  {type(msg).__name__}: {getattr(msg, 'subtype', '')}")
 
     # Flush to ensure all payloads are sent
-    respan.flush()
 
     # Restore
     claude_agent_sdk.query = original_query

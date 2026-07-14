@@ -369,6 +369,7 @@ _SPAN_NAME_PREFIX_ALIASES = {
 _SUFFIXED_SPAN_NAME_PREFIXES = frozenset({
     LOG_TYPE_AGENT,
     LOG_TYPE_HANDOFF,
+    _LLM_SPAN_NAME_PREFIX,
     LOG_TYPE_TOOL,
 })
 _LOG_TYPE_TO_SPAN_NAME_PREFIX = {
@@ -407,11 +408,12 @@ _ENTITY_DETAIL_ATTRS_BY_PREFIX = {
     LOG_TYPE_WORKFLOW: (SpanAttributes.TRACELOOP_ENTITY_NAME,),
 }
 _LLM_DETAIL_ATTRS = (
-    SpanAttributes.TRACELOOP_ENTITY_NAME,
     LLM_REQUEST_MODEL,
+    "llm.model_name",
     "model",
-    GEN_AI_SYSTEM,
-    GEN_AI_OPERATION_NAME,
+    "ai.model.id",
+    "ai.response.model",
+    SpanAttributes.LLM_REQUEST_MODEL,
 )
 _CHAT_NAME_MARKERS = ("chat", "response", "responses")
 _GENERATION_NAME_MARKERS = ("generate", "generation", "completion")
@@ -434,7 +436,7 @@ def _first_present_attr(attrs: Mapping[str, Any], keys: Sequence[str]) -> Option
 
 
 def _display_span_name_prefix(prefix: str) -> str:
-    return prefix.upper()
+    return prefix.lower()
 
 
 def _normalize_existing_semantic_span_name(name: str) -> Optional[str]:
@@ -511,6 +513,9 @@ def _infer_span_name_prefix(name: str, attrs: Mapping[str, Any]) -> Optional[str
     if attrs.get(GEN_AI_SYSTEM):
         return _LLM_SPAN_NAME_PREFIX
 
+    if _first_present_attr(attrs, _LLM_DETAIL_ATTRS):
+        return _LLM_SPAN_NAME_PREFIX
+
     lower_name = name.lower()
     for candidate, prefix in _SPAN_NAME_PREFIX_ALIASES.items():
         if lower_name.startswith(f"{candidate} ") or lower_name.endswith(f".{candidate}"):
@@ -547,6 +552,9 @@ def _detail_tokens_for_prefix(prefix: str) -> Sequence[str]:
 
 
 def _span_name_detail(prefix: str, name: str, attrs: Mapping[str, Any]) -> Optional[str]:
+    if prefix == _LLM_SPAN_NAME_PREFIX:
+        return _first_present_attr(attrs, _LLM_DETAIL_ATTRS)
+
     attr_detail = _first_present_attr(
         attrs,
         _ENTITY_DETAIL_ATTRS_BY_PREFIX.get(prefix, ()),
@@ -561,7 +569,7 @@ def _span_name_detail(prefix: str, name: str, attrs: Mapping[str, Any]) -> Optio
     if stripped_detail:
         return stripped_detail
 
-    if prefix in {_LLM_SPAN_NAME_PREFIX, LOG_TYPE_EMBEDDING}:
+    if prefix == LOG_TYPE_EMBEDDING:
         llm_detail = _first_present_attr(attrs, _LLM_DETAIL_ATTRS)
         if llm_detail:
             return llm_detail
@@ -574,11 +582,16 @@ def _export_span_name(span: ReadableSpan) -> str:
     if not original_name:
         return getattr(span, "name", "")
 
+    attrs = span.attributes or {}
     existing_semantic_name = _normalize_existing_semantic_span_name(original_name)
     if existing_semantic_name:
-        return existing_semantic_name
+        is_llm_name = (
+            existing_semantic_name == _LLM_SPAN_NAME_PREFIX
+            or existing_semantic_name.startswith(f"{_LLM_SPAN_NAME_PREFIX}.")
+        )
+        if not is_llm_name or not _first_present_attr(attrs, _LLM_DETAIL_ATTRS):
+            return existing_semantic_name
 
-    attrs = span.attributes or {}
     prefix = _infer_span_name_prefix(original_name, attrs)
     if not prefix:
         return original_name

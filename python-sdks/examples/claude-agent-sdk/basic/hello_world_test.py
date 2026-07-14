@@ -1,10 +1,10 @@
 """
-Hello World — Anthropic Agent SDK + Respan tracing.
+Hello World — Claude Agent SDK + Respan tracing.
 
 The simplest possible example: ask Claude a question, see the trace in Respan.
 
 Setup:
-    pip install claude-agent-sdk respan-ai respan-instrumentation-anthropic-agents python-dotenv
+    pip install claude-agent-sdk respan-ai respan-instrumentation-claude-agent-sdk python-dotenv
 
 Run:
     python basic/hello_world_test.py
@@ -46,8 +46,7 @@ if __name__ == "__main__":
     load_dotenv(override=True)
 
     from respan import Respan
-    from respan_instrumentation_anthropic_agents import AnthropicAgentsInstrumentor
+    from respan_instrumentation_claude_agent_sdk import ClaudeAgentSDKInstrumentor
 
-    respan = Respan(instrumentations=[AnthropicAgentsInstrumentor()])
+    respan = Respan(instrumentations=[ClaudeAgentSDKInstrumentor()])
     asyncio.run(test_hello_world())
-    respan.flush()

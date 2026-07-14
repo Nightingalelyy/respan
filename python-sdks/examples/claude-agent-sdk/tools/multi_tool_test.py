@@ -6,7 +6,7 @@ Demonstrates a multi-turn agent that uses several tools to accomplish
 a task, with each tool call captured as a child span.
 
 Setup:
-    pip install claude-agent-sdk respan-ai respan-instrumentation-anthropic-agents python-dotenv
+    pip install claude-agent-sdk respan-ai respan-instrumentation-claude-agent-sdk python-dotenv
 
 Run:
     python tools/multi_tool_test.py
@@ -66,8 +66,7 @@ if __name__ == "__main__":
     load_dotenv(override=True)
 
     from respan import Respan
-    from respan_instrumentation_anthropic_agents import AnthropicAgentsInstrumentor
+    from respan_instrumentation_claude_agent_sdk import ClaudeAgentSDKInstrumentor
 
-    respan = Respan(instrumentations=[AnthropicAgentsInstrumentor()])
+    respan = Respan(instrumentations=[ClaudeAgentSDKInstrumentor()])
     asyncio.run(test_multi_tool())
-    respan.flush()
