@@ -33,6 +33,8 @@ export interface ProcessorConfig {
     filter?: (span: any) => boolean;
     /** Optional priority (higher = processed first) */
     priority?: number;
+    /** Send spans immediately without batching. Useful for short-lived scripts. */
+    disableBatch?: boolean;
 }
 
 /**

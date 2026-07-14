@@ -379,7 +379,7 @@ export class Respan {
    * Flush the OTEL pipeline.
    */
   async flush(): Promise<void> {
-    await this.telemetry.shutdown();
+    await this.telemetry.flush();
   }
 
   /**
