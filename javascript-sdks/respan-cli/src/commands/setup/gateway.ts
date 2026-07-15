@@ -20,7 +20,7 @@ opens your coding agent to route the detected framework through the gateway.`;
       description: 'Agent to configure (claude-code, cursor, codex-cli, gemini-cli, opencode)',
     }),
     'no-instrument': Flags.boolean({
-      description: 'Skip opening the agent after setup',
+      description: 'Skip agent selection and opening after setup',
       default: false,
     }),
   };
