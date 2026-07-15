@@ -15,10 +15,15 @@ import type { ReadableSpan, Span, SpanProcessor } from "@opentelemetry/sdk-trace
 import {
   ATTR_GEN_AI_AGENT_ID,
   ATTR_GEN_AI_AGENT_NAME,
+  ATTR_GEN_AI_TOOL_NAME,
 } from "@opentelemetry/semantic-conventions/incubating";
 import { RespanLogType, RespanSpanAttributes } from "@respan/respan-sdk";
 import { SpanAttributes as TraceloopSpanAttributes } from "@traceloop/ai-semantic-conventions";
-import { VERCEL_PARENT_SPANS, VERCEL_SPAN_CONFIG } from "./constants/index.js";
+import {
+  VERCEL_PARENT_SPANS,
+  VERCEL_SPAN_CONFIG,
+  VERCEL_STRUCTURAL_LLM_PARENT_SPANS,
+} from "./constants/index.js";
 import {
   formatCompletionOutput,
   formatPromptInput,
@@ -32,6 +37,7 @@ import {
   AI_MODEL_ID,
   AI_PREFIX,
   AI_TELEMETRY_METADATA_PREFIX,
+  AI_TOOL_CALL_NAME,
   formatEmbeddingInput,
   formatEmbeddingOutput,
   instrumentationScopeName,
@@ -55,6 +61,8 @@ import { enrichMetadata, enrichModel, enrichPerformanceMetrics, enrichSystem, en
 export class VercelAITranslator implements SpanProcessor {
   private _ownerCount: number;
   private readonly _inFlightSpans = new WeakSet<object>();
+  /** Open structural wrapper spans: spanId → its own parentSpanId. */
+  private readonly _openStructuralSpans = new Map<string, string | undefined>();
 
   constructor({ initiallyActive = true }: { initiallyActive?: boolean } = {}) {
     this._ownerCount = initiallyActive ? 1 : 0;
@@ -82,6 +90,43 @@ export class VercelAITranslator implements SpanProcessor {
 
     this._inFlightSpans.add(span as object);
 
+    const spanId: string | undefined =
+      typeof writableSpan.spanContext === "function"
+        ? writableSpan.spanContext()?.spanId
+        : undefined;
+    const parentSpanId: string | undefined = writableSpan.parentSpanId;
+
+    // If the parent chain starts inside an open structural wrapper, stamp the
+    // export-time parent (the wrapper's own parent) so the exporter can drop
+    // the wrapper per-span, immune to export-batch boundaries. "" marks a
+    // wrapper that was itself a root span — the child is promoted to root.
+    if (parentSpanId && this._openStructuralSpans.has(parentSpanId)) {
+      let exportParent: string | undefined = parentSpanId;
+      const seen = new Set<string>();
+      while (
+        exportParent &&
+        this._openStructuralSpans.has(exportParent) &&
+        !seen.has(exportParent)
+      ) {
+        seen.add(exportParent);
+        exportParent = this._openStructuralSpans.get(exportParent);
+      }
+      writableSpan.setAttribute(
+        RespanSpanAttributes.RESPAN_INTERNAL_EXPORT_PARENT,
+        exportParent ?? ""
+      );
+    }
+
+    if (VERCEL_STRUCTURAL_LLM_PARENT_SPANS.has(name)) {
+      // Structural wrapper: the .doGenerate/.doStream child carries the real
+      // model/input/output. The semantic export style drops it (children are
+      // reparented); the legacy style still exports it untouched.
+      writableSpan.setAttribute(RespanSpanAttributes.RESPAN_INTERNAL_DROP_SPAN, true);
+      if (spanId) {
+        this._openStructuralSpans.set(spanId, parentSpanId);
+      }
+    }
+
     const config = VERCEL_SPAN_CONFIG[name];
     if (config) {
       writableSpan.setAttribute(RespanSpanAttributes.RESPAN_LOG_TYPE, config.logType);
@@ -98,6 +143,11 @@ export class VercelAITranslator implements SpanProcessor {
   }
 
   onEnd(span: ReadableSpan): void {
+    const endedSpanId = span.spanContext?.().spanId;
+    if (endedSpanId) {
+      this._openStructuralSpans.delete(endedSpanId);
+    }
+
     const startedWhileActive = this._inFlightSpans.delete(span as object);
     if (this._ownerCount === 0 && !startedWhileActive) {
       return;
@@ -202,6 +252,8 @@ export class VercelAITranslator implements SpanProcessor {
       }
 
       if (config.logType === RespanLogType.TOOL || logType === RespanLogType.TOOL) {
+        setToolSpanNameHint(attrs, name);
+
         const toolInput = formatToolInput(attrs);
         if (toolInput) {
           setDefault(attrs, TraceloopSpanAttributes.TRACELOOP_ENTITY_INPUT, toolInput);
@@ -253,6 +305,8 @@ export class VercelAITranslator implements SpanProcessor {
       }
 
       if (logType === RespanLogType.TOOL) {
+        setToolSpanNameHint(attrs, name);
+
         const toolInput = formatToolInput(attrs);
         if (toolInput) {
           setDefault(attrs, TraceloopSpanAttributes.TRACELOOP_ENTITY_INPUT, toolInput);
@@ -274,6 +328,21 @@ export class VercelAITranslator implements SpanProcessor {
 
   shutdown(): Promise<void> {
     this._ownerCount = 0;
+    this._openStructuralSpans.clear();
     return Promise.resolve();
   }
+}
+
+/**
+ * Semantic-name hint for tool spans. The exporter derives the "tool" prefix
+ * from the log type, but the detail must be the tool's own name — the entity
+ * name on Vercel tool spans is the raw span name (e.g. "ai.toolCall").
+ */
+function setToolSpanNameHint(attrs: Record<string, any>, spanName: string): void {
+  setDefault(attrs, RespanSpanAttributes.RESPAN_INTERNAL_SPAN_NAME_KIND, "tool");
+  setDefault(
+    attrs,
+    RespanSpanAttributes.RESPAN_INTERNAL_SPAN_NAME_DETAIL,
+    attrs[AI_TOOL_CALL_NAME] ?? attrs[ATTR_GEN_AI_TOOL_NAME] ?? spanName.split(".").at(-1)
+  );
 }
