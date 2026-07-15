@@ -30,7 +30,11 @@ import {
 import { VercelAITranslator } from "./_translator.js";
 
 export { VercelAITranslator } from "./_translator.js";
-export { VERCEL_SPAN_CONFIG, VERCEL_PARENT_SPANS } from "./constants/index.js";
+export {
+  VERCEL_SPAN_CONFIG,
+  VERCEL_PARENT_SPANS,
+  VERCEL_STRUCTURAL_LLM_PARENT_SPANS,
+} from "./constants/index.js";
 
 export interface VercelAIInstrumentorOptions {
   /**

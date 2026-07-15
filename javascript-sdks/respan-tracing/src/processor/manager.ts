@@ -6,7 +6,14 @@ import {
   BatchSpanProcessor,
   SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
-import { RespanSpanAttributes } from "@respan/respan-sdk";
+import {
+  RespanSpanAttributes,
+  type RespanSpanNameStyle,
+} from "@respan/respan-sdk";
+import {
+  resolveSpanNameStyle,
+  SpanNameTransformingExporter,
+} from "./spanName.js";
 
 /**
  * Configuration for a processor
@@ -27,6 +34,8 @@ export interface ProcessorConfig {
 export interface MultiProcessorManagerOptions {
   /** Send spans immediately without batching. Useful for short-lived scripts. */
   disableBatch?: boolean;
+  /** Exported span.name style: "semantic" (default) or "legacy". */
+  spanNameStyle?: RespanSpanNameStyle | string;
 }
 
 /**
@@ -60,19 +69,26 @@ export class MultiProcessorManager implements SpanProcessor {
     processor: SpanProcessor;
     config: ProcessorConfig;
   }> = [];
+  private readonly spanNameStyle: RespanSpanNameStyle;
 
-  constructor(private readonly options: MultiProcessorManagerOptions = {}) {}
+  constructor(private readonly options: MultiProcessorManagerOptions = {}) {
+    this.spanNameStyle = resolveSpanNameStyle(options.spanNameStyle);
+  }
 
   /**
    * Add a new processor with routing configuration
    * @param config - Processor configuration
    */
   addProcessor(config: ProcessorConfig): void {
+    const exporter = new SpanNameTransformingExporter(
+      config.exporter,
+      this.spanNameStyle
+    );
     const disableBatch = config.disableBatch ?? this.options.disableBatch ?? false;
     const processor = disableBatch
-      ? new SimpleSpanProcessor(config.exporter)
-      : new BatchSpanProcessor(config.exporter);
-    
+      ? new SimpleSpanProcessor(exporter)
+      : new BatchSpanProcessor(exporter);
+
     // Insert in priority order (higher priority first)
     const priority = config.priority ?? 0;
     const insertIndex = this.processors.findIndex(
