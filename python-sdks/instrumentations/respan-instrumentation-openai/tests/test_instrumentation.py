@@ -88,6 +88,31 @@ def test_responses_attrs_map_input_output_tokens():
 # --- emit path --------------------------------------------------------------
 
 
+
+
+def test_suppression_context_skips_openai_span_emission(monkeypatch):
+    emitted = []
+    monkeypatch.setitem(
+        instr._KINDS,
+        "chat",
+        (lambda **kwargs: emitted.append(kwargs), instr._aggregate_chat),
+    )
+
+    def original(_self, **_kwargs):
+        return _chat_response()
+
+    wrapper = instr._make_sync_wrapper(original, kind="chat")
+
+    with instr.suppress_openai_instrumentation():
+        response = wrapper(object(), model="gpt-4.1-nano", messages=[])
+
+    assert response is not None
+    assert emitted == []
+
+    wrapper(object(), model="gpt-4.1-nano", messages=[])
+    assert len(emitted) == 1
+
+
 def test_emit_chat_injects_one_span(monkeypatch):
     captured = []
     monkeypatch.setattr(emitter, "inject_span", lambda span: captured.append(span))

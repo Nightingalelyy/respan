@@ -44,9 +44,3 @@ def get_gateway_client() -> AsyncOpenAI:
     if _client is None:
         raise RuntimeError("init_telemetry() must be called before get_gateway_client()")
     return _client
-
-
-def flush() -> None:
-    """Force-export buffered spans before the process exits."""
-    if _telemetry is not None:
-        _telemetry.flush()

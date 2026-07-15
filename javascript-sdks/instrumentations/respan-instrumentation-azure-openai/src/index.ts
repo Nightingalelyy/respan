@@ -1,3 +1,8 @@
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
+
 /**
  * Respan instrumentation plugin for Azure OpenAI TypeScript clients.
  *
@@ -10,6 +15,14 @@ import { hrTime } from "@opentelemetry/core";
 import {
   ATTR_GEN_AI_COMPLETION,
   ATTR_GEN_AI_PROMPT,
+  ATTR_GEN_AI_REQUEST_FREQUENCY_PENALTY,
+  ATTR_GEN_AI_REQUEST_MAX_TOKENS,
+  ATTR_GEN_AI_REQUEST_MODEL,
+  ATTR_GEN_AI_REQUEST_PRESENCE_PENALTY,
+  ATTR_GEN_AI_REQUEST_TEMPERATURE,
+  ATTR_GEN_AI_REQUEST_TOP_P,
+  ATTR_GEN_AI_RESPONSE_MODEL,
+  ATTR_GEN_AI_SYSTEM,
   ATTR_GEN_AI_USAGE_COMPLETION_TOKENS,
   ATTR_GEN_AI_USAGE_INPUT_TOKENS,
   ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
@@ -162,23 +175,14 @@ export class AzureOpenAIInstrumentor {
     if (this._options.openAIModule) {
       return this._options.openAIModule;
     }
-    try {
-      return await import("openai");
-    } catch {
-      return null;
-    }
+    return await importSdkModule("openai", "index.mjs");
   }
 
   private async _loadLegacyAzureOpenAIModule(): Promise<AnyRecord | null> {
     if (this._options.azureOpenAIModule) {
       return this._options.azureOpenAIModule;
     }
-    try {
-      const legacyPackageName = "@azure/openai";
-      return await import(legacyPackageName);
-    } catch {
-      return null;
-    }
+    return await importSdkModule("@azure/openai");
   }
 
   private _patchModernOpenAI(openAI: AnyRecord, patches: PatchRecord[]): void {
@@ -525,13 +529,13 @@ function buildBaseAttributes(
     [SpanAttributes.TRACELOOP_ENTITY_PATH]: operation.spanName,
     [RespanSpanAttributes.RESPAN_LOG_METHOD]: RESPAN_LOG_METHOD_TS_TRACING,
     [RespanSpanAttributes.RESPAN_LOG_TYPE]: operation.logType,
-    [SpanAttributes.LLM_SYSTEM]: "azure",
+    [ATTR_GEN_AI_SYSTEM]: "azure",
     [SpanAttributes.LLM_REQUEST_TYPE]: getBackendRequestType(operation.kind),
   };
 
   const model = resolveModel(params, client);
   if (model) {
-    attrs[SpanAttributes.LLM_REQUEST_MODEL] = model;
+    attrs[ATTR_GEN_AI_REQUEST_MODEL] = model;
   }
 
   setRequestOptions(attrs, params);
@@ -572,7 +576,7 @@ function enrichSuccessAttributes(
 ): void {
   const responseModel = result?.model ?? resolveModel(params, {});
   if (responseModel) {
-    attrs[SpanAttributes.LLM_RESPONSE_MODEL] = responseModel;
+    attrs[ATTR_GEN_AI_RESPONSE_MODEL] = responseModel;
   }
 
   setUsageAttributes(attrs, result?.usage);
@@ -614,11 +618,11 @@ function enrichSuccessAttributes(
 
 function setRequestOptions(attrs: Record<string, any>, params: AnyRecord): void {
   const numericOptions: Array<[string, string]> = [
-    ["max_tokens", SpanAttributes.LLM_REQUEST_MAX_TOKENS],
-    ["temperature", SpanAttributes.LLM_REQUEST_TEMPERATURE],
-    ["top_p", SpanAttributes.LLM_REQUEST_TOP_P],
-    ["frequency_penalty", SpanAttributes.LLM_FREQUENCY_PENALTY],
-    ["presence_penalty", SpanAttributes.LLM_PRESENCE_PENALTY],
+    ["max_tokens", ATTR_GEN_AI_REQUEST_MAX_TOKENS],
+    ["temperature", ATTR_GEN_AI_REQUEST_TEMPERATURE],
+    ["top_p", ATTR_GEN_AI_REQUEST_TOP_P],
+    ["frequency_penalty", ATTR_GEN_AI_REQUEST_FREQUENCY_PENALTY],
+    ["presence_penalty", ATTR_GEN_AI_REQUEST_PRESENCE_PENALTY],
   ];
 
   for (const [sourceKey, attrKey] of numericOptions) {
@@ -987,4 +991,19 @@ function finalizeStreamState(state: StreamState): AnyRecord {
     usage: state.usage,
     data: [],
   };
+}
+
+async function importSdkModule(packageName: string, esmEntryFile?: string): Promise<AnyRecord | null> {
+  try {
+    const hostRequire = createRequire(`${process.cwd()}/package.json`);
+    const resolved = hostRequire.resolve(packageName);
+    const entry = esmEntryFile ? join(dirname(resolved), esmEntryFile) : resolved;
+    return await import(pathToFileURL(existsSync(entry) ? entry : resolved).href);
+  } catch {
+    try {
+      return await import(packageName);
+    } catch {
+      return null;
+    }
+  }
 }

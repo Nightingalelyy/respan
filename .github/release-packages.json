@@ -475,6 +475,12 @@
       "registry": "pypi"
     },
     {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-watson-orchestrate-adk",
+      "path": "python-sdks/instrumentations/respan-instrumentation-watson-orchestrate-adk",
+      "registry": "pypi"
+    },
+    {
       "ecosystem": "javascript",
       "name": "@respan/instrumentation-google-adk",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-google-adk",
@@ -491,6 +497,24 @@
       "name": "@respan/instrumentation-together-ai",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-together-ai",
       "registry": "npm"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-semantic-kernel",
+      "path": "python-sdks/instrumentations/respan-instrumentation-semantic-kernel",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-microsoft-agent-framework",
+      "path": "python-sdks/instrumentations/respan-instrumentation-microsoft-agent-framework",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-agentscope",
+      "path": "python-sdks/instrumentations/respan-instrumentation-agentscope",
+      "registry": "pypi"
     }
   ]
 }

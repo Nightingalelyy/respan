@@ -1,3 +1,6 @@
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+
 /**
  * Respan instrumentation plugin for the Google Vertex AI TypeScript SDK.
  *
@@ -298,11 +301,16 @@ export class VertexAIInstrumentor {
 
   private async _resolveSdkModule(): Promise<VertexAIModule | undefined> {
     if (this._sdkModule) return this._sdkModule;
+    const moduleName = "@google-cloud/vertexai";
     try {
-      const moduleName = "@google-cloud/vertexai";
-      return (await import(moduleName)) as VertexAIModule;
+      const hostRequire = createRequire(`${process.cwd()}/package.json`);
+      return (await import(pathToFileURL(hostRequire.resolve(moduleName)).href)) as VertexAIModule;
     } catch {
-      return undefined;
+      try {
+        return (await import(moduleName)) as VertexAIModule;
+      } catch {
+        return undefined;
+      }
     }
   }
 
