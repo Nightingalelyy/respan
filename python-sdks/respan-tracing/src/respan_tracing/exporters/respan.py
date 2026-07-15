@@ -173,8 +173,9 @@ _CLAUDE_AGENT_RESPONSE_SPAN_NAMES = frozenset({
     "ClaudeAgentSDK.ClaudeSDKClient.receive_response",
 })
 _ASSISTANT_MESSAGE_SPAN_NAME = "assistant_message"
-_GEN_AI_PROMPT_PREFIX = "gen_ai.prompt."
-_GEN_AI_COMPLETION_PREFIX = "gen_ai.completion."
+_GEN_AI_PROMPT_PREFIX = f"{SpanAttributes.LLM_PROMPTS}."
+_GEN_AI_COMPLETION_PREFIX = f"{SpanAttributes.LLM_COMPLETIONS}."
+_COMPLETION_TOOL_CALLS_ATTR = f"{SpanAttributes.LLM_COMPLETIONS}.0.tool_calls"
 
 
 def _derive_synthetic_span_id(*parts: Any) -> int:
@@ -206,7 +207,9 @@ def _build_claude_agent_final_chat_span(
         return None
 
     attrs = span.attributes or {}
-    tool_calls = _parse_structured_json_attr(attrs.get(RESPAN_SPAN_TOOL_CALLS))
+    tool_calls = _parse_structured_json_attr(attrs.get(_COMPLETION_TOOL_CALLS_ATTR))
+    if not isinstance(tool_calls, list) or not tool_calls:
+        tool_calls = _parse_structured_json_attr(attrs.get(RESPAN_SPAN_TOOL_CALLS))
     if not isinstance(tool_calls, list) or not tool_calls:
         return None
 
@@ -221,10 +224,11 @@ def _build_claude_agent_final_chat_span(
 
     child_attributes: Dict[str, Any] = {
         RESPAN_LOG_TYPE: LOG_TYPE_CHAT,
-        LLM_REQUEST_TYPE: LLMRequestTypeValues.CHAT.value,
-        "traceloop.entity.name": _ASSISTANT_MESSAGE_SPAN_NAME,
-        "gen_ai.completion.0.role": "assistant",
-        "gen_ai.completion.0.content": completion_text,
+        SpanAttributes.LLM_REQUEST_TYPE: LLMRequestTypeValues.CHAT.value,
+        SpanAttributes.TRACELOOP_ENTITY_NAME: _ASSISTANT_MESSAGE_SPAN_NAME,
+        f"{SpanAttributes.LLM_COMPLETIONS}.0.role": "assistant",
+        f"{SpanAttributes.LLM_COMPLETIONS}.0.content": completion_text,
+        _COMPLETION_TOOL_CALLS_ATTR: tool_calls,
         SpanAttributes.TRACELOOP_ENTITY_OUTPUT: json.dumps(
             primary_completion_message,
             default=str,
@@ -235,13 +239,13 @@ def _build_claude_agent_final_chat_span(
     if input_value is not None:
         child_attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT] = input_value
 
-    model = attrs.get(LLM_REQUEST_MODEL)
+    model = attrs.get(SpanAttributes.LLM_REQUEST_MODEL)
     if model is not None:
-        child_attributes[LLM_REQUEST_MODEL] = model
+        child_attributes[SpanAttributes.LLM_REQUEST_MODEL] = model
 
-    system = attrs.get(GEN_AI_SYSTEM)
+    system = attrs.get(SpanAttributes.LLM_SYSTEM)
     if system is not None:
-        child_attributes[GEN_AI_SYSTEM] = system
+        child_attributes[SpanAttributes.LLM_SYSTEM] = system
 
     child_attributes.update({
         key: value
@@ -1092,8 +1096,8 @@ def _get_enrichment_attrs(span: ReadableSpan) -> Dict[str, Any]:
             _RESPAN_TRACING_SDK_VERSION
         )
 
-    if attrs.get(GEN_AI_SYSTEM) and not attrs.get(LLM_REQUEST_TYPE):
-        extra[LLM_REQUEST_TYPE] = LLMRequestTypeValues.CHAT.value
+    if attrs.get(SpanAttributes.LLM_SYSTEM) and not attrs.get(SpanAttributes.LLM_REQUEST_TYPE):
+        extra[SpanAttributes.LLM_REQUEST_TYPE] = LLMRequestTypeValues.CHAT.value
 
     cache_read = attrs.get(SpanAttributes.LLM_USAGE_CACHE_READ_INPUT_TOKENS)
     if cache_read not in {None, ""} and "prompt_cache_hit_tokens" not in attrs:
@@ -1106,20 +1110,22 @@ def _get_enrichment_attrs(span: ReadableSpan) -> Dict[str, Any]:
     ):
         extra["prompt_cache_creation_tokens"] = cache_creation
 
-    tool_calls = _parse_structured_json_attr(attrs.get(RESPAN_SPAN_TOOL_CALLS))
+    tool_calls = _parse_structured_json_attr(attrs.get(_COMPLETION_TOOL_CALLS_ATTR))
+    if not isinstance(tool_calls, list) or not tool_calls:
+        tool_calls = _parse_structured_json_attr(attrs.get(RESPAN_SPAN_TOOL_CALLS))
     if isinstance(tool_calls, list) and tool_calls:
-        if "gen_ai.completion.0.tool_calls" not in attrs:
-            extra["gen_ai.completion.0.tool_calls"] = tool_calls
-        if "gen_ai.completion.0.role" not in attrs:
-            extra["gen_ai.completion.0.role"] = "assistant"
-        existing_completion_content = attrs.get("gen_ai.completion.0.content")
+        if _COMPLETION_TOOL_CALLS_ATTR not in attrs:
+            extra[_COMPLETION_TOOL_CALLS_ATTR] = tool_calls
+        if f"{SpanAttributes.LLM_COMPLETIONS}.0.role" not in attrs:
+            extra[f"{SpanAttributes.LLM_COMPLETIONS}.0.role"] = "assistant"
+        existing_completion_content = attrs.get(f"{SpanAttributes.LLM_COMPLETIONS}.0.content")
         if existing_completion_content in {None, ""}:
             primary_completion_message = _select_primary_completion_from_attrs(attrs)
             completion_text = _extract_text_from_message(primary_completion_message)
             if completion_text not in {None, ""}:
-                extra["gen_ai.completion.0.content"] = completion_text
-            elif "gen_ai.completion.0.content" not in attrs:
-                extra["gen_ai.completion.0.content"] = ""
+                extra[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"] = completion_text
+            elif f"{SpanAttributes.LLM_COMPLETIONS}.0.content" not in attrs:
+                extra[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"] = ""
 
     return extra
 
