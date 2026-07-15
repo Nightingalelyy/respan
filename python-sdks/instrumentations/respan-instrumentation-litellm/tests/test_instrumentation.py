@@ -11,6 +11,7 @@ from opentelemetry.semconv_ai import SpanAttributes
 
 from respan_instrumentation_litellm import _callback as callback_module
 from respan_instrumentation_litellm import _instrumentation as instrumentation
+from respan_instrumentation_openai import _instrumentation as openai_instrumentation
 from respan_instrumentation_litellm._callback import RespanLiteLLMCallback
 from respan_instrumentation_litellm._constants import (
     LITELLM_CHAT_SPAN_NAME,
@@ -244,11 +245,47 @@ def test_instrumentor_registers_and_removes_litellm_callback(monkeypatch):
     assert fake_litellm.callbacks == ["existing"]
 
 
+
+
+def test_non_streaming_wrapper_suppresses_nested_openai_spans(monkeypatch):
+    suppression_states = []
+
+    def fake_completion(*_args, **_kwargs):
+        suppression_states.append(
+            openai_instrumentation._is_openai_instrumentation_suppressed()
+        )
+        return _response()
+
+    fake_litellm = SimpleNamespace(callbacks=[], completion=fake_completion)
+    monkeypatch.setattr(
+        instrumentation.importlib,
+        "import_module",
+        lambda module_name: fake_litellm if module_name == "litellm" else None,
+    )
+
+    instrumentor = instrumentation.LiteLLMInstrumentor()
+    instrumentor.activate()
+
+    response = fake_litellm.completion(
+        model="openai/gpt-4o-mini",
+        messages=[{"role": "user", "content": "Hi"}],
+    )
+
+    assert response.choices[0].message.content == "Bonjour."
+    assert suppression_states == [True]
+
+    instrumentor.deactivate()
+
+
 def test_streaming_wrapper_emits_span_after_stream_consumption(monkeypatch):
     emitted = []
     original_kwargs = {}
+    suppression_states = []
 
     def fake_completion(*args, **kwargs):
+        suppression_states.append(
+            openai_instrumentation._is_openai_instrumentation_suppressed()
+        )
         original_kwargs.update(kwargs)
         return iter(
             [
@@ -291,6 +328,7 @@ def test_streaming_wrapper_emits_span_after_stream_consumption(monkeypatch):
     assert [chunk for chunk in stream]
 
     assert original_kwargs["metadata"][RESPAN_SKIP_CALLBACK_KEY] is True
+    assert suppression_states == [True]
     assert len(emitted) == 1
     response_obj = emitted[0]["response_obj"]
     assert response_obj.choices[0].message.content == "hello stream"

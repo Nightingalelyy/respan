@@ -58,9 +58,24 @@ from respan_sdk.constants.otlp_constants import (
 
 from opentelemetry.semconv_ai import SpanAttributes, LLMRequestTypeValues
 
-from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT
+from respan_sdk.constants.llm_logging import (
+    LOG_TYPE_AGENT,
+    LOG_TYPE_CHAT,
+    LOG_TYPE_COMPLETION,
+    LOG_TYPE_EMBEDDING,
+    LOG_TYPE_FUNCTION,
+    LOG_TYPE_GENERATION,
+    LOG_TYPE_GUARDRAIL,
+    LOG_TYPE_HANDOFF,
+    LOG_TYPE_RESPONSE,
+    LOG_TYPE_TASK,
+    LOG_TYPE_TEXT,
+    LOG_TYPE_TOOL,
+    LOG_TYPE_WORKFLOW,
+)
 from respan_sdk.constants.span_attributes import (
     RESPAN_LOG_TYPE,
+    RESPAN_METADATA_GUARDRAIL_NAME,
     RESPAN_METADATA_INTERNAL_TRACING_SDK_VERSION,
     RESPAN_SPAN_TOOL_CALLS,
     RESPAN_SPAN_TOOLS,
@@ -324,6 +339,274 @@ _STRIPPED_ATTRIBUTES = frozenset({
     RESPAN_SPAN_TOOL_CALLS,
     RESPAN_SPAN_TOOLS,
 })
+
+_LLM_SPAN_NAME_PREFIX = "llm"
+_SPAN_NAME_PREFIXES = frozenset({
+    LOG_TYPE_AGENT,
+    LOG_TYPE_EMBEDDING,
+    LOG_TYPE_GUARDRAIL,
+    LOG_TYPE_HANDOFF,
+    _LLM_SPAN_NAME_PREFIX,
+    LOG_TYPE_TASK,
+    LOG_TYPE_TOOL,
+    LOG_TYPE_WORKFLOW,
+})
+_LEGACY_SPAN_NAME_PREFIX_ALIASES = {
+    LOG_TYPE_CHAT: _LLM_SPAN_NAME_PREFIX,
+    LOG_TYPE_COMPLETION: _LLM_SPAN_NAME_PREFIX,
+    "generate": _LLM_SPAN_NAME_PREFIX,
+    LOG_TYPE_GENERATION: _LLM_SPAN_NAME_PREFIX,
+    LOG_TYPE_RESPONSE: _LLM_SPAN_NAME_PREFIX,
+    "responses": _LLM_SPAN_NAME_PREFIX,
+    LOG_TYPE_TEXT: _LLM_SPAN_NAME_PREFIX,
+}
+_SPAN_NAME_PREFIX_ALIASES = {
+    **{prefix: prefix for prefix in _SPAN_NAME_PREFIXES},
+    **_LEGACY_SPAN_NAME_PREFIX_ALIASES,
+}
+_SUFFIXED_SPAN_NAME_PREFIXES = frozenset({
+    LOG_TYPE_AGENT,
+    LOG_TYPE_HANDOFF,
+    _LLM_SPAN_NAME_PREFIX,
+    LOG_TYPE_TOOL,
+})
+_LOG_TYPE_TO_SPAN_NAME_PREFIX = {
+    LOG_TYPE_AGENT: LOG_TYPE_AGENT,
+    LOG_TYPE_CHAT: _LLM_SPAN_NAME_PREFIX,
+    LOG_TYPE_COMPLETION: _LLM_SPAN_NAME_PREFIX,
+    LOG_TYPE_EMBEDDING: LOG_TYPE_EMBEDDING,
+    LOG_TYPE_FUNCTION: LOG_TYPE_TOOL,
+    LOG_TYPE_GENERATION: _LLM_SPAN_NAME_PREFIX,
+    LOG_TYPE_GUARDRAIL: LOG_TYPE_GUARDRAIL,
+    LOG_TYPE_HANDOFF: LOG_TYPE_HANDOFF,
+    LOG_TYPE_RESPONSE: _LLM_SPAN_NAME_PREFIX,
+    LOG_TYPE_TASK: LOG_TYPE_TASK,
+    LOG_TYPE_TEXT: _LLM_SPAN_NAME_PREFIX,
+    LOG_TYPE_TOOL: LOG_TYPE_TOOL,
+    LOG_TYPE_WORKFLOW: LOG_TYPE_WORKFLOW,
+}
+_REQUEST_TYPE_TO_SPAN_NAME_PREFIX = {
+    "chat": _LLM_SPAN_NAME_PREFIX,
+    "completion": _LLM_SPAN_NAME_PREFIX,
+    "embedding": LOG_TYPE_EMBEDDING,
+}
+_ENTITY_DETAIL_ATTRS_BY_PREFIX = {
+    LOG_TYPE_AGENT: (GEN_AI_AGENT_NAME, SpanAttributes.TRACELOOP_ENTITY_NAME),
+    LOG_TYPE_GUARDRAIL: (
+        RESPAN_METADATA_GUARDRAIL_NAME,
+        SpanAttributes.TRACELOOP_ENTITY_NAME,
+    ),
+    LOG_TYPE_HANDOFF: (SpanAttributes.TRACELOOP_ENTITY_NAME,),
+    LOG_TYPE_TASK: (SpanAttributes.TRACELOOP_ENTITY_NAME, GEN_AI_OPERATION_NAME),
+    LOG_TYPE_TOOL: (
+        GEN_AI_TOOL_NAME,
+        SpanAttributes.TRACELOOP_ENTITY_NAME,
+        GEN_AI_OPERATION_NAME,
+    ),
+    LOG_TYPE_WORKFLOW: (SpanAttributes.TRACELOOP_ENTITY_NAME,),
+}
+_LLM_DETAIL_ATTRS = (
+    LLM_REQUEST_MODEL,
+    "llm.model_name",
+    "model",
+    "ai.model.id",
+    "ai.response.model",
+    SpanAttributes.LLM_REQUEST_MODEL,
+)
+_CHAT_NAME_MARKERS = ("chat", "response", "responses")
+_GENERATION_NAME_MARKERS = ("generate", "generation", "completion")
+_EMBEDDING_NAME_MARKERS = ("embedding", "embeddings", "embed")
+
+
+def _clean_span_name_part(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _first_present_attr(attrs: Mapping[str, Any], keys: Sequence[str]) -> Optional[str]:
+    for key in keys:
+        value = _clean_span_name_part(attrs.get(key))
+        if value:
+            return value
+    return None
+
+
+def _display_span_name_prefix(prefix: str) -> str:
+    return prefix.lower()
+
+
+def _normalize_existing_semantic_span_name(name: str) -> Optional[str]:
+    lower_name = name.lower()
+    for candidate, prefix in _SPAN_NAME_PREFIX_ALIASES.items():
+        display_prefix = _display_span_name_prefix(prefix)
+        for candidate_name in (candidate, candidate.upper()):
+            candidate_lower = candidate_name.lower()
+            if lower_name == candidate_lower:
+                return display_prefix
+            dotted_prefix = f"{candidate_lower}."
+            if lower_name.startswith(dotted_prefix):
+                if prefix not in _SUFFIXED_SPAN_NAME_PREFIXES:
+                    return display_prefix
+                detail = name[len(candidate_name) + 1 :].strip()
+                return f"{display_prefix}.{detail}" if detail else display_prefix
+    return None
+
+
+def _strip_token_from_span_name(name: str, tokens: Sequence[str]) -> Optional[str]:
+    normalized = name.strip()
+    lower_name = normalized.lower()
+
+    for token in tokens:
+        lower_token = token.lower()
+        dotted_prefix = f"{lower_token}."
+        if lower_name.startswith(dotted_prefix):
+            return normalized[len(dotted_prefix):].strip() or None
+
+        spaced_prefix = f"{lower_token} "
+        if lower_name.startswith(spaced_prefix):
+            return normalized[len(spaced_prefix):].strip() or None
+
+        dotted_suffix = f".{lower_token}"
+        if lower_name.endswith(dotted_suffix):
+            return normalized[: -len(dotted_suffix)].strip() or None
+
+        spaced_suffix = f" {lower_token}"
+        if lower_name.endswith(spaced_suffix):
+            return normalized[: -len(spaced_suffix)].strip() or None
+
+    return None
+
+
+def _infer_span_name_prefix(name: str, attrs: Mapping[str, Any]) -> Optional[str]:
+    log_type = _clean_span_name_part(attrs.get(RESPAN_LOG_TYPE))
+    if log_type:
+        prefix = _LOG_TYPE_TO_SPAN_NAME_PREFIX.get(log_type.lower())
+        if prefix:
+            return prefix
+
+    span_kind = _clean_span_name_part(attrs.get(SpanAttributes.TRACELOOP_SPAN_KIND))
+    if span_kind:
+        prefix = _LOG_TYPE_TO_SPAN_NAME_PREFIX.get(span_kind.lower())
+        if prefix:
+            return prefix
+
+    request_type = _clean_span_name_part(attrs.get(LLM_REQUEST_TYPE))
+    if request_type:
+        prefix = _REQUEST_TYPE_TO_SPAN_NAME_PREFIX.get(request_type.lower())
+        if prefix:
+            return prefix
+
+    operation_name = _clean_span_name_part(attrs.get(GEN_AI_OPERATION_NAME))
+    if operation_name:
+        lower_operation = operation_name.lower()
+        if any(marker in lower_operation for marker in _EMBEDDING_NAME_MARKERS):
+            return LOG_TYPE_EMBEDDING
+        if any(marker in lower_operation for marker in _CHAT_NAME_MARKERS):
+            return _LLM_SPAN_NAME_PREFIX
+        if any(marker in lower_operation for marker in _GENERATION_NAME_MARKERS):
+            return _LLM_SPAN_NAME_PREFIX
+
+    if attrs.get(GEN_AI_SYSTEM):
+        return _LLM_SPAN_NAME_PREFIX
+
+    if _first_present_attr(attrs, _LLM_DETAIL_ATTRS):
+        return _LLM_SPAN_NAME_PREFIX
+
+    lower_name = name.lower()
+    for candidate, prefix in _SPAN_NAME_PREFIX_ALIASES.items():
+        if lower_name.startswith(f"{candidate} ") or lower_name.endswith(f".{candidate}"):
+            return prefix
+        if lower_name.endswith(f" {candidate}"):
+            return prefix
+
+    if any(marker in lower_name for marker in _EMBEDDING_NAME_MARKERS):
+        return LOG_TYPE_EMBEDDING
+    if any(marker in lower_name for marker in _CHAT_NAME_MARKERS):
+        return _LLM_SPAN_NAME_PREFIX
+    if any(marker in lower_name for marker in _GENERATION_NAME_MARKERS):
+        return _LLM_SPAN_NAME_PREFIX
+
+    return None
+
+
+def _detail_tokens_for_prefix(prefix: str) -> Sequence[str]:
+    if prefix == _LLM_SPAN_NAME_PREFIX:
+        return (
+            _LLM_SPAN_NAME_PREFIX,
+            LOG_TYPE_CHAT,
+            LOG_TYPE_COMPLETION,
+            "completion",
+            "generate",
+            LOG_TYPE_GENERATION,
+            LOG_TYPE_RESPONSE,
+            "responses",
+            LOG_TYPE_TEXT,
+        )
+    if prefix == LOG_TYPE_EMBEDDING:
+        return (LOG_TYPE_EMBEDDING, "embeddings", "embed")
+    return (prefix,)
+
+
+def _span_name_detail(prefix: str, name: str, attrs: Mapping[str, Any]) -> Optional[str]:
+    if prefix == _LLM_SPAN_NAME_PREFIX:
+        return _first_present_attr(attrs, _LLM_DETAIL_ATTRS)
+
+    attr_detail = _first_present_attr(
+        attrs,
+        _ENTITY_DETAIL_ATTRS_BY_PREFIX.get(prefix, ()),
+    )
+    if attr_detail:
+        return attr_detail
+
+    stripped_detail = _strip_token_from_span_name(
+        name,
+        _detail_tokens_for_prefix(prefix),
+    )
+    if stripped_detail:
+        return stripped_detail
+
+    if prefix == LOG_TYPE_EMBEDDING:
+        llm_detail = _first_present_attr(attrs, _LLM_DETAIL_ATTRS)
+        if llm_detail:
+            return llm_detail
+
+    return _clean_span_name_part(name)
+
+
+def _export_span_name(span: ReadableSpan) -> str:
+    original_name = _clean_span_name_part(getattr(span, "name", None))
+    if not original_name:
+        return getattr(span, "name", "")
+
+    attrs = span.attributes or {}
+    existing_semantic_name = _normalize_existing_semantic_span_name(original_name)
+    if existing_semantic_name:
+        is_llm_name = (
+            existing_semantic_name == _LLM_SPAN_NAME_PREFIX
+            or existing_semantic_name.startswith(f"{_LLM_SPAN_NAME_PREFIX}.")
+        )
+        if not is_llm_name or not _first_present_attr(attrs, _LLM_DETAIL_ATTRS):
+            return existing_semantic_name
+
+    prefix = _infer_span_name_prefix(original_name, attrs)
+    if not prefix:
+        return original_name
+
+    display_prefix = _display_span_name_prefix(prefix)
+    if prefix not in _SUFFIXED_SPAN_NAME_PREFIXES:
+        return display_prefix
+
+    detail = _span_name_detail(prefix, original_name, attrs)
+    if not detail:
+        return display_prefix
+
+    existing_detail_semantic_name = _normalize_existing_semantic_span_name(detail)
+    if existing_detail_semantic_name:
+        return existing_detail_semantic_name
+
+    return f"{display_prefix}.{detail}"
 
 
 def _parse_structured_json_attr(value: Any) -> Any:
@@ -608,7 +891,7 @@ def _span_to_otlp_json(span: ReadableSpan) -> Dict[str, Any]:
     result = {
         OTLP_TRACE_ID_KEY: trace_id,
         OTLP_SPAN_ID_KEY: span_id,
-        OTLP_NAME_KEY: span.name,
+        OTLP_NAME_KEY: _export_span_name(span),
         OTLP_KIND_KEY: kind_value,
         OTLP_START_TIME_KEY: start_time_ns,
         OTLP_END_TIME_KEY: end_time_ns,
