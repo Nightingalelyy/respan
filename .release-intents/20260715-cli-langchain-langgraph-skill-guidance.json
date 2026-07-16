@@ -1,0 +1,6 @@
+{
+  "summary": "Correct LangChain and LangGraph instrumentation guidance in the CLI setup skill",
+  "packages": {
+    "@respan/cli": "patch"
+  }
+}

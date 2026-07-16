@@ -93,15 +93,17 @@ Check higher-priority categories first. If a match is found, use that instrument
 | OpenAI Agents SDK | \`openai-agents\` | \`@openai/agents\` | \`respan-instrumentation-openai-agents\` | \`@respan/instrumentation-openai-agents\` | [docs](https://respan.ai/docs/integrations/openai-agents-sdk.md) |
 | Claude Agent SDK | \`claude-agent-sdk\` | — | \`respan-instrumentation-claude-agent-sdk\` | — | [docs](https://respan.ai/docs/integrations/claude-agents-sdk.md) |
 | Pydantic AI | \`pydantic-ai\` | — | \`respan-instrumentation-pydantic-ai\` | — | [docs](https://respan.ai/docs/integrations/pydantic-ai.md) |
-| LangChain | \`langchain\` | \`langchain\` | via OpenInference | — | [docs](https://respan.ai/docs/integrations/langchain.md) |
-| LangGraph | \`langgraph\` | — | via OpenInference | — | [docs](https://respan.ai/docs/integrations/langgraph.md) |
+| LangChain | \`langchain\` | \`langchain\` | \`respan-instrumentation-langchain\` | \`@respan/instrumentation-langchain\` | [docs](https://respan.ai/docs/integrations/langchain.md) |
+| LangGraph | \`langgraph\` | \`@langchain/langgraph\` | \`respan-instrumentation-langchain\` | \`@respan/instrumentation-langchain\` | [docs](https://respan.ai/docs/integrations/langgraph.md) |
 | CrewAI | \`crewai\` | — | \`respan-instrumentation-crewai\` | — | [docs](https://respan.ai/docs/integrations/crewai.md) |
-| LlamaIndex | \`llama-index\` | — | via OpenInference | — | [docs](https://respan.ai/docs/integrations/llama-index.md) |
+| LlamaIndex | \`llama-index\` | — | \`respan-instrumentation-llama-index\` | — | [docs](https://respan.ai/docs/integrations/llama-index.md) |
 | Haystack | \`haystack-ai\` | — | \`respan-instrumentation-haystack\` | — | [docs](https://respan.ai/docs/integrations/haystack.md) |
 | Mastra | — | \`mastra\` | — | via OTEL | [docs](https://respan.ai/docs/integrations/mastra.md) |
-| Google ADK | \`google-adk\` | — | via OpenInference | — | [docs](https://respan.ai/docs/integrations/google-adk.md) |
+| Google ADK | \`google-adk\` | — | \`respan-instrumentation-google-adk\` | — | [docs](https://respan.ai/docs/integrations/google-adk.md) |
 
 If a Priority 1 framework is found, use its instrumentation. Do NOT also add Priority 2 instrumentation for the same provider.
+
+**LangChain / LangGraph setup differs by language.** In Python, pass \`LangChainInstrumentor()\` to \`Respan(instrumentations=[...])\`; it patches the LangChain and LangGraph callback managers globally, so per-call callbacks are optional and only needed for run labels, tags, or metadata. In TypeScript, create a \`LangChainInstrumentor\`, pass it to \`new Respan({ instrumentations: [...] })\`, and attach \`instrumentor.addCallback(...)\` to the outermost chain or graph invocation because the TypeScript instrumentor does not patch globally.
 
 **Priority 2 — Direct LLM SDKs** (only if no P1 framework covers this provider):
 
