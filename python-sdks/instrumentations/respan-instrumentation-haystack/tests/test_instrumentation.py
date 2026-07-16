@@ -5,6 +5,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from opentelemetry.attributes import BoundedAttributes
 from opentelemetry.semconv_ai import SpanAttributes
 from respan_instrumentation_haystack import HaystackInstrumentor
 from respan_instrumentation_haystack import _instrumentation
@@ -310,6 +311,33 @@ def test_haystack_parent_span_processor_suppresses_native_span_export():
             RESPAN_LOG_TYPE: "span",
             "haystack.component.name": "prompt_builder",
         },
+    )
+
+    processor.on_start(native_component)
+    processor.on_end(native_component)
+
+    assert native_component.attributes == {
+        "haystack.component.name": "prompt_builder",
+    }
+    assert is_processable_span(native_component) is False
+
+
+def test_haystack_parent_span_processor_suppresses_immutable_native_attributes():
+    processor = _HaystackParentSpanProcessor()
+    native_component = _FakeSpan(
+        HAYSTACK_COMPONENT_RUN_SPAN_NAME,
+        "3000000000000004",
+    )
+    native_component._attributes = BoundedAttributes(
+        maxlen=128,
+        attributes={
+            SpanAttributes.TRACELOOP_ENTITY_NAME: HAYSTACK_COMPONENT_RUN_SPAN_NAME,
+            SpanAttributes.TRACELOOP_ENTITY_PATH: "haystack-example.Pipeline.run",
+            SpanAttributes.TRACELOOP_WORKFLOW_NAME: "haystack-example",
+            RESPAN_LOG_TYPE: "span",
+            "haystack.component.name": "prompt_builder",
+        },
+        immutable=True,
     )
 
     processor.on_start(native_component)

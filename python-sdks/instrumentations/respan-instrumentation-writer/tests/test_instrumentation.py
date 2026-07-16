@@ -27,8 +27,13 @@ from respan_instrumentation_writer._translator import (
     build_vision_attrs,
 )
 from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT, LOG_TYPE_TEXT, LOG_TYPE_TOOL
-from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
+from respan_sdk.constants.span_attributes import (
+    RESPAN_INTERNAL_SPAN_NAME_DETAIL,
+    RESPAN_INTERNAL_SPAN_NAME_KIND,
+    RESPAN_LOG_TYPE,
+)
 from respan_tracing.core.tracer import RespanTracer
+from respan_tracing.exporters.respan import _export_span_name
 
 
 OFF_CONTRACT_ALIASES = {
@@ -397,7 +402,9 @@ def test_other_writer_text_operations_map_to_canonical_attrs() -> None:
     assert translation_attrs[TLSpanAttributes.LLM_REQUEST_MODEL] == "palmyra-translate"
 
 
-def test_direct_writer_tools_emit_tool_spans_without_llm_tool_attrs() -> None:
+def test_direct_writer_tools_emit_tool_spans_without_llm_tool_attrs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     web_attrs = build_tool_attrs(
         tool_name=WRITER_WEB_SEARCH_TOOL_NAME,
         request_kwargs={"query": "Respan tracing", "include_answer": True},
@@ -409,10 +416,22 @@ def test_direct_writer_tools_emit_tool_spans_without_llm_tool_attrs() -> None:
         response=SimpleNamespace(content="PDF output"),
     )
 
-    for attrs in (web_attrs, pdf_attrs):
+    for attrs, legacy_name, semantic_detail in (
+        (web_attrs, WRITER_WEB_SEARCH_TOOL_NAME, "web_search"),
+        (pdf_attrs, WRITER_PARSE_PDF_TOOL_NAME, "parse_pdf"),
+    ):
         assert attrs[RESPAN_LOG_TYPE] == LOG_TYPE_TOOL
+        assert attrs[RESPAN_INTERNAL_SPAN_NAME_KIND] == LOG_TYPE_TOOL
+        assert attrs[RESPAN_INTERNAL_SPAN_NAME_DETAIL] == semantic_detail
         assert attrs[TLSpanAttributes.TRACELOOP_ENTITY_INPUT]
         assert attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT]
         assert "gen_ai.tool.name" not in attrs
         assert "gen_ai.tool.call.arguments" not in attrs
         assert not OFF_CONTRACT_ALIASES.intersection(attrs)
+
+        span = SimpleNamespace(name=legacy_name, attributes=attrs)
+        assert _export_span_name(span) == f"tool.{semantic_detail}"
+
+        monkeypatch.setenv("RESPAN_SPAN_NAME_STYLE", "legacy")
+        assert _export_span_name(span) == legacy_name
+        monkeypatch.delenv("RESPAN_SPAN_NAME_STYLE")
