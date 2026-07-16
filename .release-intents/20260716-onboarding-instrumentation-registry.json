@@ -1,0 +1,7 @@
+{
+  "summary": "Expand the Python and TypeScript onboarding registries to cover clean committed instrumentation packages, auto-enable eligible TypeScript direct LLM adapters, and keep framework and tooling adapters explicit-only",
+  "packages": {
+    "@respan/respan": "minor",
+    "respan-ai": "patch"
+  }
+}

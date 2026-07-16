@@ -259,6 +259,46 @@ class TestAutoInstrumentationRegistry(unittest.TestCase):
         self.assertFalse(specs["pydantic-ai"].enabled_by_default)
         self.assertFalse(specs["mcp"].enabled_by_default)
 
+    def test_clean_committed_registry_additions_are_explicit_only(self):
+        specs = {spec.id: spec for spec in list_auto_instrumentation_specs()}
+        expected = {
+            "agentscope": (
+                "agent_framework",
+                "respan_instrumentation_agentscope:AgentScopeInstrumentor",
+            ),
+            "livekit": (
+                "agent_framework",
+                "respan_instrumentation_livekit:LiveKitInstrumentor",
+            ),
+            "microsoft-agent-framework": (
+                "agent_framework",
+                "respan_instrumentation_microsoft_agent_framework:"
+                "MicrosoftAgentFrameworkInstrumentor",
+            ),
+            "watson-orchestrate-adk": (
+                "agent_framework",
+                "respan_instrumentation_watson_orchestrate_adk:"
+                "WatsonOrchestrateADKInstrumentor",
+            ),
+            "semantic-kernel": (
+                "framework",
+                "respan_instrumentation_semantic_kernel:"
+                "SemanticKernelInstrumentor",
+            ),
+            "cursor-sdk": (
+                "protocol",
+                "respan_instrumentation_cursor_sdk:CursorSDKInstrumentor",
+            ),
+        }
+
+        for spec_id, (category, import_path) in expected.items():
+            with self.subTest(spec_id=spec_id):
+                self.assertIn(spec_id, specs)
+                self.assertEqual(specs[spec_id].category, category)
+                self.assertEqual(specs[spec_id].import_path, import_path)
+                self.assertFalse(specs[spec_id].enabled_by_default)
+                self.assertTrue(specs[spec_id].auto_disabled_reason)
+
     def test_respan_auto_mode_does_not_forward_broad_otel_auto(self):
         captured = {}
         auto_called = {}

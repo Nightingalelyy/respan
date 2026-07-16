@@ -521,6 +521,80 @@ AUTO_INSTRUMENTATION_REGISTRY: Tuple[AutoInstrumentationSpec, ...] = (
         auto_disabled_reason=_AGENT_FRAMEWORK_REASON,
     ),
     AutoInstrumentationSpec(
+        id="agentscope",
+        category="agent_framework",
+        provider="AgentScope",
+        sdk_package="agentscope",
+        instrumentation_package="respan-instrumentation-agentscope",
+        entry_point="agentscope",
+        import_path="respan_instrumentation_agentscope:AgentScopeInstrumentor",
+        enabled_by_default=False,
+        auto_disabled_reason=_AGENT_FRAMEWORK_REASON,
+    ),
+    AutoInstrumentationSpec(
+        id="livekit",
+        category="agent_framework",
+        provider="LiveKit Agents",
+        sdk_package="livekit-agents",
+        instrumentation_package="respan-instrumentation-livekit",
+        entry_point="livekit",
+        import_path="respan_instrumentation_livekit:LiveKitInstrumentor",
+        enabled_by_default=False,
+        auto_disabled_reason=_AGENT_FRAMEWORK_REASON,
+    ),
+    AutoInstrumentationSpec(
+        id="microsoft-agent-framework",
+        category="agent_framework",
+        provider="Microsoft Agent Framework",
+        sdk_package="agent-framework-core",
+        instrumentation_package="respan-instrumentation-microsoft-agent-framework",
+        entry_point="microsoft-agent-framework",
+        import_path=(
+            "respan_instrumentation_microsoft_agent_framework:"
+            "MicrosoftAgentFrameworkInstrumentor"
+        ),
+        enabled_by_default=False,
+        auto_disabled_reason=_AGENT_FRAMEWORK_REASON,
+    ),
+    AutoInstrumentationSpec(
+        id="watson-orchestrate-adk",
+        category="agent_framework",
+        provider="IBM watsonx Orchestrate ADK",
+        sdk_package="ibm-watsonx-orchestrate",
+        instrumentation_package="respan-instrumentation-watson-orchestrate-adk",
+        entry_point="watson-orchestrate-adk",
+        import_path=(
+            "respan_instrumentation_watson_orchestrate_adk:"
+            "WatsonOrchestrateADKInstrumentor"
+        ),
+        enabled_by_default=False,
+        auto_disabled_reason=_AGENT_FRAMEWORK_REASON,
+    ),
+    AutoInstrumentationSpec(
+        id="semantic-kernel",
+        category="framework",
+        provider="Microsoft Semantic Kernel",
+        sdk_package="semantic-kernel",
+        instrumentation_package="respan-instrumentation-semantic-kernel",
+        entry_point="semantic-kernel",
+        import_path=(
+            "respan_instrumentation_semantic_kernel:SemanticKernelInstrumentor"
+        ),
+        enabled_by_default=False,
+        auto_disabled_reason=_FRAMEWORK_REASON,
+    ),
+    AutoInstrumentationSpec(
+        id="cursor-sdk",
+        category="protocol",
+        provider="Cursor SDK",
+        sdk_package="cursor",
+        instrumentation_package="respan-instrumentation-cursor-sdk",
+        entry_point="cursor-sdk",
+        import_path="respan_instrumentation_cursor_sdk:CursorSDKInstrumentor",
+        enabled_by_default=False,
+        auto_disabled_reason=_PROTOCOL_REASON,
+    ),
+    AutoInstrumentationSpec(
         id="mcp",
         category="protocol",
         provider="MCP",
