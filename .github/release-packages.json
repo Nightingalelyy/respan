@@ -533,6 +533,12 @@
       "name": "respan-instrumentation-pinecone",
       "path": "python-sdks/instrumentations/respan-instrumentation-pinecone",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-elasticsearch",
+      "path": "python-sdks/instrumentations/respan-instrumentation-elasticsearch",
+      "registry": "pypi"
     }
   ]
 }
