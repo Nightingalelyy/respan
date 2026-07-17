@@ -56,7 +56,8 @@ class Respan:
         metadata: Default metadata dict merged into all spans.
         environment: Default environment (e.g. ``"production"``).
         **telemetry_kwargs: Extra keyword arguments forwarded to
-            ``RespanTelemetry`` (e.g. ``log_level``, ``is_batching_enabled``).
+            ``RespanTelemetry`` (e.g. ``log_level``, ``is_batching_enabled``,
+            ``auto_flush``).
 
     Examples::
 
@@ -371,3 +372,4 @@ class Respan:
             except Exception as exc:
                 logger.warning("Error deactivating %s: %s", name, exc)
         self._instrumentations.clear()
+        self.telemetry.flush()

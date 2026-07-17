@@ -23,6 +23,15 @@ function runTranslator(name, attributes, options = {}) {
   translator.onStart(writableSpan, undefined);
   translator.onEnd(span);
 
+  assert.equal(
+    span.attributes["traceloop.entity.name"],
+    options.expectedEntityName ?? name,
+  );
+  assert.equal(
+    span.attributes["traceloop.entity.path"],
+    options.expectedEntityPath ?? "",
+  );
+
   return span.attributes;
 }
 
@@ -41,10 +50,47 @@ const offContractAliasKeys = [
   "respan.span.handoffs",
 ];
 
+function assertNoRawModernToolAttrs(attrs) {
+  const rawKeys = Object.keys(attrs).filter((key) =>
+    key.startsWith("gen_ai.tool."),
+  );
+  assert.deepEqual(rawKeys, []);
+}
+const rawAI7EnvelopeKeys = [
+  "gen_ai.operation.name",
+  "gen_ai.provider.name",
+  "gen_ai.input.messages",
+  "gen_ai.output.messages",
+  "gen_ai.tool.definitions",
+  "gen_ai.usage.cache_read.input_tokens",
+];
+
+function assertNoRawAI7EnvelopeAttrs(attrs) {
+  for (const key of rawAI7EnvelopeKeys) {
+    assert.equal(attrs[key], undefined, `${key} should be stripped`);
+  }
+}
+
+function assertNoDottedMetadataAttrs(attrs) {
+  const dottedKeys = Object.keys(attrs).filter((key) =>
+    key.startsWith("respan.metadata."),
+  );
+  assert.deepEqual(dottedKeys, []);
+}
+
+function assertNoLLMSpecificAttrs(attrs) {
+  const llmKeys = Object.keys(attrs).filter(
+    (key) => key.startsWith("gen_ai.") || key.startsWith("llm."),
+  );
+  assert.deepEqual(llmKeys, []);
+}
 function assertNoOffContractAliases(attrs) {
   for (const key of offContractAliasKeys) {
     assert.equal(attrs[key], undefined, `${key} should be stripped`);
   }
+  assertNoRawModernToolAttrs(attrs);
+  assertNoRawAI7EnvelopeAttrs(attrs);
+  assertNoDottedMetadataAttrs(attrs);
 }
 
 function assertNoRawAIAttrs(attrs) {
@@ -62,6 +108,90 @@ const baseLLMSpan = {
   "ai.usage.totalTokens": 8,
   "traceloop.span.kind": "task",
 };
+
+test("translated spans preserve an existing canonical entity path", () => {
+  const attrs = runTranslator(
+    "ai.generateText.doGenerate",
+    {
+      ...baseLLMSpan,
+      "traceloop.entity.path": "workflow.agent",
+    },
+    { expectedEntityPath: "workflow.agent" },
+  );
+
+  assert.equal(attrs["traceloop.entity.name"], "ai.generateText.doGenerate");
+  assert.equal(attrs["traceloop.entity.path"], "workflow.agent");
+});
+
+test("free-form metadata is merged into the canonical JSON attribute", () => {
+  const attrs = runTranslator("ai.generateText.doGenerate", {
+    ...baseLLMSpan,
+    "respan.metadata": JSON.stringify({ existing: "keep" }),
+    "respan.metadata.legacy": "legacy-value",
+    "ai.telemetry.metadata.custom": "custom-value",
+    "ai.telemetry.metadata.prompt_unit_price": "0.01",
+    "ai.telemetry.metadata.userId": "user-1",
+    "ai.response.msToFinish": 250,
+    "gen_ai.usage.cost": 0.002,
+  });
+
+  assert.equal(attrs["respan.customer_params.customer_identifier"], "user-1");
+  assert.deepEqual(JSON.parse(attrs["respan.metadata"]), {
+    existing: "keep",
+    legacy: "legacy-value",
+    custom: "custom-value",
+    prompt_unit_price: "0.01",
+    userId: "user-1",
+    time_to_first_token: "0.25",
+    cost: "0.002",
+  });
+  assertNoRawAIAttrs(attrs);
+  assertNoOffContractAliases(attrs);
+});
+
+test("agent display names use the canonical entity name without LLM fields", () => {
+  const attrs = runTranslator(
+    "ai.agent",
+    {
+      "ai.agent.name": "planner",
+      "ai.telemetry.metadata.agent_name": "metadata-planner",
+      "respan.metadata.agent_name": "legacy-planner",
+      "gen_ai.operation.name": "agent_step",
+      "gen_ai.provider.name": "openai",
+      "gen_ai.request.model": "gpt-4o-mini",
+      "gen_ai.usage.input_tokens": 3,
+      "llm.request.type": "chat",
+    },
+    { expectedEntityName: "planner" },
+  );
+
+  assert.equal(attrs["respan.entity.log_type"], "agent");
+  assert.equal(attrs["traceloop.entity.name"], "planner");
+  assertNoLLMSpecificAttrs(attrs);
+  assertNoRawAIAttrs(attrs);
+  assertNoOffContractAliases(attrs);
+});
+
+for (const [name, logType] of [
+  ["ai.agent.step", "task"],
+  ["ai.workflow", "workflow"],
+]) {
+  test(`${name} strips LLM-only fields from structural spans`, () => {
+    const attrs = runTranslator(name, {
+      "gen_ai.operation.name": "agent_step",
+      "gen_ai.provider.name": "openai",
+      "gen_ai.request.model": "gpt-4o-mini",
+      "gen_ai.input.messages": "[]",
+      "gen_ai.output.messages": "[]",
+      "gen_ai.usage.input_tokens": 3,
+      "llm.request.type": "chat",
+    });
+
+    assert.equal(attrs["respan.entity.log_type"], logType);
+    assertNoLLMSpecificAttrs(attrs);
+    assertNoOffContractAliases(attrs);
+  });
+}
 
 test("ai.generateText.doGenerate is classified as LLM text, not task", () => {
   const attrs = runTranslator("ai.generateText.doGenerate", baseLLMSpan);
@@ -107,37 +237,45 @@ test("ai.response is classified as LLM text, not response", () => {
   assertNoOffContractAliases(attrs);
 });
 
-test("parent streamText operation spans are enriched when they carry telemetry", () => {
-  const attrs = runTranslator("ai.streamText", {
-    "ai.model.id": "gpt-4o-mini",
-    "ai.model.provider": "openai.chat",
-    "ai.prompt.messages": JSON.stringify([{ role: "user", content: "stream this" }]),
-    "ai.response.text": "streamed response",
-    "ai.usage.promptTokens": 9,
-    "ai.usage.completionTokens": 6,
-    "ai.usage.cachedInputTokens": 2,
-    "traceloop.span.kind": "task",
-    model: "gpt-4o-mini",
-    prompt_tokens: 9,
-  });
+for (const name of [
+  "ai.generateText",
+  "ai.streamText",
+  "ai.generateObject",
+  "ai.streamObject",
+  "ai.embed",
+  "ai.embedMany",
+]) {
+  test(`${name} parent wrapper is structural and carries no LLM fields`, () => {
+    const attrs = runTranslator(name, {
+      "ai.model.id": "gpt-4o-mini",
+      "ai.model.provider": "openai.chat",
+      "ai.prompt.messages": JSON.stringify([{ role: "user", content: "hello" }]),
+      "ai.response.text": "world",
+      "ai.usage.promptTokens": 9,
+      "ai.usage.completionTokens": 6,
+      "ai.values": [JSON.stringify("embed this")],
+      "ai.embeddings": [JSON.stringify([0.1, 0.2])],
+      "gen_ai.request.model": "duplicate-model",
+      "gen_ai.usage.input_tokens": 9,
+      "gen_ai.usage.output_tokens": 6,
+      "llm.request.type": "chat",
+      "llm.usage.total_tokens": 15,
+      "traceloop.span.kind": "task",
+      model: "gpt-4o-mini",
+      prompt_tokens: 9,
+    });
 
-  assert.equal(attrs["respan.entity.log_type"], "text");
-  assert.equal(attrs["llm.request.type"], "chat");
-  assert.equal(attrs["llm.is_streaming"], true);
-  assert.equal(attrs["gen_ai.system"], "openai");
-  assert.equal(attrs["gen_ai.request.model"], "gpt-4o-mini");
-  assert.equal(attrs["gen_ai.prompt.0.content"], "stream this");
-  assert.equal(attrs["gen_ai.completion.0.content"], "streamed response");
-  assert.equal(attrs["gen_ai.usage.input_tokens"], 9);
-  assert.equal(attrs["gen_ai.usage.output_tokens"], 6);
-  assert.equal(attrs["gen_ai.usage.prompt_tokens"], 9);
-  assert.equal(attrs["gen_ai.usage.completion_tokens"], 6);
-  assert.equal(attrs["llm.usage.total_tokens"], 15);
-  assert.equal(attrs["llm.usage.cache_read_input_tokens"], 2);
-  assert.equal(attrs["traceloop.span.kind"], undefined);
-  assertNoRawAIAttrs(attrs);
-  assertNoOffContractAliases(attrs);
-});
+    assert.equal(attrs["respan.entity.log_type"], "task");
+    assert.equal(attrs["traceloop.entity.name"], name);
+    assert.equal(attrs["traceloop.entity.path"], "");
+    assert.equal(attrs["traceloop.entity.input"], undefined);
+    assert.equal(attrs["traceloop.entity.output"], undefined);
+    assert.equal(attrs["traceloop.span.kind"], undefined);
+    assertNoLLMSpecificAttrs(attrs);
+    assertNoRawAIAttrs(attrs);
+    assertNoOffContractAliases(attrs);
+  });
+}
 
 test("object generation spans map object output into canonical completion fields", () => {
   const responseObject = { answer: "Tokyo", confidence: 0.98 };
@@ -165,30 +303,6 @@ test("object generation spans map object output into canonical completion fields
   assert.equal(attrs["gen_ai.usage.input_tokens"], 11);
   assert.equal(attrs["gen_ai.usage.output_tokens"], 7);
   assert.equal(attrs["llm.usage.total_tokens"], 18);
-  assert.equal(attrs["traceloop.span.kind"], undefined);
-  assertNoRawAIAttrs(attrs);
-  assertNoOffContractAliases(attrs);
-});
-
-test("streamObject parent operation spans map object output and streaming state", () => {
-  const responseObject = { status: "ok" };
-  const attrs = runTranslator("ai.streamObject", {
-    "ai.model.id": "gpt-4o-mini",
-    "ai.prompt.messages": JSON.stringify([{ role: "user", content: "stream JSON" }]),
-    "ai.response.object": JSON.stringify(responseObject),
-    "ai.usage.promptTokens": 4,
-    "ai.usage.completionTokens": 5,
-    "traceloop.span.kind": "task",
-  });
-
-  assert.equal(attrs["respan.entity.log_type"], "text");
-  assert.equal(attrs["llm.request.type"], "chat");
-  assert.equal(attrs["llm.is_streaming"], true);
-  assert.equal(attrs["gen_ai.prompt.0.content"], "stream JSON");
-  assert.equal(attrs["gen_ai.completion.0.content"], JSON.stringify(responseObject));
-  assert.equal(attrs["gen_ai.usage.input_tokens"], 4);
-  assert.equal(attrs["gen_ai.usage.output_tokens"], 5);
-  assert.equal(attrs["llm.usage.total_tokens"], 9);
   assert.equal(attrs["traceloop.span.kind"], undefined);
   assertNoRawAIAttrs(attrs);
   assertNoOffContractAliases(attrs);
@@ -222,28 +336,6 @@ test("ai.embed.doEmbed is classified as embedding without synthetic usage fields
   assert.deepEqual(JSON.parse(attrs["traceloop.entity.input"]), ["embed this"]);
   assert.deepEqual(JSON.parse(attrs["traceloop.entity.output"]), [[0.1, 0.2, 0.3]]);
   assert.equal(attrs["ai.values"], undefined);
-  assertNoRawAIAttrs(attrs);
-  assertNoOffContractAliases(attrs);
-});
-
-test("parent embedMany operation spans capture values and vectors then strip raw ai keys", () => {
-  const attrs = runTranslator("ai.embedMany", {
-    "ai.model.id": "text-embedding-3-small",
-    "ai.model.provider": "openai.embedding",
-    "ai.values": [JSON.stringify("first"), JSON.stringify("second")],
-    "ai.embeddings": [JSON.stringify([0.1, 0.2]), JSON.stringify([0.3, 0.4])],
-    "ai.usage.tokens": 99,
-    "traceloop.span.kind": "task",
-  });
-
-  assert.equal(attrs["respan.entity.log_type"], "embedding");
-  assert.equal(attrs["llm.request.type"], "embedding");
-  assert.equal(attrs["gen_ai.request.model"], "text-embedding-3-small");
-  assert.deepEqual(JSON.parse(attrs["traceloop.entity.input"]), ["first", "second"]);
-  assert.deepEqual(JSON.parse(attrs["traceloop.entity.output"]), [[0.1, 0.2], [0.3, 0.4]]);
-  assert.equal(attrs["gen_ai.usage.input_tokens"], undefined);
-  assert.equal(attrs["gen_ai.usage.prompt_tokens"], undefined);
-  assert.equal(attrs["traceloop.span.kind"], undefined);
   assertNoRawAIAttrs(attrs);
   assertNoOffContractAliases(attrs);
 });
@@ -412,6 +504,7 @@ test("AI SDK 7 chat spans map gen_ai message parts into canonical chat fields", 
       "gen_ai.tool.definitions": JSON.stringify([tool]),
       "gen_ai.usage.input_tokens": 12,
       "gen_ai.usage.output_tokens": 4,
+      "gen_ai.usage.cache_read.input_tokens": 2,
       "traceloop.span.kind": "task",
     },
     { instrumentationScope: { name: "gen_ai" } },
@@ -448,7 +541,44 @@ test("AI SDK 7 chat spans map gen_ai message parts into canonical chat fields", 
   assert.equal(attrs["gen_ai.usage.prompt_tokens"], 12);
   assert.equal(attrs["gen_ai.usage.completion_tokens"], 4);
   assert.equal(attrs["llm.usage.total_tokens"], 16);
+  assert.equal(attrs["llm.usage.cache_read_input_tokens"], 2);
+  assert.equal(attrs["gen_ai.usage.cache_read.input_tokens"], undefined);
   assert.equal(attrs["traceloop.span.kind"], undefined);
+  assertNoRawAIAttrs(attrs);
+  assertNoOffContractAliases(attrs);
+});
+
+test("AI SDK 7 invoke_agent spans are structural agent roots", () => {
+  const attrs = runTranslator(
+    "invoke_agent research-agent",
+    {
+      "gen_ai.operation.name": "invoke_agent",
+      "gen_ai.agent.id": "agent-123",
+      "gen_ai.agent.name": "research-agent",
+      "gen_ai.provider.name": "openai",
+      "gen_ai.request.model": "gpt-4o-mini",
+      "gen_ai.input.messages": JSON.stringify([
+        { role: "user", parts: [{ type: "text", content: "research this" }] },
+      ]),
+      "gen_ai.output.messages": JSON.stringify([
+        { role: "assistant", parts: [{ type: "text", content: "done" }] },
+      ]),
+      "gen_ai.usage.input_tokens": 8,
+      "gen_ai.usage.output_tokens": 4,
+      "gen_ai.usage.cache_read.input_tokens": 2,
+      "llm.request.type": "chat",
+      "llm.usage.total_tokens": 12,
+    },
+    {
+      instrumentationScope: { name: "gen_ai" },
+      expectedEntityName: "research-agent",
+    },
+  );
+
+  assert.equal(attrs["respan.entity.log_type"], "agent");
+  assert.equal(attrs["traceloop.entity.name"], "research-agent");
+  assert.equal(attrs["traceloop.entity.path"], "");
+  assertNoLLMSpecificAttrs(attrs);
   assertNoRawAIAttrs(attrs);
   assertNoOffContractAliases(attrs);
 });
@@ -478,6 +608,99 @@ test("AI SDK 7 execute_tool spans carry input/output only", () => {
   });
   assert.equal(attrs.tool_calls, undefined);
   assert.equal(attrs["respan.span.tool_calls"], undefined);
+  assertNoRawModernToolAttrs(attrs);
+  assertNoLLMSpecificAttrs(attrs);
   assertNoRawAIAttrs(attrs);
   assertNoOffContractAliases(attrs);
+});
+
+// ── Semantic span-name hints & structural wrappers ───────────────────────────
+
+test("ai.generateText wrapper is drop-marked but still enriched for legacy export", () => {
+  const attrs = runTranslator("ai.generateText", {
+    "ai.prompt.messages": JSON.stringify([{ role: "user", content: "hi" }]),
+  });
+
+  assert.equal(attrs["respan.internal.drop_span"], true);
+  // Still classified so the legacy style exports it as before.
+  assert.equal(attrs["respan.entity.log_type"], "task");
+});
+
+test("ai.toolCall spans carry tool name hints", () => {
+  const attrs = runTranslator("ai.toolCall", {
+    "ai.toolCall.name": "lookup_weather",
+    "ai.toolCall.args": JSON.stringify({ city: "Tokyo" }),
+  });
+
+  assert.equal(attrs["respan.internal.span_name.kind"], "tool");
+  assert.equal(attrs["respan.internal.span_name.detail"], "lookup_weather");
+});
+
+test("children of an open wrapper are stamped with the export-time parent", () => {
+  const translator = new VercelAITranslator();
+
+  function makeSpan(name, spanId, parentSpanId) {
+    const attributes = {};
+    return {
+      name,
+      attributes,
+      parentSpanId,
+      instrumentationScope: { name: "ai" },
+      spanContext: () => ({ spanId }),
+      setAttribute(key, value) {
+        attributes[key] = value;
+      },
+    };
+  }
+
+  const wrapper = makeSpan("ai.generateText", "wrapper-1", "agent-1");
+  translator.onStart(wrapper, undefined);
+  assert.equal(wrapper.attributes["respan.internal.drop_span"], true);
+
+  const child = makeSpan("ai.generateText.doGenerate", "child-1", "wrapper-1");
+  translator.onStart(child, undefined);
+  assert.equal(
+    child.attributes["respan.internal.export_parent_span_id"],
+    "agent-1"
+  );
+
+  // Sibling spans not under the wrapper are untouched.
+  const outside = makeSpan("ai.toolCall", "tool-1", "agent-1");
+  translator.onStart(outside, undefined);
+  assert.equal(outside.attributes["respan.internal.export_parent_span_id"], undefined);
+
+  // After the wrapper ends, the registry entry is released.
+  translator.onEnd(wrapper);
+  const late = makeSpan("ai.generateText.doGenerate", "child-2", "wrapper-1");
+  translator.onStart(late, undefined);
+  assert.equal(late.attributes["respan.internal.export_parent_span_id"], undefined);
+});
+
+test("root wrapper children are marked for root promotion", () => {
+  const translator = new VercelAITranslator();
+  const attributes = {};
+  const wrapper = {
+    name: "ai.streamText",
+    attributes: {},
+    parentSpanId: undefined,
+    instrumentationScope: { name: "ai" },
+    spanContext: () => ({ spanId: "wrapper-root" }),
+    setAttribute(key, value) {
+      wrapper.attributes[key] = value;
+    },
+  };
+  translator.onStart(wrapper, undefined);
+
+  const child = {
+    name: "ai.streamText.doStream",
+    attributes,
+    parentSpanId: "wrapper-root",
+    instrumentationScope: { name: "ai" },
+    spanContext: () => ({ spanId: "child-root" }),
+    setAttribute(key, value) {
+      attributes[key] = value;
+    },
+  };
+  translator.onStart(child, undefined);
+  assert.equal(attributes["respan.internal.export_parent_span_id"], "");
 });
