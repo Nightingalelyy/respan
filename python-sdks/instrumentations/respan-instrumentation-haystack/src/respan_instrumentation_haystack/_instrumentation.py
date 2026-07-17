@@ -336,8 +336,15 @@ def _suppress_haystack_native_span_export(span: Any) -> None:
     if attributes is None:
         return
 
-    for attribute_name in HAYSTACK_NATIVE_PROCESSING_ATTRIBUTES:
-        attributes.pop(attribute_name, None)
+    # ReadableSpan stores ended-span attributes in an immutable
+    # BoundedAttributes instance on newer OpenTelemetry releases. Replace the
+    # private snapshot instead of mutating it so native Haystack spans remain
+    # unprocessable without raising during processor shutdown.
+    span._attributes = {
+        name: value
+        for name, value in attributes.items()
+        if name not in HAYSTACK_NATIVE_PROCESSING_ATTRIBUTES
+    }
 
 
 def _parse_json_attr(value: Any) -> Any:

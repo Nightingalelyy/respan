@@ -54,7 +54,11 @@ from respan_instrumentation_writer._constants import (
     WRITER_VISION_SPAN_NAME,
 )
 from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT, LOG_TYPE_TEXT, LOG_TYPE_TOOL
-from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
+from respan_sdk.constants.span_attributes import (
+    RESPAN_INTERNAL_SPAN_NAME_DETAIL,
+    RESPAN_INTERNAL_SPAN_NAME_KIND,
+    RESPAN_LOG_TYPE,
+)
 
 _WRITER_SENTINEL_CLASS_NAMES = {"Omit", "NotGiven"}
 _REQUEST_CONTROL_KEYS = {
@@ -643,6 +647,8 @@ def build_tool_attrs(
         TLSpanAttributes.TRACELOOP_ENTITY_INPUT: safe_json(
             _public_request_kwargs(request_kwargs)
         ),
+        RESPAN_INTERNAL_SPAN_NAME_KIND: LOG_TYPE_TOOL,
+        RESPAN_INTERNAL_SPAN_NAME_DETAIL: tool_name.rsplit(".", 1)[-1],
         RESPAN_LOG_TYPE: LOG_TYPE_TOOL,
     }
     workflow_name = context_api.get_value(TLSpanAttributes.TRACELOOP_ENTITY_NAME)
