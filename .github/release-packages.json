@@ -527,6 +527,12 @@
       "name": "respan-instrumentation-milvus",
       "path": "python-sdks/instrumentations/respan-instrumentation-milvus",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-pinecone",
+      "path": "python-sdks/instrumentations/respan-instrumentation-pinecone",
+      "registry": "pypi"
     }
   ]
 }
