@@ -521,6 +521,12 @@
       "name": "respan-instrumentation-lancedb",
       "path": "python-sdks/instrumentations/respan-instrumentation-lancedb",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-milvus",
+      "path": "python-sdks/instrumentations/respan-instrumentation-milvus",
+      "registry": "pypi"
     }
   ]
 }
