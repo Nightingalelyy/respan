@@ -6,4 +6,5 @@ export interface RespanInstrumentation {
   name: string;
   activate(): void | Promise<void>;
   deactivate(): void | Promise<void>;
+  isActive?(): boolean;
 }

@@ -6,7 +6,7 @@ This document records the implementation plan for broadening Respan auto-instrum
 
 Broaden zero-config tracing for direct LLM provider SDKs without creating duplicate logs or duplicate trace spans on the Respan platform.
 
-Auto-instrumentation should cover leaf provider calls such as OpenAI, Anthropic, Cohere, Together AI, Writer, Bedrock, Vertex AI, Google GenAI, OpenRouter, Mistral, Groq, and Ollama where the instrumentation maps one SDK call to one LLM span.
+Auto-instrumentation should cover eligible leaf provider calls such as OpenAI, Anthropic, Cohere, Together AI, Writer, Bedrock, Vertex AI, Google GenAI, OpenRouter, Mistral, Groq, and Ollama where the adapter is installed or bundled, lazy-loadable, verified, conflict-free, and maps one SDK call to one LLM span.
 
 Auto-instrumentation should not cover agent, orchestration, workflow, callback, or framework integrations such as OpenAI Agents, Claude Agent SDK, Vercel AI SDK, LangChain, LlamaIndex, CrewAI, Pydantic AI, Haystack, Google ADK, BeeAI, Mastra, MCP, or similar packages. Those should remain explicit because they create higher-level spans and often overlap with direct provider SDK calls.
 
@@ -16,7 +16,8 @@ Use this category split everywhere: runtime registry, CLI setup, docs, and tests
 
 | Category | Auto-enabled by default | Examples |
 | --- | --- | --- |
-| `direct-llm` | Yes, when installed and not disabled | OpenAI, Anthropic, Azure OpenAI, Cohere, Together AI, Writer, Bedrock, Vertex AI, Google GenAI, OpenRouter, Mistral, Groq, Ollama |
+| `direct-llm` | Yes, when eligible, installed or bundled, and not disabled | OpenAI, Anthropic, Azure OpenAI, Cohere, Together AI, Writer, Bedrock, Vertex AI, Google GenAI, OpenRouter, Mistral, Groq, Ollama |
+| `llm-wrapper` | No | LiteLLM, Instructor |
 | `agent-framework` | No | OpenAI Agents, Claude Agent SDK, Pydantic AI, Google ADK, CrewAI, BeeAI |
 | `app-framework` | No | LangChain, LlamaIndex, Haystack, Vercel AI SDK, Mastra |
 | `protocol-or-tooling` | No | MCP, Codex CLI, Gemini CLI, OpenCode |
@@ -306,7 +307,7 @@ Update these docs after implementation:
 
 Docs should show:
 
-- direct LLM SDKs auto-instrument by default
+- eligible direct LLM SDKs auto-instrument by default
 - agent/framework integrations require explicit instrumentors
 - how to disable one provider
 - how to view instrumentation status
@@ -325,7 +326,7 @@ Docs should show:
 
 ## Acceptance Criteria
 
-- Direct LLM SDK integrations can be auto-enabled without user imports when installed.
+- Eligible direct LLM SDK integrations can be auto-enabled without user imports when installed or bundled.
 - Agent and framework instrumentations remain explicit-only.
 - Explicit framework instrumentation disables overlapping direct LLM auto-instrumentation by default.
 - The runtime exposes structured instrumentation status.

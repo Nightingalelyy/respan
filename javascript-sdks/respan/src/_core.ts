@@ -155,8 +155,27 @@ export class Respan {
         const mod = await this._importInstrumentationPackage(entry.instrumentationPackage);
         const InstrumentorClass = mod[entry.instrumentorClass] ?? mod.default;
         if (InstrumentorClass) {
-          await this._activate(new InstrumentorClass());
-          this._recordInstrumentationStatus(statusFromEntry(entry, "enabled"));
+          const instrumentor = new InstrumentorClass();
+          if (instrumentor.name !== entry.id) {
+            const actualName = String(instrumentor.name);
+            this._recordInstrumentationStatus(
+              statusFromEntry(
+                entry,
+                "failed",
+                `instrumentor name ${actualName} does not match registry id ${entry.id}`,
+              ),
+            );
+          } else if (await this._activate(instrumentor, true)) {
+            this._recordInstrumentationStatus(statusFromEntry(entry, "enabled"));
+          } else {
+            this._recordInstrumentationStatus(
+              statusFromEntry(
+                entry,
+                "missing",
+                "target SDK is not installed or instrumentor did not activate",
+              ),
+            );
+          }
         } else {
           this._recordInstrumentationStatus(
             statusFromEntry(
@@ -445,14 +464,36 @@ export class Respan {
     return "unknown error";
   }
 
-  private async _activate(inst: RespanInstrumentation): Promise<void> {
+  private async _activate(
+    inst: RespanInstrumentation,
+    requireConfirmation = false,
+  ): Promise<boolean> {
     if (this._instrumentations.has(inst.name)) {
       console.warn(
         `[Respan] Instrumentation "${inst.name}" is already active — skipping.`
       );
-      return;
+      return true;
     }
     await inst.activate();
+    if (requireConfirmation && !this._instrumentorIsActive(inst)) {
+      return false;
+    }
     this._instrumentations.set(inst.name, inst);
+    return true;
+  }
+
+  private _instrumentorIsActive(inst: RespanInstrumentation): boolean {
+    if (typeof inst.isActive === "function") {
+      return inst.isActive();
+    }
+
+    const internalState = inst as RespanInstrumentation & {
+      _isInstrumented?: boolean;
+    };
+    if (typeof internalState._isInstrumented === "boolean") {
+      return internalState._isInstrumented;
+    }
+
+    return false;
   }
 }

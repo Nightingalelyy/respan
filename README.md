@@ -145,9 +145,9 @@ The plugin system supports 50+ tools via OTEL instrumentation wrappers:
 | OpenInference (Arize) | `respan-instrumentation-openinference` | `@respan/instrumentation-openinference` |
 | Any OTEL instrumentor | `OTELInstrumentor(cls)` | `new OTELInstrumentor(cls)` |
 
-Direct LLM plugins are auto-discovered when installed. TypeScript defaults include OpenAI, Anthropic, Azure OpenAI, Vertex AI, OpenRouter, AWS Bedrock, Cohere, Together AI, and Writer. Python defaults include OpenAI, Anthropic, Google GenAI, Together AI, Mistral AI, and LiteLLM.
+Eligible first-party direct LLM plugins are auto-discovered when their instrumentation packages are installed. TypeScript defaults include OpenAI, Anthropic, Azure OpenAI, Vertex AI, OpenRouter, AWS Bedrock, Cohere, Together AI, and Writer. Python's bundled defaults include OpenAI (including Azure OpenAI), Anthropic, AWS Bedrock, Vertex AI, Google GenAI, Together AI, and Ollama.
 
-Agent, application-framework, protocol/tooling, observability-bridge, and vector-database integrations remain explicit opt-ins to prevent duplicate spans.
+LLM-wrapper, agent-framework, application-framework, protocol/tooling, observability-bridge, and vector-database integrations remain explicit opt-ins to prevent duplicate spans.
 
 ### Workflow and Task Decorators
 

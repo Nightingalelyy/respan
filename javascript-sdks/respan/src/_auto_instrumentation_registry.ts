@@ -375,7 +375,7 @@ export const AUTO_INSTRUMENTATION_REGISTRY: AutoInstrumentationEntry[] = [
 
 export const DIRECT_LLM_AUTO_INSTRUMENTATIONS: AutoInstrumentationEntry[] =
   AUTO_INSTRUMENTATION_REGISTRY.filter(
-    (entry) => entry.category === "direct-llm",
+    (entry) => entry.category === "direct-llm" && entry.enabledByDefault,
   );
 
 export function directLlmGenericTracingNames(): string[] {

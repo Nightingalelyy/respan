@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+import { Respan } from "../dist/_core.js";
 import {
   AUTO_INSTRUMENTATION_REGISTRY,
   DIRECT_LLM_AUTO_INSTRUMENTATIONS,
@@ -77,4 +79,75 @@ test("registry instrumentation packages are unique", () => {
     (entry) => entry.instrumentationPackage,
   );
   assert.equal(new Set(packages).size, packages.length);
+});
+
+test("only default-enabled direct LLM entries enter the auto pool", () => {
+  const expected = AUTO_INSTRUMENTATION_REGISTRY.filter(
+    (entry) => entry.category === "direct-llm" && entry.enabledByDefault,
+  );
+
+  assert.deepEqual(DIRECT_LLM_AUTO_INSTRUMENTATIONS, expected);
+  for (const entry of AUTO_INSTRUMENTATION_REGISTRY) {
+    if (entry.enabledByDefault) {
+      assert.equal(entry.category, "direct-llm", entry.id);
+    } else if (entry.category !== "direct-llm") {
+      assert.ok(entry.autoDisabledReason, entry.id);
+    }
+  }
+});
+
+test("optional instrumentation dependencies match the auto pool", async () => {
+  const packageJson = JSON.parse(
+    await readFile(new URL("../package.json", import.meta.url), "utf8"),
+  );
+  const bundled = Object.keys(packageJson.optionalDependencies ?? {})
+    .filter((name) => name.startsWith("@respan/instrumentation-"))
+    .sort();
+  const enabled = DIRECT_LLM_AUTO_INSTRUMENTATIONS.map(
+    (entry) => entry.instrumentationPackage,
+  ).sort();
+
+  assert.deepEqual(bundled, enabled);
+});
+
+test("auto activation requires confirmation without changing explicit plugin behavior", async () => {
+  const respan = Object.create(Respan.prototype);
+  respan._instrumentations = new Map();
+
+  const explicitWithPrivateState = {
+    name: "explicit-private-state",
+    _isInstrumented: false,
+    async activate() {},
+    deactivate() {},
+  };
+  assert.equal(await respan._activate(explicitWithPrivateState), true);
+  assert.equal(
+    respan._instrumentations.has(explicitWithPrivateState.name),
+    true,
+  );
+
+  const confirmedNoOp = {
+    name: "confirmed-no-op",
+    _isInstrumented: false,
+    async activate() {},
+    deactivate() {},
+  };
+  assert.equal(await respan._activate(confirmedNoOp, true), false);
+  assert.equal(respan._instrumentations.has(confirmedNoOp.name), false);
+
+  const unconfirmedAutoPlugin = {
+    name: "unconfirmed-auto-plugin",
+    activate() {},
+    deactivate() {},
+  };
+  assert.equal(await respan._activate(unconfirmedAutoPlugin, true), false);
+  assert.equal(respan._instrumentations.has(unconfirmedAutoPlugin.name), false);
+
+  const legacy = {
+    name: "legacy",
+    activate() {},
+    deactivate() {},
+  };
+  assert.equal(await respan._activate(legacy), true);
+  assert.equal(respan._instrumentations.has(legacy.name), true);
 });
