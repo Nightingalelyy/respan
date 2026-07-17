@@ -83,6 +83,9 @@ export class RespanTelemetry {
             instrumentModules: options.instrumentModules || {},
             disabledInstrumentations: options.disabledInstrumentations || [],
             tracingEnabled: options.tracingEnabled !== false,
+            spanNameStyle: (options.spanNameStyle ||
+                process.env.RESPAN_SPAN_NAME_STYLE ||
+                "semantic") as RespanOptions["spanNameStyle"],
             traceContent: options.traceContent !== false,
             logLevel: options.logLevel || "error",
             silenceInitializationMessage: options.silenceInitializationMessage || false,

@@ -613,3 +613,94 @@ test("AI SDK 7 execute_tool spans carry input/output only", () => {
   assertNoRawAIAttrs(attrs);
   assertNoOffContractAliases(attrs);
 });
+
+// ── Semantic span-name hints & structural wrappers ───────────────────────────
+
+test("ai.generateText wrapper is drop-marked but still enriched for legacy export", () => {
+  const attrs = runTranslator("ai.generateText", {
+    "ai.prompt.messages": JSON.stringify([{ role: "user", content: "hi" }]),
+  });
+
+  assert.equal(attrs["respan.internal.drop_span"], true);
+  // Still classified so the legacy style exports it as before.
+  assert.equal(attrs["respan.entity.log_type"], "task");
+});
+
+test("ai.toolCall spans carry tool name hints", () => {
+  const attrs = runTranslator("ai.toolCall", {
+    "ai.toolCall.name": "lookup_weather",
+    "ai.toolCall.args": JSON.stringify({ city: "Tokyo" }),
+  });
+
+  assert.equal(attrs["respan.internal.span_name.kind"], "tool");
+  assert.equal(attrs["respan.internal.span_name.detail"], "lookup_weather");
+});
+
+test("children of an open wrapper are stamped with the export-time parent", () => {
+  const translator = new VercelAITranslator();
+
+  function makeSpan(name, spanId, parentSpanId) {
+    const attributes = {};
+    return {
+      name,
+      attributes,
+      parentSpanId,
+      instrumentationScope: { name: "ai" },
+      spanContext: () => ({ spanId }),
+      setAttribute(key, value) {
+        attributes[key] = value;
+      },
+    };
+  }
+
+  const wrapper = makeSpan("ai.generateText", "wrapper-1", "agent-1");
+  translator.onStart(wrapper, undefined);
+  assert.equal(wrapper.attributes["respan.internal.drop_span"], true);
+
+  const child = makeSpan("ai.generateText.doGenerate", "child-1", "wrapper-1");
+  translator.onStart(child, undefined);
+  assert.equal(
+    child.attributes["respan.internal.export_parent_span_id"],
+    "agent-1"
+  );
+
+  // Sibling spans not under the wrapper are untouched.
+  const outside = makeSpan("ai.toolCall", "tool-1", "agent-1");
+  translator.onStart(outside, undefined);
+  assert.equal(outside.attributes["respan.internal.export_parent_span_id"], undefined);
+
+  // After the wrapper ends, the registry entry is released.
+  translator.onEnd(wrapper);
+  const late = makeSpan("ai.generateText.doGenerate", "child-2", "wrapper-1");
+  translator.onStart(late, undefined);
+  assert.equal(late.attributes["respan.internal.export_parent_span_id"], undefined);
+});
+
+test("root wrapper children are marked for root promotion", () => {
+  const translator = new VercelAITranslator();
+  const attributes = {};
+  const wrapper = {
+    name: "ai.streamText",
+    attributes: {},
+    parentSpanId: undefined,
+    instrumentationScope: { name: "ai" },
+    spanContext: () => ({ spanId: "wrapper-root" }),
+    setAttribute(key, value) {
+      wrapper.attributes[key] = value;
+    },
+  };
+  translator.onStart(wrapper, undefined);
+
+  const child = {
+    name: "ai.streamText.doStream",
+    attributes,
+    parentSpanId: "wrapper-root",
+    instrumentationScope: { name: "ai" },
+    spanContext: () => ({ spanId: "child-root" }),
+    setAttribute(key, value) {
+      attributes[key] = value;
+    },
+  };
+  translator.onStart(child, undefined);
+  assert.equal(attributes["respan.internal.export_parent_span_id"], "");
+});

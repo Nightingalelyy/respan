@@ -85,6 +85,7 @@ export const startTracing = async (options: RespanOptions) => {
     contextManager,
     silenceInitializationMessage = false,
     tracingEnabled = true,
+    spanNameStyle = process.env.RESPAN_SPAN_NAME_STYLE,
     instrumentModules,
     traceContent = true,
     disabledInstrumentations = [],
@@ -99,6 +100,7 @@ export const startTracing = async (options: RespanOptions) => {
     baseURL,
     logLevel,
     tracingEnabled,
+    spanNameStyle,
     traceContent,
     hasApiKey: !!apiKey,
     apiKeyLength: apiKey?.length || 0,
@@ -226,7 +228,7 @@ export const startTracing = async (options: RespanOptions) => {
   console.debug("[Respan Debug] Created OTLP trace exporter");
 
   // Initialize multi-processor manager
-  const processorManager = new MultiProcessorManager({ disableBatch });
+  const processorManager = new MultiProcessorManager({ disableBatch, spanNameStyle });
   
   // Add default Respan processor to the manager
   // This ensures backward compatibility: spans without a `processors` attribute
