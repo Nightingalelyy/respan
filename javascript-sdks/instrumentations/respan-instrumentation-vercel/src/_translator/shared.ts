@@ -1,78 +1,19 @@
 import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import {
-  ATTR_GEN_AI_INPUT_MESSAGES,
   ATTR_GEN_AI_OPERATION_NAME,
-  ATTR_GEN_AI_OUTPUT_MESSAGES,
-  ATTR_GEN_AI_PROVIDER_NAME,
-  ATTR_GEN_AI_REQUEST_MODEL,
-  ATTR_GEN_AI_RESPONSE_FINISH_REASONS,
-  ATTR_GEN_AI_RESPONSE_ID,
-  ATTR_GEN_AI_SYSTEM,
-  ATTR_GEN_AI_SYSTEM_INSTRUCTIONS,
   ATTR_GEN_AI_TOOL_CALL_ARGUMENTS,
   ATTR_GEN_AI_TOOL_CALL_ID,
   ATTR_GEN_AI_TOOL_CALL_RESULT,
-  ATTR_GEN_AI_TOOL_DEFINITIONS,
   ATTR_GEN_AI_TOOL_NAME,
-  ATTR_GEN_AI_USAGE_INPUT_TOKENS,
-  ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
   GEN_AI_OPERATION_NAME_VALUE_CHAT,
   GEN_AI_OPERATION_NAME_VALUE_EMBEDDINGS,
   GEN_AI_OPERATION_NAME_VALUE_EXECUTE_TOOL,
   GEN_AI_OPERATION_NAME_VALUE_INVOKE_AGENT,
 } from "@opentelemetry/semantic-conventions/incubating";
 import { RespanLogType, RespanSpanAttributes } from "@respan/respan-sdk";
-import { SpanAttributes as TraceloopSpanAttributes } from "@traceloop/ai-semantic-conventions";
 import { VERCEL_PARENT_SPANS, VERCEL_SPAN_CONFIG } from "../constants/index.js";
 
 export type SpanAttributes = Record<string, any>;
-
-export const RESPAN_LOG_TYPE = RespanSpanAttributes.RESPAN_LOG_TYPE;
-export const CUSTOMER_ID = RespanSpanAttributes.RESPAN_CUSTOMER_PARAMS_ID;
-export const CUSTOMER_EMAIL = RespanSpanAttributes.RESPAN_CUSTOMER_PARAMS_EMAIL;
-export const CUSTOMER_NAME = RespanSpanAttributes.RESPAN_CUSTOMER_PARAMS_NAME;
-export const THREAD_ID = RespanSpanAttributes.RESPAN_THREADS_ID;
-export const SESSION_ID = RespanSpanAttributes.RESPAN_SESSION_ID;
-export const TRACE_GROUP_ID = RespanSpanAttributes.RESPAN_TRACE_GROUP_ID;
-export const RESPAN_METADATA_AGENT_NAME = RespanSpanAttributes.RESPAN_METADATA_AGENT_NAME;
-export const RESPAN_METADATA_PREFIX = RespanSpanAttributes.RESPAN_METADATA;
-export const RESPAN_SPAN_TOOLS = RespanSpanAttributes.RESPAN_SPAN_TOOLS;
-export const RESPAN_SPAN_TOOL_CALLS = RespanSpanAttributes.RESPAN_SPAN_TOOL_CALLS;
-export const RESPAN_SPAN_HANDOFFS = RespanSpanAttributes.RESPAN_SPAN_HANDOFFS;
-
-export const GEN_AI_SYSTEM = ATTR_GEN_AI_SYSTEM;
-export const GEN_AI_PROVIDER_NAME = ATTR_GEN_AI_PROVIDER_NAME;
-export const GEN_AI_REQUEST_MODEL = ATTR_GEN_AI_REQUEST_MODEL;
-export const GEN_AI_PROMPT = TraceloopSpanAttributes.LLM_PROMPTS;
-export const GEN_AI_COMPLETION = TraceloopSpanAttributes.LLM_COMPLETIONS;
-export const GEN_AI_USAGE_PROMPT_TOKENS = TraceloopSpanAttributes.LLM_USAGE_PROMPT_TOKENS;
-export const GEN_AI_USAGE_COMPLETION_TOKENS = TraceloopSpanAttributes.LLM_USAGE_COMPLETION_TOKENS;
-export const GEN_AI_USAGE_INPUT_TOKENS = ATTR_GEN_AI_USAGE_INPUT_TOKENS;
-export const GEN_AI_USAGE_OUTPUT_TOKENS = ATTR_GEN_AI_USAGE_OUTPUT_TOKENS;
-export const GEN_AI_INPUT_MESSAGES = ATTR_GEN_AI_INPUT_MESSAGES;
-export const GEN_AI_OUTPUT_MESSAGES = ATTR_GEN_AI_OUTPUT_MESSAGES;
-export const GEN_AI_OPERATION_NAME = ATTR_GEN_AI_OPERATION_NAME;
-export const GEN_AI_SYSTEM_INSTRUCTIONS = ATTR_GEN_AI_SYSTEM_INSTRUCTIONS;
-export const GEN_AI_TOOL_DEFINITIONS = ATTR_GEN_AI_TOOL_DEFINITIONS;
-export const GEN_AI_TOOL_NAME = ATTR_GEN_AI_TOOL_NAME;
-export const GEN_AI_TOOL_CALL_ID = ATTR_GEN_AI_TOOL_CALL_ID;
-export const GEN_AI_TOOL_CALL_ARGUMENTS = ATTR_GEN_AI_TOOL_CALL_ARGUMENTS;
-export const GEN_AI_TOOL_CALL_RESULT = ATTR_GEN_AI_TOOL_CALL_RESULT;
-export const GEN_AI_RESPONSE_FINISH_REASONS = ATTR_GEN_AI_RESPONSE_FINISH_REASONS;
-export const GEN_AI_RESPONSE_ID = ATTR_GEN_AI_RESPONSE_ID;
-export const GEN_AI_OPERATION_CHAT = GEN_AI_OPERATION_NAME_VALUE_CHAT;
-export const GEN_AI_OPERATION_EMBEDDINGS = GEN_AI_OPERATION_NAME_VALUE_EMBEDDINGS;
-export const GEN_AI_OPERATION_EXECUTE_TOOL = GEN_AI_OPERATION_NAME_VALUE_EXECUTE_TOOL;
-export const GEN_AI_OPERATION_INVOKE_AGENT = GEN_AI_OPERATION_NAME_VALUE_INVOKE_AGENT;
-export const GEN_AI_OPERATION_AGENT_STEP = "agent_step";
-export const GEN_AI_OPERATION_RERANK = "rerank";
-export const LLM_REQUEST_TYPE = TraceloopSpanAttributes.LLM_REQUEST_TYPE;
-export const LLM_USAGE_TOTAL_TOKENS = TraceloopSpanAttributes.LLM_USAGE_TOTAL_TOKENS;
-export const LLM_USAGE_CACHE_READ_INPUT_TOKENS = "llm.usage.cache_read_input_tokens";
-export const TL_SPAN_KIND = TraceloopSpanAttributes.TRACELOOP_SPAN_KIND;
-export const TL_ENTITY_INPUT = TraceloopSpanAttributes.TRACELOOP_ENTITY_INPUT;
-export const TL_ENTITY_OUTPUT = TraceloopSpanAttributes.TRACELOOP_ENTITY_OUTPUT;
-export const TL_REQUEST_FUNCTIONS = TraceloopSpanAttributes.LLM_REQUEST_FUNCTIONS;
 
 export const AI_PREFIX = "ai.";
 export const AI_SDK = "ai.sdk";
@@ -109,24 +50,33 @@ export const AI_TOOL_CALL_ID = "ai.toolCall.id";
 export const AI_TOOL_CALL_NAME = "ai.toolCall.name";
 export const AI_TOOL_CALL_ARGS = "ai.toolCall.args";
 export const AI_TOOL_CALL_RESULT = "ai.toolCall.result";
-export const GEN_AI_USAGE_COST = "gen_ai.usage.cost";
-export const GEN_AI_USAGE_TTFT = "gen_ai.usage.ttft";
-export const GEN_AI_USAGE_GENERATION_TIME = "gen_ai.usage.generation_time";
-export const GEN_AI_USAGE_WARNINGS = "gen_ai.usage.warnings";
-export const GEN_AI_USAGE_TYPE = "gen_ai.usage.type";
 
 const VERCEL_AI_SCOPE_NAMES = new Set(["ai", "gen_ai", "@ai-sdk/otel"]);
 const MODERN_OPERATION_LOG_TYPES: Record<string, string> = {
-  [GEN_AI_OPERATION_CHAT]: RespanLogType.TEXT,
-  [GEN_AI_OPERATION_INVOKE_AGENT]: RespanLogType.TEXT,
-  [GEN_AI_OPERATION_EMBEDDINGS]: RespanLogType.EMBEDDING,
-  [GEN_AI_OPERATION_EXECUTE_TOOL]: RespanLogType.TOOL,
-  [GEN_AI_OPERATION_AGENT_STEP]: RespanLogType.TASK,
-  [GEN_AI_OPERATION_RERANK]: RespanLogType.TASK,
+  [GEN_AI_OPERATION_NAME_VALUE_CHAT]: RespanLogType.TEXT,
+  [GEN_AI_OPERATION_NAME_VALUE_INVOKE_AGENT]: RespanLogType.AGENT,
+  [GEN_AI_OPERATION_NAME_VALUE_EMBEDDINGS]: RespanLogType.EMBEDDING,
+  [GEN_AI_OPERATION_NAME_VALUE_EXECUTE_TOOL]: RespanLogType.TOOL,
+  agent_step: RespanLogType.TASK,
+  rerank: RespanLogType.TASK,
 };
 
-export function metadataKey(key: string): string {
-  return `${RESPAN_METADATA_PREFIX}.${key}`;
+export function setMetadata(
+  attrs: SpanAttributes,
+  key: string,
+  value: unknown,
+): void {
+  if (value === undefined || value === null) {
+    return;
+  }
+
+  const attribute = RespanSpanAttributes.RESPAN_METADATA;
+  const existing = safeJsonParse(attrs[attribute]);
+  const metadata = isRecord(existing) ? { ...existing } : {};
+  if (metadata[key] === undefined) {
+    metadata[key] = value;
+  }
+  attrs[attribute] = safeJsonStr(metadata);
 }
 
 export function setDefault(attrs: SpanAttributes, key: string, value: any): void {
@@ -207,7 +157,7 @@ export function isVercelAIScope(scopeName: unknown): boolean {
 }
 
 export function modernOperationName(name: string, attrs: SpanAttributes = {}): string | undefined {
-  const fromAttrs = attrs[GEN_AI_OPERATION_NAME];
+  const fromAttrs = attrs[ATTR_GEN_AI_OPERATION_NAME];
   if (fromAttrs !== undefined && fromAttrs !== null) {
     return String(fromAttrs);
   }
@@ -231,7 +181,7 @@ export function isVercelAISpan(span: ReadableSpan): boolean {
   if (span.attributes[AI_SDK] !== undefined) {
     return true;
   }
-  if (span.attributes[GEN_AI_OPERATION_NAME] !== undefined) {
+  if (span.attributes[ATTR_GEN_AI_OPERATION_NAME] !== undefined) {
     return true;
   }
   return span.name.startsWith(AI_PREFIX) || isModernVercelAISpanName(span.name);
@@ -276,8 +226,8 @@ export function resolveLogType(name: string, attrs: SpanAttributes): string {
   if (
     attrs[AI_TOOL_CALL_ID] || attrs[AI_TOOL_CALL_NAME] ||
     attrs[AI_TOOL_CALL_ARGS] || attrs[AI_TOOL_CALL_RESULT] ||
-    attrs[GEN_AI_TOOL_CALL_ID] || attrs[GEN_AI_TOOL_NAME] ||
-    attrs[GEN_AI_TOOL_CALL_ARGUMENTS] || attrs[GEN_AI_TOOL_CALL_RESULT] ||
+    attrs[ATTR_GEN_AI_TOOL_CALL_ID] || attrs[ATTR_GEN_AI_TOOL_NAME] ||
+    attrs[ATTR_GEN_AI_TOOL_CALL_ARGUMENTS] || attrs[ATTR_GEN_AI_TOOL_CALL_RESULT] ||
     attrs[AI_RESPONSE_TOOL_CALLS] ||
     name.includes("tool") || operationId?.includes("tool")
   ) {

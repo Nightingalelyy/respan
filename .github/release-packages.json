@@ -248,8 +248,8 @@
     },
     {
       "ecosystem": "python",
-      "name": "respan-instrumentation-lancedb",
-      "path": "python-sdks/instrumentations/respan-instrumentation-lancedb",
+      "name": "respan-instrumentation-marqo",
+      "path": "python-sdks/instrumentations/respan-instrumentation-marqo",
       "registry": "pypi"
     },
     {
@@ -514,6 +514,12 @@
       "ecosystem": "python",
       "name": "respan-instrumentation-agentscope",
       "path": "python-sdks/instrumentations/respan-instrumentation-agentscope",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-lancedb",
+      "path": "python-sdks/instrumentations/respan-instrumentation-lancedb",
       "registry": "pypi"
     }
   ]

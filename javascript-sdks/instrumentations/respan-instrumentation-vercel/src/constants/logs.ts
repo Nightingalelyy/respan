@@ -55,10 +55,22 @@ export const VERCEL_SPAN_CONFIG: Record<string, VercelSpanConfig> = {
 // ── Parent wrapper spans (structural only, no LLM data) ─────────────────────
 
 export const VERCEL_PARENT_SPANS: Record<string, string> = {
-  "ai.generateText":   RespanLogType.TEXT,
-  "ai.streamText":     RespanLogType.TEXT,
-  "ai.generateObject": RespanLogType.TEXT,
-  "ai.streamObject":   RespanLogType.TEXT,
-  "ai.embed":          RespanLogType.EMBEDDING,
-  "ai.embedMany":      RespanLogType.EMBEDDING,
+  "ai.generateText":   RespanLogType.TASK,
+  "ai.streamText":     RespanLogType.TASK,
+  "ai.generateObject": RespanLogType.TASK,
+  "ai.streamObject":   RespanLogType.TASK,
+  "ai.embed":          RespanLogType.TASK,
+  "ai.embedMany":      RespanLogType.TASK,
 };
+
+// Classic-telemetry LLM wrappers whose detailed `.doGenerate`/`.doStream`
+// child carries the actual model/input/output. Marked with the internal
+// drop attribute so the semantic export style removes them (children are
+// reparented); legacy style still exports them. Modern AI SDK 7 telemetry
+// emits flat spans, so no modern names belong here.
+export const VERCEL_STRUCTURAL_LLM_PARENT_SPANS = new Set([
+  "ai.generateText",
+  "ai.streamText",
+  "ai.generateObject",
+  "ai.streamObject",
+]);

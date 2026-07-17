@@ -147,7 +147,9 @@ canonical contract**. It is not to invent new Respan-prefixed fields.
 Vendor-specific shapes a translator must handle today:
 
 - Vercel AI SDK: `ai.*` → canonical
-- OpenInference (CrewAI, Haystack, Google ADK, LangChain, …):
+- CrewAI official lifecycle events: the first-party CrewAI listener emits the
+  canonical contract directly (no OpenInference runtime translation)
+- OpenInference (Haystack, Google ADK, LangChain, …):
   `openinference.*`, indexed `llm.input_messages.N.*` /
   `llm.output_messages.N.*` → canonical
 

@@ -33,6 +33,15 @@
     "@respan/respan-sdk": "^1.0.0",
     "@traceloop/ai-semantic-conventions": "^0.13.0"
   },
+  "peerDependencies": {
+    "@ai-sdk/otel": ">=1.0.0 <2.0.0",
+    "ai": ">=4.0.0 <8.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@ai-sdk/otel": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@types/node": "^22.15.29",
     "typescript": "^5.7.3"

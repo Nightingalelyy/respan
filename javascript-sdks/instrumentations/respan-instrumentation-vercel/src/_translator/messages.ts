@@ -1,4 +1,14 @@
 import {
+  ATTR_GEN_AI_INPUT_MESSAGES,
+  ATTR_GEN_AI_OUTPUT_MESSAGES,
+  ATTR_GEN_AI_TOOL_CALL_ARGUMENTS,
+  ATTR_GEN_AI_TOOL_CALL_ID,
+  ATTR_GEN_AI_TOOL_CALL_RESULT,
+  ATTR_GEN_AI_TOOL_DEFINITIONS,
+  ATTR_GEN_AI_TOOL_NAME,
+} from "@opentelemetry/semantic-conventions/incubating";
+import { SpanAttributes as TraceloopSpanAttributes } from "@traceloop/ai-semantic-conventions";
+import {
   AI_PROMPT,
   AI_PROMPT_MESSAGES,
   AI_PROMPT_TOOLS,
@@ -13,15 +23,6 @@ import {
   AI_TOOL_CALL_NAME,
   AI_TOOL_CALL_PREFIX,
   AI_TOOL_CALL_RESULT,
-  GEN_AI_COMPLETION,
-  GEN_AI_INPUT_MESSAGES,
-  GEN_AI_OUTPUT_MESSAGES,
-  GEN_AI_PROMPT,
-  GEN_AI_TOOL_CALL_ARGUMENTS,
-  GEN_AI_TOOL_CALL_ID,
-  GEN_AI_TOOL_CALL_RESULT,
-  GEN_AI_TOOL_DEFINITIONS,
-  GEN_AI_TOOL_NAME,
   isRecord,
   parseJsonish,
   safeJsonParse,
@@ -123,11 +124,11 @@ export function parseToolCalls(attrs: SpanAttributes): Record<string, any>[] | u
     return normalizeToolCallList(toolCall);
   }
 
-  if (attrs[GEN_AI_TOOL_CALL_ID] || attrs[GEN_AI_TOOL_NAME] || attrs[GEN_AI_TOOL_CALL_ARGUMENTS]) {
+  if (attrs[ATTR_GEN_AI_TOOL_CALL_ID] || attrs[ATTR_GEN_AI_TOOL_NAME] || attrs[ATTR_GEN_AI_TOOL_CALL_ARGUMENTS]) {
     return normalizeToolCallList({
-      id: attrs[GEN_AI_TOOL_CALL_ID],
-      name: attrs[GEN_AI_TOOL_NAME],
-      arguments: attrs[GEN_AI_TOOL_CALL_ARGUMENTS],
+      id: attrs[ATTR_GEN_AI_TOOL_CALL_ID],
+      name: attrs[ATTR_GEN_AI_TOOL_NAME],
+      arguments: attrs[ATTR_GEN_AI_TOOL_CALL_ARGUMENTS],
     });
   }
 
@@ -167,7 +168,7 @@ function parseToolDefinition(tool: unknown): unknown {
 
 export function parseToolsValue(attrs: SpanAttributes): unknown[] | undefined {
   try {
-    const tools = attrs[GEN_AI_TOOL_DEFINITIONS] ?? attrs[AI_PROMPT_TOOLS];
+    const tools = attrs[ATTR_GEN_AI_TOOL_DEFINITIONS] ?? attrs[AI_PROMPT_TOOLS];
     if (!tools) {
       return undefined;
     }
@@ -556,8 +557,8 @@ function enrichCompletionAttrs(attrs: SpanAttributes, payload: unknown): void {
     : parseToolCalls(attrs);
 
   if (message) {
-    attrs[`${GEN_AI_COMPLETION}.0.role`] = "assistant";
-    attrs[`${GEN_AI_COMPLETION}.0.content`] =
+    attrs[`${TraceloopSpanAttributes.LLM_COMPLETIONS}.0.role`] = "assistant";
+    attrs[`${TraceloopSpanAttributes.LLM_COMPLETIONS}.0.content`] =
       typeof message.content === "string"
         ? message.content
         : message.content !== undefined
@@ -566,12 +567,12 @@ function enrichCompletionAttrs(attrs: SpanAttributes, payload: unknown): void {
   }
 
   if (responseToolCalls && responseToolCalls.length > 0) {
-    attrs[`${GEN_AI_COMPLETION}.0.tool_calls`] = safeJsonStr(responseToolCalls);
+    attrs[`${TraceloopSpanAttributes.LLM_COMPLETIONS}.0.tool_calls`] = safeJsonStr(responseToolCalls);
   }
 }
 
 function parsePromptInputValue(attrs: SpanAttributes): Record<string, any>[] | undefined {
-  const genAiMessages = normalizeMessageCollection(attrs[GEN_AI_INPUT_MESSAGES]);
+  const genAiMessages = normalizeMessageCollection(attrs[ATTR_GEN_AI_INPUT_MESSAGES]);
   if (genAiMessages && genAiMessages.length > 0) {
     return genAiMessages;
   }
@@ -591,7 +592,7 @@ function parsePromptInputValue(attrs: SpanAttributes): Record<string, any>[] | u
 
 function enrichPromptAttrs(attrs: SpanAttributes, messages: MessagePayload[]): void {
   messages.forEach((message, index) => {
-    const prefix = `${GEN_AI_PROMPT}.${index}`;
+    const prefix = `${TraceloopSpanAttributes.LLM_PROMPTS}.${index}`;
     if (message.role !== undefined) {
       attrs[`${prefix}.role`] = String(message.role);
     }
@@ -622,7 +623,7 @@ export function formatPromptInput(attrs: SpanAttributes): string | undefined {
 }
 
 export function formatCompletionOutput(attrs: SpanAttributes): string | undefined {
-  const genAiOutputMessages = normalizeMessageCollection(attrs[GEN_AI_OUTPUT_MESSAGES]);
+  const genAiOutputMessages = normalizeMessageCollection(attrs[ATTR_GEN_AI_OUTPUT_MESSAGES]);
   if (genAiOutputMessages && genAiOutputMessages.length > 0) {
     const outputPayload = appendToolResultMessage(collapseSingleMessagePayload(genAiOutputMessages), attrs);
     enrichCompletionAttrs(attrs, outputPayload);
@@ -667,9 +668,9 @@ export function formatCompletionOutput(attrs: SpanAttributes): string | undefine
 }
 
 export function formatToolInput(attrs: SpanAttributes): string | undefined {
-  const name = attrs[GEN_AI_TOOL_NAME] ?? attrs[AI_TOOL_CALL_NAME];
-  const args = attrs[GEN_AI_TOOL_CALL_ARGUMENTS] ?? attrs[AI_TOOL_CALL_ARGS];
-  const id = attrs[GEN_AI_TOOL_CALL_ID] ?? attrs[AI_TOOL_CALL_ID];
+  const name = attrs[ATTR_GEN_AI_TOOL_NAME] ?? attrs[AI_TOOL_CALL_NAME];
+  const args = attrs[ATTR_GEN_AI_TOOL_CALL_ARGUMENTS] ?? attrs[AI_TOOL_CALL_ARGS];
+  const id = attrs[ATTR_GEN_AI_TOOL_CALL_ID] ?? attrs[AI_TOOL_CALL_ID];
   if (!name && !args && !id) {
     return undefined;
   }
@@ -685,7 +686,7 @@ export function formatToolInput(attrs: SpanAttributes): string | undefined {
 }
 
 export function formatToolOutput(attrs: SpanAttributes): string | undefined {
-  const result = attrs[GEN_AI_TOOL_CALL_RESULT] ?? attrs[AI_TOOL_CALL_RESULT];
+  const result = attrs[ATTR_GEN_AI_TOOL_CALL_RESULT] ?? attrs[AI_TOOL_CALL_RESULT];
   if (result === undefined) {
     return undefined;
   }

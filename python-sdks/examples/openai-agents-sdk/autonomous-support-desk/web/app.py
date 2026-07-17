@@ -69,7 +69,6 @@ async def stream(request):
                 finished += 1
                 continue
             yield {"data": json.dumps(ev)}
-        telemetry.flush()
         yield {"data": json.dumps({"type": "all_done"})}
 
     return EventSourceResponse(gen())

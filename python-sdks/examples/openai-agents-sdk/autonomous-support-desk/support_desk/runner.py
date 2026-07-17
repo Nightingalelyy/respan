@@ -89,5 +89,4 @@ async def run_all() -> list[dict]:
     telemetry.init_telemetry()
     tasks = [run_ticket(TENANTS[s.tenant_id], s.ticket) for s in SCENARIOS]
     results = await asyncio.gather(*tasks)
-    telemetry.flush()
     return results
