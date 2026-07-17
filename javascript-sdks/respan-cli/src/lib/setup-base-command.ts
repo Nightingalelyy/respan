@@ -5,8 +5,8 @@ import { execSync, spawnSync } from 'node:child_process';
 import { Flags } from '@oclif/core';
 import { input, select, confirm } from '@inquirer/prompts';
 import { BaseCommand } from './base-command.js';
-import { getCredential, setCredential } from './config.js';
-import { DEFAULT_BASE_URL } from './auth.js';
+import { getCredential, setCredential, getActiveProfile } from './config.js';
+import { DEFAULT_BASE_URL, ENTERPRISE_BASE_URL } from './auth.js';
 import { printBanner } from './banner.js';
 import {
   findProjectRoot,
@@ -63,12 +63,13 @@ export abstract class SetupBaseCommand extends BaseCommand {
   /**
    * Shared setup flow for all three entry points.
    *
-   *   1. askApiKey()       // .env → global credential → prompt
-   *   2. if mode is undefined → ask "Tracing or Gateway?" (interactive only)
-   *   3. verifyApiKey(mode) // both re-prompt on a rejected key; can pause setup
-   *   4. selectAgent()      // drives only the launch
-   *   5. installSkill()     // full bundle, for all agents, regardless of selection
-   *   6. launchAgent(mode)  // only if an agent was selected
+   *   1. askEndpoint()      // saved endpoint (confirm reuse) → environment prompt
+   *   2. askApiKey()        // .env → global credential → prompt
+   *   3. if mode is undefined → ask "Tracing or Gateway?" (interactive only)
+   *   4. verifyApiKey(mode) // both re-prompt on a rejected key; can pause setup
+   *   5. selectAgent()      // drives only the launch
+   *   6. installSkill()     // full bundle, for all agents, regardless of selection
+   *   7. launchAgent(mode)  // only if an agent was selected
    */
   protected async runSetup(mode?: SetupMode, opts: RunSetupOptions = {}): Promise<void> {
     await printBanner();
@@ -76,19 +77,22 @@ export abstract class SetupBaseCommand extends BaseCommand {
     const projectRoot = findProjectRoot();
     const home = os.homedir();
 
-    // Step numbers are assigned sequentially. The mode question (Step 2) only
-    // runs for bare `respan setup`, so the concrete `setup tracing` / `setup
-    // gateway` commands renumber the later steps instead of leaving a gap.
+    // Step numbers are assigned sequentially. The mode question only runs for
+    // bare `respan setup`, so the concrete `setup tracing` / `setup gateway`
+    // commands renumber the later steps instead of leaving a gap.
     let step = 1;
 
+    this.logStep(step++, 'Endpoint');
+    const baseUrl = await this.askEndpoint(projectRoot);
+
     this.logStep(step++, 'API Key');
-    const apiKey = await this.askApiKey(projectRoot);
+    const apiKey = await this.askApiKey(projectRoot, baseUrl);
 
     // Ask the mode only when a concrete command didn't already pin it.
     const resolvedMode: SetupMode = mode ?? (await this.askMode(step));
     if (mode === undefined) step++;
 
-    const verified = await this.verifyApiKey(apiKey, resolvedMode, projectRoot);
+    const verified = await this.verifyApiKey(apiKey, resolvedMode, projectRoot, baseUrl);
     if (!verified) {
       const ready = resolvedMode === 'gateway' ? 'your gateway access is ready' : 'you have a valid API key';
       this.log('');
@@ -110,10 +114,11 @@ export abstract class SetupBaseCommand extends BaseCommand {
     this.log('');
     this.log(`  ${DIM}Your API key is saved in ${RESET}.env`);
     this.log(`  ${DIM}Respan skill installed for all agents${RESET}`);
+    const dashboard = this.dashboardUrl(baseUrl);
     if (resolvedMode === 'gateway') {
-      this.log(`  ${DIM}View logs at ${RESET}https://platform.respan.ai`);
+      this.log(`  ${DIM}View logs at ${RESET}${dashboard}`);
     } else {
-      this.log(`  ${DIM}View traces at ${RESET}https://platform.respan.ai`);
+      this.log(`  ${DIM}View traces at ${RESET}${dashboard}`);
     }
     this.log('');
 
@@ -125,6 +130,114 @@ export abstract class SetupBaseCommand extends BaseCommand {
     } else if (!selectedTool) {
       this.log(`  ${DIM}No agent selected, but the skill is installed. Open your agent any time and use the ${RESET}/respan${DIM} skill.${RESET}`);
     }
+  }
+
+  // ── Step 1: Endpoint ─────────────────────────────────────────────────
+
+  /**
+   * Resolve which Respan endpoint this project should target, mirroring the
+   * environment prompt in `respan auth login`.
+   *
+   * First run: ask "Respan Platform or Enterprise?" and remember the choice.
+   * Later runs: offer the saved endpoint and confirm before reusing it, so a
+   * user who switched environments isn't silently pinned to the old one. An
+   * explicit `--base-url` flag wins and skips the prompt for scripted flows.
+   */
+  protected async askEndpoint(projectRoot: string): Promise<string> {
+    // Explicit flag wins — CI/scripted parity with `auth login --base-url`.
+    const flagBaseUrl = this.globalFlags['base-url'];
+    if (flagBaseUrl) {
+      // `--base-url` is documented as a per-command override, so honor it for
+      // this run (verification + project .env) but don't rewrite the saved
+      // credential — that would silently redirect every other CLI command too.
+      const normalized = flagBaseUrl.replace(/\/+$/, '');
+      this.persistBaseUrlToEnv(projectRoot, normalized);
+      this.log(`  ${GREEN}✓${RESET} Using endpoint ${DIM}${this.endpointLabel(normalized)}${RESET}`);
+      return normalized;
+    }
+
+    // Returning users: reuse the endpoint from their saved credential
+    // (the same store `auth login` writes) on confirmation.
+    const saved = getCredential()?.baseUrl;
+    if (saved) {
+      const reuse = await confirm({
+        message: `Use your saved endpoint (${this.endpointLabel(saved)})?`,
+        default: true,
+      });
+      if (reuse) {
+        this.persistBaseUrlToEnv(projectRoot, saved);
+        return saved;
+      }
+    }
+
+    // First time (or switching environments) — same choices as auth login.
+    const enterprise = await select({
+      message: 'Select your environment:',
+      choices: [
+        { name: 'Respan Platform', value: false },
+        { name: 'Enterprise', value: true },
+      ],
+    });
+    const baseUrl = enterprise ? ENTERPRISE_BASE_URL : DEFAULT_BASE_URL;
+    this.rememberEndpoint(baseUrl);
+    this.persistBaseUrlToEnv(projectRoot, baseUrl);
+    return baseUrl;
+  }
+
+  /**
+   * Persist the chosen endpoint onto the existing saved credential — the same
+   * `~/.respan/credentials.json` store `auth login` uses. Only updates a
+   * credential that already exists; a first-time key is saved (with this
+   * baseUrl) later in {@link askApiKey}, so we never create a second store.
+   */
+  private rememberEndpoint(baseUrl: string): void {
+    const profile = getActiveProfile();
+    const cred = getCredential(profile);
+    if (cred && cred.baseUrl !== baseUrl) {
+      setCredential(profile, { ...cred, baseUrl });
+    }
+  }
+
+  /** Friendly name for the known endpoints; falls back to the raw URL. */
+  protected endpointLabel(baseUrl: string): string {
+    if (baseUrl === DEFAULT_BASE_URL) return 'Respan Platform';
+    if (baseUrl === ENTERPRISE_BASE_URL) return 'Enterprise';
+    return baseUrl;
+  }
+
+  /** Dashboard origin that pairs with an ingest endpoint. */
+  protected dashboardUrl(baseUrl: string): string {
+    return baseUrl === ENTERPRISE_BASE_URL
+      ? 'https://enterprise.respan.ai'
+      : 'https://platform.respan.ai';
+  }
+
+  /**
+   * Pin the SDK's RESPAN_BASE_URL in `.env` when the endpoint isn't the
+   * default. The SDK already targets the Respan Platform out of the box, so we
+   * leave `.env` untouched for that choice and only write the override that a
+   * non-default endpoint actually needs (with the `/api` suffix the SDK wants).
+   */
+  protected persistBaseUrlToEnv(projectRoot: string, baseUrl: string): void {
+    if (baseUrl === DEFAULT_BASE_URL) return;
+    const normalized = baseUrl.replace(/\/+$/, '');
+    const sdkBaseUrl = normalized.endsWith('/api') ? normalized : `${normalized}/api`;
+    const envPath = path.join(projectRoot, '.env');
+    const existingEnv = readTextFile(envPath);
+    this.saveToEnv(envPath, existingEnv, 'RESPAN_BASE_URL', sdkBaseUrl);
+    this.log(`  ${GREEN}✓${RESET} Saved endpoint to ${DIM}.env (RESPAN_BASE_URL)${RESET}`);
+  }
+
+  /** Resolve the OTLP traces ingest URL for a base URL (with/without /api). */
+  protected resolveTracesEndpoint(baseUrl: string): string {
+    const normalized = baseUrl.replace(/\/+$/, '');
+    return normalized.endsWith('/api') ? `${normalized}/v2/traces` : `${normalized}/api/v2/traces`;
+  }
+
+  /** Resolve the gateway chat-completions URL for a base URL (with/without /api). */
+  protected resolveCompletionsEndpoint(baseUrl: string): string {
+    const normalized = baseUrl.replace(/\/+$/, '');
+    return normalized.endsWith('/api') ? `${normalized}/chat/completions` : `${normalized}/api/chat/completions`;
   }
 
   protected async askMode(step: number): Promise<SetupMode> {
@@ -144,9 +257,9 @@ export abstract class SetupBaseCommand extends BaseCommand {
     });
   }
 
-  // ── Step 1: API Key ──────────────────────────────────────────────────
+  // ── Step 2: API Key ──────────────────────────────────────────────────
 
-  protected async askApiKey(projectRoot: string): Promise<string> {
+  protected async askApiKey(projectRoot: string, baseUrl: string = DEFAULT_BASE_URL): Promise<string> {
     const envPath = path.join(projectRoot, '.env');
     const existingEnv = readTextFile(envPath);
     const existingKey = extractEnvVar(existingEnv, 'RESPAN_API_KEY');
@@ -173,9 +286,9 @@ export abstract class SetupBaseCommand extends BaseCommand {
       }
     }
 
-    // 3. No usable key — collect one from the platform.
+    // 3. No usable key — collect one from the chosen endpoint's dashboard.
     this.log('');
-    this.log(`  ${DIM}Get your API key at ${RESET}https://platform.respan.ai/settings/api-keys`);
+    this.log(`  ${DIM}Get your API key at ${RESET}${this.dashboardUrl(baseUrl)}/settings/api-keys`);
     this.log('');
 
     const entered = await input({
@@ -193,7 +306,7 @@ export abstract class SetupBaseCommand extends BaseCommand {
       default: true,
     });
     if (saveGlobal) {
-      setCredential('default', { type: 'api_key', apiKey, baseUrl: DEFAULT_BASE_URL });
+      setCredential('default', { type: 'api_key', apiKey, baseUrl });
       this.log(`  ${GREEN}✓${RESET} Saved globally ${DIM}(~/.respan/credentials.json)${RESET}`);
     }
 
@@ -205,10 +318,10 @@ export abstract class SetupBaseCommand extends BaseCommand {
    * and return false if the user abandons the check, so the caller can pause
    * setup instead of reporting success with a key that doesn't work.
    */
-  protected async verifyApiKey(apiKey: string, mode: SetupMode, projectRoot: string): Promise<boolean> {
+  protected async verifyApiKey(apiKey: string, mode: SetupMode, projectRoot: string, baseUrl: string): Promise<boolean> {
     return mode === 'gateway'
-      ? this.verifyGatewayKey(apiKey, projectRoot)
-      : this.verifyTracingKey(apiKey, projectRoot);
+      ? this.verifyGatewayKey(apiKey, projectRoot, baseUrl)
+      : this.verifyTracingKey(apiKey, projectRoot, baseUrl);
   }
 
   /** Prompt for a replacement key and persist it to the project .env. */
@@ -223,8 +336,10 @@ export abstract class SetupBaseCommand extends BaseCommand {
     return key;
   }
 
-  private async verifyTracingKey(apiKey: string, projectRoot: string): Promise<boolean> {
+  private async verifyTracingKey(apiKey: string, projectRoot: string, baseUrl: string): Promise<boolean> {
     const envPath = path.join(projectRoot, '.env');
+    const tracesUrl = this.resolveTracesEndpoint(baseUrl);
+    const dashboard = this.dashboardUrl(baseUrl);
     let key = apiKey;
 
     // eslint-disable-next-line no-constant-condition
@@ -234,7 +349,7 @@ export abstract class SetupBaseCommand extends BaseCommand {
 
       let status = 0;
       try {
-        const response = await fetch('https://api.respan.ai/api/v2/traces', {
+        const response = await fetch(tracesUrl, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${key}`,
@@ -246,7 +361,7 @@ export abstract class SetupBaseCommand extends BaseCommand {
       } catch {
         // Network/transient failure — tracing is lenient, so warn and continue.
         spinner.fail('Could not verify API key (network error)');
-        this.warn('  Setup will continue, please verify manually at https://platform.respan.ai');
+        this.warn(`  Setup will continue, please verify manually at ${dashboard}`);
         return true;
       }
 
@@ -254,7 +369,7 @@ export abstract class SetupBaseCommand extends BaseCommand {
         spinner.succeed('API key verified');
         this.log('');
         this.log(`  ${PC}A demo trace has been sent to your account.${RESET}`);
-        this.log(`  ${DIM}View it at ${RESET}https://platform.respan.ai${DIM} to see what Respan traces look like.${RESET}`);
+        this.log(`  ${DIM}View it at ${RESET}${dashboard}${DIM} to see what Respan traces look like.${RESET}`);
         this.log('');
         await confirm({ message: 'Ready to continue?', default: true });
         return true;
@@ -275,7 +390,7 @@ export abstract class SetupBaseCommand extends BaseCommand {
 
       // Any other status — don't block setup on an unknown server state.
       spinner.fail(`Verification failed (status: ${status})`);
-      this.warn('  Setup will continue, please verify manually at https://platform.respan.ai');
+      this.warn(`  Setup will continue, please verify manually at ${dashboard}`);
       return true;
     }
   }
@@ -286,8 +401,10 @@ export abstract class SetupBaseCommand extends BaseCommand {
    * positive balance. A rejected key (401/403) re-prompts; any other failure
    * loops on the user's say-so. Returns true on success, false if abandoned.
    */
-  private async verifyGatewayKey(apiKey: string, projectRoot: string): Promise<boolean> {
+  private async verifyGatewayKey(apiKey: string, projectRoot: string, baseUrl: string): Promise<boolean> {
     const envPath = path.join(projectRoot, '.env');
+    const completionsUrl = this.resolveCompletionsEndpoint(baseUrl);
+    const dashboard = this.dashboardUrl(baseUrl);
     let key = apiKey;
 
     // eslint-disable-next-line no-constant-condition
@@ -298,7 +415,7 @@ export abstract class SetupBaseCommand extends BaseCommand {
       let status = 0;
       let networkError = false;
       try {
-        const response = await fetch('https://api.respan.ai/api/chat/completions', {
+        const response = await fetch(completionsUrl, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${key}`,
@@ -312,7 +429,7 @@ export abstract class SetupBaseCommand extends BaseCommand {
           spinner.succeed('Gateway access verified');
           this.log('');
           this.log(`  ${PC}A demo request was routed through the gateway.${RESET}`);
-          this.log(`  ${DIM}View it at ${RESET}https://platform.respan.ai${DIM} or run ${RESET}respan logs list --limit 5`);
+          this.log(`  ${DIM}View it at ${RESET}${dashboard}${DIM} or run ${RESET}respan logs list --limit 5`);
           this.log('');
           await confirm({ message: 'Ready to continue?', default: true });
           return true;
