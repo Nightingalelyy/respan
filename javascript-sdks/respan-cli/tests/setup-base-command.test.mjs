@@ -8,6 +8,10 @@ class SetupHarness extends SetupBaseCommand {
     await this.runSetup('tracing', opts);
   }
 
+  async askEndpoint() {
+    return 'https://api.respan.ai';
+  }
+
   async askApiKey() {
     return 'test-api-key';
   }
@@ -61,8 +65,9 @@ test('--no-instrument skips the agent picker and launch', async () => {
     assert.deepEqual(
       command.events.filter(({ kind }) => kind === 'step'),
       [
-        { kind: 'step', step: 1, label: 'API Key' },
-        { kind: 'step', step: 2, label: 'Install skill' },
+        { kind: 'step', step: 1, label: 'Endpoint' },
+        { kind: 'step', step: 2, label: 'API Key' },
+        { kind: 'step', step: 3, label: 'Install skill' },
       ],
     );
     assert.equal(command.events.some(({ kind }) => kind === 'selectAgent'), false);
