@@ -575,6 +575,12 @@
       "name": "respan-instrumentation-ragas",
       "path": "python-sdks/instrumentations/respan-instrumentation-ragas",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-pytest",
+      "path": "python-sdks/instrumentations/respan-instrumentation-pytest",
+      "registry": "pypi"
     }
   ]
 }
