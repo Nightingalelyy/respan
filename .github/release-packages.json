@@ -557,6 +557,12 @@
       "name": "respan-instrumentation-temporal",
       "path": "python-sdks/instrumentations/respan-instrumentation-temporal",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "javascript",
+      "name": "@respan/instrumentation-eve",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-eve",
+      "registry": "npm"
     }
   ]
 }
