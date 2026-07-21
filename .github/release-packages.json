@@ -539,6 +539,12 @@
       "name": "respan-instrumentation-qdrant",
       "path": "python-sdks/instrumentations/respan-instrumentation-qdrant",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-weaviate",
+      "path": "python-sdks/instrumentations/respan-instrumentation-weaviate",
+      "registry": "pypi"
     }
   ]
 }
