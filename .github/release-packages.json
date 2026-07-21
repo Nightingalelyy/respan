@@ -581,6 +581,12 @@
       "name": "respan-instrumentation-pytest",
       "path": "python-sdks/instrumentations/respan-instrumentation-pytest",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-mirascope",
+      "path": "python-sdks/instrumentations/respan-instrumentation-mirascope",
+      "registry": "pypi"
     }
   ]
 }
