@@ -1,30 +1,27 @@
 [tool.poetry]
-name = "respan-instrumentation-llama-index"
+name = "respan-instrumentation-weaviate"
 version = "0.1.0"
-description = "Respan instrumentation plugin for LlamaIndex"
+description = "Respan instrumentation plugin for Weaviate"
 authors = ["Respan <team@respan.ai>"]
 license = "Apache 2.0"
 readme = "README.md"
 packages = [
-    { include = "respan_instrumentation_llama_index", from = "./src" },
+    { include = "respan_instrumentation_weaviate", from = "./src" },
 ]
 
 [tool.poetry.dependencies]
 python = ">=3.11,<3.14"
 respan-tracing = "^2.17.0"
 respan-sdk = ">=2.6.1"
-llama-index-core = ">=0.14.23,<1.0"
-llama-index-workflows = ">=2.14.0,<3"
-llama-index-instrumentation = ">=0.4.3"
+weaviate-client = ">=4.22.0,<5"
 opentelemetry-semantic-conventions-ai = ">=0.4.1"
+wrapt = ">=1.16.0"
 
 [tool.poetry.plugins."respan.instrumentations"]
-llama-index = "respan_instrumentation_llama_index:LlamaIndexInstrumentor"
+weaviate = "respan_instrumentation_weaviate:WeaviateInstrumentor"
 
 [tool.pytest.ini_options]
-markers = [
-    "integration: live network tests (requires API keys)",
-]
+asyncio_mode = "auto"
 
 [build-system]
 requires = ["poetry-core"]
