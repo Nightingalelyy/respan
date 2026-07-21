@@ -551,6 +551,12 @@
       "name": "respan-instrumentation-openlit",
       "path": "python-sdks/instrumentations/respan-instrumentation-openlit",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-temporal",
+      "path": "python-sdks/instrumentations/respan-instrumentation-temporal",
+      "registry": "pypi"
     }
   ]
 }
