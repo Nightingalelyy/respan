@@ -545,6 +545,12 @@
       "name": "respan-instrumentation-weaviate",
       "path": "python-sdks/instrumentations/respan-instrumentation-weaviate",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-openlit",
+      "path": "python-sdks/instrumentations/respan-instrumentation-openlit",
+      "registry": "pypi"
     }
   ]
 }
