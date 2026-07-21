@@ -569,6 +569,12 @@
       "name": "respan-instrumentation-elasticsearch",
       "path": "python-sdks/instrumentations/respan-instrumentation-elasticsearch",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-ragas",
+      "path": "python-sdks/instrumentations/respan-instrumentation-ragas",
+      "registry": "pypi"
     }
   ]
 }
