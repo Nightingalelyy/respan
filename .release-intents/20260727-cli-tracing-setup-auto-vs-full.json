@@ -1,0 +1,6 @@
+{
+  "summary": "CLI: tracing setup skill now asks Auto vs Full first. Auto is flat/direct-SDK only (no framework instrumentor or decorators, even when a framework is detected); Full adds an explicit instrumentor and/or @workflow/@task decorators. Regenerated bundled skill-refs.",
+  "packages": {
+    "@respan/cli": "patch"
+  }
+}

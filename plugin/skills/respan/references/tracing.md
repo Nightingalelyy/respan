@@ -26,7 +26,56 @@ Use this section when the user asks to set up Respan tracing in their project.
 
 The API key is stored in `.env` as `RESPAN_API_KEY`.
 
-### 1. Analyze the Project
+### 1. Ask first: Auto or Full?
+
+**Before analyzing anything, ask the user which setup they want.** This is the first question — the two branches diverge immediately.
+
+1. **Auto** — the fastest path. Install the core SDK and add `Respan()` (one line). Every LLM call from a supported direct SDK — OpenAI, Anthropic, Azure OpenAI, Bedrock, Vertex, Cohere, Together, Gemini, LiteLLM — is automatically captured as a flat span. **No decorators and no framework instrumentor, even if a framework is detected.** Best for a quick start or a live demo: traces flowing in under two minutes.
+2. **Full** — structured setup. Adds framework-specific instrumentation and/or workflow structure on top:
+   - **Explicit instrumentor** — for agent frameworks (LangChain, CrewAI, OpenAI Agents, Claude Agent SDK, LlamaIndex, Haystack, …) so the framework's agent / tool / chain structure is captured.
+   - **Decorators** — wrap the user's own functions with `@workflow` / `@task` for nested spans.
+
+Follow only the branch the user picks; skip the other one.
+
+> **Frameworks under Auto:** Auto never installs a framework instrumentor. If the app uses a framework (LangChain, CrewAI, an agents SDK) and the user picks Auto, they get only the flat LLM spans the underlying direct SDK emits — no agent / tool / chain structure. Capturing framework structure requires Full.
+
+---
+
+### Auto path
+
+**A1. Detect language and package manager** — `package.json` (JS/TS) or `pyproject.toml` / `requirements.txt` (Python).
+
+**A2. Install the core SDK** (pin the exact current version):
+```bash
+# Python
+pip install respan-ai
+
+# TypeScript
+npm install @respan/respan
+```
+
+**A3. Add initialization code** at the top of the entrypoint, before any LLM client is created:
+```python
+# Python
+from respan import Respan
+Respan()
+```
+```typescript
+// TypeScript
+import { Respan } from "@respan/respan";
+const respan = new Respan();
+await respan.initialize();
+```
+
+Do **not** add decorators or a framework instrumentor. Go straight to **Verify**.
+
+---
+
+### Full path
+
+The rest of this section is the **Full** path — follow it only if the user chose Full. It adds an explicit framework instrumentor and/or decorators on top of the core SDK.
+
+#### 1. Analyze the Project
 
 **1a. Detect language and package manager:**
 - Check `package.json` (JS/TS) or `pyproject.toml` / `requirements.txt` (Python)
@@ -81,7 +130,7 @@ This is the most important step. Read the entrypoint and all files that make LLM
 - Are there **agent loops**? (e.g. a loop that calls tools until done)
 - Are there **tool calls**? (e.g. functions the LLM invokes)
 
-### 2. Propose an Implementation Plan
+#### 2. Propose an Implementation Plan
 
 Present the user with a concrete plan before making any changes. The plan should include:
 
@@ -134,13 +183,13 @@ def write_draft(outline):
     return client.chat.completions.create(...)
 ```
 
-**Ask the user which approach they prefer:**
-1. **Auto-trace only** — just add init code, every LLM call is automatically captured as a flat span. Zero code changes beyond initialization. Good for quick setup or simple projects.
-2. **Structured traces** — wrap existing code with workflow/task decorators for nested spans showing how the app flows. Better for complex projects with multiple LLM calls.
+Within Full, pick what the app needs (they can combine):
+- **Framework detected** → add its **explicit instrumentor** (or the LangChain callback). The framework auto-captures its agent / tool / chain structure — usually no manual wrapping needed.
+- **Direct LLM SDK, or you want structure over your own orchestration code** → add **decorators** (`@workflow` / `@task`) to wrap the logical workflow into nested spans.
 
-If the user picks option 1, skip the wrappers entirely — just install + init code.
+(If the user only wanted flat spans with zero code changes, that's the **Auto** path — go back to it.)
 
-If the user picks option 2:
+When adding decorators:
 - **If multiple independent workflows are detected** (e.g. `writeArticle()`, `summarizeDoc()`, `classifyEmail()`), list them and ask which ones to instrument. Don't assume all of them.
 - **Show the user what the trace will look like** — describe the span hierarchy:
 ```
@@ -153,7 +202,7 @@ workflow: write_article
 
 Wait for user confirmation before proceeding.
 
-### 3. Implement
+#### 3. Implement
 
 **a) Install packages:**
 
@@ -200,9 +249,9 @@ await respan.initialize();
 
 **c) Add workflow wrappers** — if the user chose structured traces in the plan.
 
-### 4. Verify (final test — always run this)
+### Verify (final test — always run this, both paths)
 
-As the final step, **run the user's program once with a small request** and confirm tracing works end to end:
+As the final step — for **both** Auto and Full — **run the user's program once with a small request** and confirm tracing works end to end:
 
 - The app runs without errors
 - A trace appears at https://platform.respan.ai or via `respan traces list --limit 5`
