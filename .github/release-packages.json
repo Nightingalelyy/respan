@@ -587,6 +587,12 @@
       "name": "respan-instrumentation-mirascope",
       "path": "python-sdks/instrumentations/respan-instrumentation-mirascope",
       "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-agentops",
+      "path": "python-sdks/instrumentations/respan-instrumentation-agentops",
+      "registry": "pypi"
     }
   ]
 }
