@@ -249,6 +249,7 @@ class BasicLLMParams(RespanBaseModel):
     tools: Optional[List[dict]] = None
     response_format: Optional[Dict] = None
     reasoning_effort: Optional[Union[str, None]] = None
+    service_tier: Optional[str] = None
     tool_choice: Optional[Union[Literal["auto", "none", "required"], ToolChoice]] = None
     top_logprobs: Optional[int] = None
     top_p: Optional[float] = None
