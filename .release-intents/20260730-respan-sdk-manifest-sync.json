@@ -1,0 +1,6 @@
+{
+  "summary": "Sync respan-sdk to the already published 2.7.1 release",
+  "packages": {
+    "respan-sdk": "none"
+  }
+}
