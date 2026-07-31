@@ -381,6 +381,7 @@ class RespanParams(RespanBaseModel, PreprocessLogDataMixin):
     fallback_models: Optional[List[str]] = None
     load_balance_group: Optional[LoadBalanceGroup] = None
     load_balance_models: Optional[List[LoadBalanceModel]] = None
+    first_token_timeout: Optional[float] = None
     retry_params: Optional[RetryParams] = None
     respan_params: Optional[dict] = (
         None  # Nested respan params for special cases
