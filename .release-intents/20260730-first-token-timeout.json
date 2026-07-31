@@ -1,0 +1,6 @@
+{
+  "summary": "Expose a per-request first-token timeout for streaming gateway requests",
+  "packages": {
+    "respan-sdk": "patch"
+  }
+}
