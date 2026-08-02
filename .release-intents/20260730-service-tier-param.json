@@ -1,0 +1,6 @@
+{
+  "summary": "Preserve service_tier in provider-bound LLM completion parameters",
+  "packages": {
+    "respan-sdk": "patch"
+  }
+}

@@ -392,12 +392,6 @@
     },
     {
       "ecosystem": "python",
-      "name": "respan-instrumentation-llama-index",
-      "path": "python-sdks/instrumentations/respan-instrumentation-llama-index",
-      "registry": "pypi"
-    },
-    {
-      "ecosystem": "python",
       "name": "respan-instrumentation-instructor",
       "path": "python-sdks/instrumentations/respan-instrumentation-instructor",
       "registry": "pypi"
@@ -538,6 +532,66 @@
       "ecosystem": "python",
       "name": "respan-instrumentation-pgvector",
       "path": "python-sdks/instrumentations/respan-instrumentation-pgvector",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-llama-index",
+      "path": "python-sdks/instrumentations/respan-instrumentation-llama-index",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-qdrant",
+      "path": "python-sdks/instrumentations/respan-instrumentation-qdrant",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-weaviate",
+      "path": "python-sdks/instrumentations/respan-instrumentation-weaviate",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-openlit",
+      "path": "python-sdks/instrumentations/respan-instrumentation-openlit",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-temporal",
+      "path": "python-sdks/instrumentations/respan-instrumentation-temporal",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "javascript",
+      "name": "@respan/instrumentation-eve",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-eve",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-elasticsearch",
+      "path": "python-sdks/instrumentations/respan-instrumentation-elasticsearch",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-ragas",
+      "path": "python-sdks/instrumentations/respan-instrumentation-ragas",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-pytest",
+      "path": "python-sdks/instrumentations/respan-instrumentation-pytest",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-mirascope",
+      "path": "python-sdks/instrumentations/respan-instrumentation-mirascope",
       "registry": "pypi"
     }
   ]

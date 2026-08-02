@@ -329,11 +329,11 @@ jobs:
           . .smoke-venv/bin/activate
           python -m pip install --upgrade pip
 
-          for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            if python -m pip install "${PACKAGE_NAME}==${PACKAGE_VERSION}" >/tmp/pip-install.log 2>&1; then
+          for attempt in {1..40}; do
+            if python -m pip install --no-cache-dir "${PACKAGE_NAME}==${PACKAGE_VERSION}" >/tmp/pip-install.log 2>&1; then
               break
             fi
-            if [ "${attempt}" -eq 10 ]; then
+            if [ "${attempt}" -eq 40 ]; then
               cat /tmp/pip-install.log
               exit 1
             fi
