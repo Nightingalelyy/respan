@@ -168,6 +168,18 @@ test.beforeEach(() => {
   captureState.spans = [];
 });
 
+test("does not activate when the installed SDK has no supported methods", async () => {
+  class UnsupportedCohereClient {}
+
+  const instrumentor = new CohereInstrumentor({
+    sdkModule: { CohereClient: UnsupportedCohereClient },
+  });
+  await instrumentor.activate();
+
+  assert.equal(instrumentor.isActive(), false);
+  instrumentor.deactivate();
+});
+
 test("captures v2 chat tools with canonical Cohere LLM attributes", async () => {
   const module = fakeModule();
   const instrumentor = new CohereInstrumentor({ sdkModule: module });

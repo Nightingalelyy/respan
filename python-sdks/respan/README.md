@@ -2,329 +2,163 @@
 
 **[respan.ai](https://respan.ai)** | **[Documentation](https://docs.respan.ai)** | **[PyPI](https://pypi.org/project/respan-ai/)**
 
-A comprehensive Python SDK for Respan monitoring, evaluation, and analytics APIs. Build, test, and evaluate your AI applications with ease.
+`respan-ai` is the unified Python entry point for Respan tracing, decorators, context propagation, and first-party instrumentation plugins. It automatically discovers eligible direct LLM SDK adapters while keeping frameworks, agents, wrappers, and observability bridges explicit to avoid duplicate spans.
 
-## 🚀 Features
+## Requirements
 
-- **📊 Dataset Management** - Create, manage, and analyze datasets from your AI logs
-- **🔬 Experiment Framework** - Run A/B tests with different prompts and model configurations
-- **📈 AI Evaluation** - Evaluate model outputs with built-in and custom evaluators
-- **📝 Log Management** - Comprehensive logging and monitoring for AI applications
+- Python 3.11, 3.12, or 3.13
+- A Respan API key for telemetry export
+- The provider SDK used by your application
 
-## 📦 Installation
+## Installation
 
-```bash
-pip install respan
-```
-
-Or with Poetry:
+Install the facade and your provider SDK. For OpenAI:
 
 ```bash
-poetry add respan
+pip install respan-ai openai
 ```
 
-## 🔑 Quick Start
+With Poetry:
 
-### 1. Set up your API key
+```bash
+poetry add respan-ai openai
+```
+
+Replace `openai` with the provider SDK your application uses. `respan-ai` already bundles the supported first-party instrumentation adapters and `respan-tracing`; provider SDKs remain application-owned dependencies.
+
+## Automatic Onboarding
+
+Set your Respan credentials:
 
 ```bash
 export RESPAN_API_KEY="your-api-key-here"
+# Optional; this is also the Respan gateway base URL used below.
+export RESPAN_BASE_URL="https://api.respan.ai/api"
 ```
 
-Or create a `.env` file:
-
-```env
-RESPAN_API_KEY=your-api-key-here
-RESPAN_BASE_URL=https://api.respan.ai  # optional
-```
-
-### 2. Basic Usage
+Construct `Respan` before the first provider call. Python discovery and activation happen synchronously in the constructor, so there is no separate `initialize()` call:
 
 ```python
-from respan import DatasetAPI, ExperimentAPI, EvaluatorAPI
+import os
 
-# Initialize clients
-dataset_client = DatasetAPI(api_key="your-api-key")
-experiment_client = ExperimentAPI(api_key="your-api-key")
-evaluator_client = EvaluatorAPI(api_key="your-api-key")
+from openai import OpenAI
+from respan import Respan
 
-# Create a dataset from logs
-dataset = dataset_client.create({
-    "name": "My Dataset",
-    "description": "Dataset for evaluation",
-    "type": "sampling",
-    "sampling": 100
-})
+# Omit `instrumentations` to use curated direct-LLM automatic discovery.
+respan = Respan()
 
-# List available evaluators
-evaluators = evaluator_client.list()
-print(f"Available evaluators: {len(evaluators.results)}")
-
-# Run evaluation
-evaluation = dataset_client.run_dataset_evaluation(
-    dataset_id=dataset.id,
-    evaluator_slugs=["accuracy-evaluator", "relevance-evaluator"]
-)
-```
-
-## 🏗️ Core APIs
-
-### Dataset API
-Manage datasets and run evaluations on your AI model outputs:
-
-```python
-from respan import DatasetAPI, DatasetCreate
-
-client = DatasetAPI(api_key="your-api-key")
-
-# Create dataset
-dataset = client.create(DatasetCreate(
-    name="Production Logs",
-    type="sampling",
-    sampling=1000
-))
-
-# Add logs to dataset
-client.add_logs_to_dataset(
-    dataset_id=dataset.id,
-    start_time="2024-01-01T00:00:00Z",
-    end_time="2024-01-02T00:00:00Z"
+client = OpenAI(
+    api_key=os.environ["RESPAN_API_KEY"],
+    base_url=os.getenv("RESPAN_BASE_URL", "https://api.respan.ai/api"),
 )
 
-# Run evaluations
-evaluation = client.run_dataset_evaluation(
-    dataset_id=dataset.id,
-    evaluator_slugs=["accuracy-evaluator"]
+response = client.chat.completions.create(
+    model="gpt-4.1-nano",
+    messages=[{"role": "user", "content": "Say hello in three languages."}],
 )
+print(response.choices[0].message.content)
+
+print(respan.get_auto_instrumentation_status())
+respan.shutdown()
 ```
 
-### Experiment API
-Run A/B tests with different model configurations:
+This example routes inference through the Respan gateway. When calling a provider directly, configure that provider's credentials and endpoint normally; Respan still reads `RESPAN_API_KEY` for telemetry export.
+
+## Automatically Supported Providers
+
+The facade bundles these adapters. Install only the provider SDKs your application actually imports.
+
+| Provider | Application SDK |
+|----------|-----------------|
+| OpenAI and Azure OpenAI | `openai` |
+| Anthropic | `anthropic` |
+| Vertex AI | `google-cloud-aiplatform` |
+| Google GenAI | `google-genai` |
+| AWS Bedrock | `boto3` |
+| Together AI | `together` |
+| Ollama | `ollama` |
+
+Only registry entries classified as direct LLM integrations and enabled by default are activated. A missing provider SDK is reported as `missing` and does not stop application startup. Broad OpenTelemetry entry-point discovery remains disabled.
+
+## Inspect Instrumentation Status
 
 ```python
-from respan import ExperimentAPI, ExperimentCreate, ExperimentColumnType
-
-client = ExperimentAPI(api_key="your-api-key")
-
-# Create experiment
-experiment = client.create(ExperimentCreate(
-    name="Prompt A/B Test",
-    description="Testing different system prompts",
-    columns=[
-        ExperimentColumnType(
-            name="Version A",
-            model="gpt-4",
-            temperature=0.7,
-            prompt_messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": "{{user_input}}"}
-            ]
-        ),
-        ExperimentColumnType(
-            name="Version B", 
-            model="gpt-4",
-            temperature=0.3,
-            prompt_messages=[
-                {"role": "system", "content": "You are a concise assistant."},
-                {"role": "user", "content": "{{user_input}}"}
-            ]
-        )
-    ]
-))
-
-# Run experiment
-results = client.run_experiment(experiment_id=experiment.id)
+for entry in respan.get_auto_instrumentation_status():
+    print(entry["id"], entry["status"], entry.get("reason"))
 ```
 
-### Evaluator API
-Discover and use AI evaluators:
+Each entry includes the registry ID, runtime name, provider, provider SDK, instrumentation package, status, and optional reason. Status is one of `enabled`, `disabled`, `missing`, or `failed`.
+
+The dataclass form is also available as `respan.auto_instrumentation_status`.
+
+## Control Automatic Discovery
+
+Disable automatic discovery completely:
 
 ```python
-from respan import EvaluatorAPI
+from respan import Respan
 
-client = EvaluatorAPI(api_key="your-api-key")
-
-# List all evaluators
-evaluators = client.list()
-
-# Get specific evaluator details
-evaluator = client.get("accuracy-evaluator")
-print(f"Evaluator: {evaluator.name}")
-print(f"Description: {evaluator.description}")
+respan = Respan(is_auto_instrument=False)
 ```
 
-### Prompt API
-Manage prompts and their versions:
-
-```python
-from respan import PromptAPI
-from respan_sdk.respan_types.prompt_types import Prompt, PromptVersion
-
-client = PromptAPI(api_key="your-api-key")
-
-# Create a prompt
-prompt = client.create()
-
-# Create a version for the prompt
-version = client.create_version(prompt.id, PromptVersion(
-    prompt_version_id="v1",
-    messages=[
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "Hello!"}
-    ],
-    model="gpt-4o-mini",
-    temperature=0.7
-))
-
-# List all prompts
-prompts = client.list()
-
-# Get specific prompt with versions
-prompt_details = client.get(prompt.id)
-```
-
-### Log API
-Create and manage AI application logs:
-
-```python
-from respan import LogAPI, RespanLogParams
-
-client = LogAPI(api_key="your-api-key")
-
-# Create log entry
-log = client.create(RespanLogParams(
-    model="gpt-4",
-    input="What is machine learning?",
-    output="Machine learning is a subset of AI...",
-    status_code=200,
-    prompt_tokens=10,
-    completion_tokens=50
-))
-```
-
-## 🔄 Async Support
-
-All APIs support both synchronous and asynchronous operations:
-
-```python
-import asyncio
-from respan import DatasetAPI
-
-async def main():
-    client = DatasetAPI(api_key="your-api-key")
-    
-    # Use 'await' with 'a' prefixed methods for async
-    datasets = await client.alist()
-    dataset = await client.aget(dataset_id="123")
-    
-    print(f"Found {datasets.count} datasets")
-
-asyncio.run(main())
-```
-
-## 📚 Examples
-
-Check out the [`examples/`](https://github.com/Repsan/respan/tree/main/python-sdks/respan/examples) directory for complete workflows:
-
-- **[Simple Evaluator Example](https://github.com/Repsan/respan/blob/main/python-sdks/respan/examples/simple_evaluator_example.py)** - Basic evaluator operations
-- **[Dataset Workflow](https://github.com/Repsan/respan/blob/main/python-sdks/respan/examples/dataset_workflow_example.py)** - Complete dataset management
-- **[Experiment Workflow](https://github.com/Repsan/respan/blob/main/python-sdks/respan/examples/experiment_workflow_example.py)** - A/B testing with experiments
-- **[Prompt Workflow](https://github.com/Repsan/respan/blob/main/python-sdks/respan/examples/prompt_workflow_example.py)** - Prompt and version management
+Supplying an explicit instrumentation list selects explicit mode and disables automatic discovery by default:
 
 ```bash
-# Run examples
-python examples/simple_evaluator_example.py
-python examples/dataset_workflow_example.py
-python examples/experiment_workflow_example.py
-python examples/prompt_workflow_example.py
+pip install respan-ai respan-instrumentation-openai-agents openai-agents
 ```
-
-## 🧪 Testing
-
-The SDK includes comprehensive tests for both unit testing and real API integration:
-
-```bash
-# Install development dependencies
-poetry install
-
-# Run all tests
-python -m pytest tests/ -v
-
-# Run specific test suites
-python -m pytest tests/test_dataset_api_real.py -v
-python -m pytest tests/test_experiment_api_real.py -v
-```
-
-## 📖 API Reference
-
-### Core Classes
-
-- **`DatasetAPI`** - Dataset management and evaluation
-- **`ExperimentAPI`** - A/B testing and experimentation  
-- **`EvaluatorAPI`** - AI model evaluation tools
-- **`LogAPI`** - Application logging and monitoring
-- **`PromptAPI`** - Prompt and version management
-
-### Type Safety
-
-All APIs include comprehensive type definitions:
 
 ```python
-from respan import (
-    Dataset, DatasetCreate, DatasetUpdate,
-    Experiment, ExperimentCreate, ExperimentUpdate,
-    Evaluator, EvaluatorList,
-    RespanLogParams, LogList,
-    PromptAPI
-)
-from respan_sdk.respan_types.prompt_types import (
-    Prompt, PromptVersion
+from respan import Respan
+from respan_instrumentation_openai_agents import OpenAIAgentsInstrumentor
+
+respan = Respan(
+    instrumentations=[OpenAIAgentsInstrumentor()],
 )
 ```
 
-## 🔧 Configuration
-
-### Environment Variables
-
-```bash
-RESPAN_API_KEY=your-api-key-here          # Required
-RESPAN_BASE_URL=https://api.respan.ai # Optional
-```
-
-### Client Initialization
+To deliberately combine an explicit plugin with direct-SDK automatic discovery:
 
 ```python
-# Using environment variables
-dataset_client = DatasetAPI()  # Reads from RESPAN_API_KEY
-prompt_client = PromptAPI()    # Reads from RESPAN_API_KEY
-
-# Explicit configuration
-client = DatasetAPI(
-    api_key="your-api-key",
-    base_url="https://api.respan.ai"
+respan = Respan(
+    instrumentations=[OpenAIAgentsInstrumentor()],
+    is_auto_instrument=True,
 )
 ```
 
-## 📋 Requirements
+Explicit plugins activate first, so a matching automatic adapter is skipped rather than activated twice. Python currently provides a global automatic-discovery switch, but not a per-provider disable option.
 
-- Python 3.9+
-- httpx >= 0.25.0
-- respan-sdk >= 0.4.63
+## Tracing Helpers
 
-## 📄 License
+The facade re-exports Respan's tracing helpers:
 
-Apache 2.0 - see [LICENSE](https://github.com/Repsan/respan/blob/main/LICENSE) for details.
+```python
+from respan import agent, respan_span_attributes, task, tool, workflow
+```
 
-## 🤝 Contributing
+Use `@workflow`, `@task`, `@agent`, and `@tool` to structure traces, and use `respan_span_attributes` or `propagate_attributes` to attach customer, session, thread, environment, and metadata values.
 
-We welcome contributions! Please see our [Contributing Guide](https://github.com/Repsan/respan/blob/main/CONTRIBUTING.md) for details.
+## Lifecycle
 
-## 📞 Support
+- `Respan()` initializes telemetry and activates eligible adapters.
+- `respan.flush()` exports buffered spans without deactivating adapters.
+- `respan.shutdown()` deactivates adapters and flushes telemetry.
 
-- 📧 Email: [team@respan.ai](mailto:team@respan.ai)
-- 📖 Documentation: [https://docs.respan.ai](https://docs.respan.ai)
-- 🐛 Issues: [GitHub Issues](https://github.com/Repsan/respan/issues)
+## Examples
 
----
+- [OpenAI SDK examples](../examples/openai-sdk/)
+- [OpenAI Agents SDK examples](../examples/openai-agents-sdk/)
+- [CrewAI example](../examples/crewai/)
 
-Built with ❤️ by the Respan team
+## Public API
+
+The package exports `Respan`, the automatic instrumentation registry and status types, `OTELInstrumentor`, the instrumentation protocol, tracing decorators, `RespanClient`, `get_client`, `respan_span_attributes`, and `propagate_attributes`.
+
+## License
+
+Apache 2.0 — see the repository [LICENSE](../../LICENSE).
+
+## Support
+
+- Email: [team@respan.ai](mailto:team@respan.ai)
+- Documentation: [https://docs.respan.ai](https://docs.respan.ai)
+- Issues: [GitHub Issues](https://github.com/respanai/respan/issues)

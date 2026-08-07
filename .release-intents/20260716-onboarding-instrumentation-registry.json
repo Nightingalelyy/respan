@@ -1,0 +1,9 @@
+{
+  "summary": "Expand onboarding registries for committed instrumentation packages, align Python defaults with bundled native direct LLM adapters, harden TypeScript activation reporting including Cohere and OpenRouter no-op detection, and keep wrappers, frameworks, agents, and tooling explicit-only",
+  "packages": {
+    "@respan/instrumentation-cohere": "patch",
+    "@respan/instrumentation-openrouter": "patch",
+    "@respan/respan": "minor",
+    "respan-ai": "patch"
+  }
+}

@@ -277,6 +277,12 @@ export class CohereInstrumentor {
         this._restorePatchedMethods();
         return;
       }
+      if (shared.patchedMethods.length === 0) {
+        console.warn(
+          "[Respan] Failed to activate Cohere instrumentation - no supported SDK methods found",
+        );
+        return;
+      }
     }
 
     shared.activeInstances += 1;
@@ -293,6 +299,10 @@ export class CohereInstrumentor {
     if (shared.activeInstances === 0) {
       this._restorePatchedMethods();
     }
+  }
+
+  isActive(): boolean {
+    return this._isInstrumented;
   }
 
   private _patchSdkModule(sdkModule: any): void {
