@@ -1,0 +1,6 @@
+{
+  "summary": "Add thread-pool and asyncio executor context propagation helpers for reliable parallel tracing",
+  "packages": {
+    "respan-tracing": "minor"
+  }
+}
