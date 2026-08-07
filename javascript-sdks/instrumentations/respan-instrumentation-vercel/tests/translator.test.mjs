@@ -214,6 +214,21 @@ test("ai.generateText.doGenerate is classified as LLM text, not task", () => {
   assertNoOffContractAliases(attrs);
 });
 
+test("telemetry metadata prompt_id/version/name promote to top-level columns", () => {
+  const attrs = runTranslator("ai.generateText.doGenerate", {
+    ...baseLLMSpan,
+    "ai.telemetry.metadata.prompt_id": "prompt-abc-123",
+    "ai.telemetry.metadata.prompt_version_number": "3",
+    "ai.telemetry.metadata.prompt_name": "triage",
+  });
+
+  // Promoted to top-level so the trace-v2 ingest fills the native columns
+  // (prompt_id / prompt_version_number / prompt_name), not just metadata.
+  assert.equal(attrs["prompt_id"], "prompt-abc-123");
+  assert.equal(attrs["prompt_version_number"], 3);
+  assert.equal(attrs["prompt_name"], "triage");
+});
+
 test("ai.streamText.doStream is classified as LLM text, not task", () => {
   const attrs = runTranslator("ai.streamText.doStream", baseLLMSpan);
 

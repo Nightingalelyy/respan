@@ -1,0 +1,6 @@
+{
+  "summary": "Promote prompt_id/prompt_version_number/prompt_name from Vercel telemetry metadata to top-level span attributes so trace-v2 fills the native columns",
+  "packages": {
+    "@respan/instrumentation-vercel": "patch"
+  }
+}

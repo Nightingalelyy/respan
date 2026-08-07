@@ -67,6 +67,20 @@ export function enrichMetadata(attrs: SpanAttributes): void {
       case "trace_group_identifier":
         setDefault(attrs, RespanSpanAttributes.RESPAN_TRACE_GROUP_ID, String(value));
         break;
+      // Prompt linkage: promote to top-level attributes so the trace-v2 ingest
+      // fills the native prompt_id / prompt_version_number / prompt_name columns
+      // (otherwise they only live in passthrough metadata).
+      case "prompt_id":
+        setDefault(attrs, "prompt_id", String(value));
+        break;
+      case "prompt_version_number": {
+        const n = Number(value);
+        setDefault(attrs, "prompt_version_number", Number.isNaN(n) ? String(value) : n);
+        break;
+      }
+      case "prompt_name":
+        setDefault(attrs, "prompt_name", String(value));
+        break;
       case "customer_params": {
         // customer_params is a JSON-stringified object (Vercel telemetry
         // metadata values must be flat scalars, so users serialize the object).
