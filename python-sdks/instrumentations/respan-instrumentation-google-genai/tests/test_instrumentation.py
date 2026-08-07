@@ -14,12 +14,16 @@ from respan_instrumentation_google_genai import GoogleGenAIInstrumentor
 from respan_instrumentation_google_genai import _instrumentation
 from respan_instrumentation_google_genai._constants import (
     ASYNC_MODELS_CLASS_NAME,
+    CANDIDATES_TOKEN_COUNT_KEY,
     GENERATE_CONTENT_METHOD_NAME,
     GENERATE_CONTENT_STREAM_METHOD_NAME,
     GOOGLE_GENAI_MODELS_MODULE,
     MODELS_CLASS_NAME,
+    PROMPT_TOKEN_COUNT_KEY,
+    TOTAL_TOKEN_COUNT_KEY,
 )
 from respan_instrumentation_google_genai._otel_emitter import build_generate_content_attrs
+from respan_instrumentation_google_genai._translator import extract_usage
 from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT
 from respan_sdk.constants.span_attributes import (
     LLM_REQUEST_MODEL,
@@ -344,3 +348,53 @@ def test_deactivate_restores_original_methods(
     assert getattr(Models, GENERATE_CONTENT_STREAM_METHOD_NAME) is original_sync_stream
     assert getattr(AsyncModels, GENERATE_CONTENT_METHOD_NAME) is original_async
     assert getattr(AsyncModels, GENERATE_CONTENT_STREAM_METHOD_NAME) is original_async_stream
+
+
+def test_thinking_tokens_reconcile_against_the_reported_total() -> None:
+    """Prompt plus completion must equal the total the API returned.
+
+    The merged change pins the individual values. This pins the invariant they have
+    to satisfy, which is what anything costing off the span actually depends on.
+    """
+    usage = Obj(
+        prompt_token_count=100,
+        candidates_token_count=50,
+        thoughts_token_count=800,
+        total_token_count=950,
+    )
+
+    result = extract_usage(make_response(usage=usage))
+
+    assert result[PROMPT_TOKEN_COUNT_KEY] == 100
+    assert result[CANDIDATES_TOKEN_COUNT_KEY] == 850
+    assert (
+        result[PROMPT_TOKEN_COUNT_KEY] + result[CANDIDATES_TOKEN_COUNT_KEY]
+        == result[TOTAL_TOKEN_COUNT_KEY]
+    )
+
+
+def test_usage_is_unchanged_when_the_model_does_not_think() -> None:
+    """Control: no thoughts field at all, which is every non-thinking model.
+
+    This is the shape of every pre-existing fixture, which is why the defect went
+    unnoticed. It pins that the fold stays inert on the common path.
+    """
+    result = extract_usage(make_response(usage=make_usage(100, 50)))
+
+    assert result[CANDIDATES_TOKEN_COUNT_KEY] == 50
+    assert result[TOTAL_TOKEN_COUNT_KEY] == 150
+
+
+def test_zero_thinking_tokens_leave_the_output_count_alone() -> None:
+    """A thinking budget of zero still emits the field, and must be a no-op."""
+    usage = Obj(
+        prompt_token_count=100,
+        candidates_token_count=50,
+        thoughts_token_count=0,
+        total_token_count=150,
+    )
+
+    result = extract_usage(make_response(usage=usage))
+
+    assert result[CANDIDATES_TOKEN_COUNT_KEY] == 50
+    assert result[TOTAL_TOKEN_COUNT_KEY] == 150

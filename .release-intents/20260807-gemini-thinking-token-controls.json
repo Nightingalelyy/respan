@@ -1,0 +1,7 @@
+{
+  "summary": "Add control tests around the Gemini thinking-token fold; tests only, no shipped behaviour change",
+  "packages": {
+    "respan-instrumentation-vertexai": "none",
+    "respan-instrumentation-google-genai": "none"
+  }
+}

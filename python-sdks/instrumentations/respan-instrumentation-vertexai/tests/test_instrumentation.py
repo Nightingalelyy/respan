@@ -16,15 +16,19 @@ from opentelemetry.semconv_ai import SpanAttributes
 from respan_instrumentation_vertexai import VertexAIInstrumentor
 from respan_instrumentation_vertexai import _instrumentation
 from respan_instrumentation_vertexai._constants import (
+    CANDIDATES_TOKEN_COUNT_KEY,
     CHAT_SESSION_CLASS_NAME,
     GENERATE_CONTENT_ASYNC_METHOD_NAME,
     GENERATE_CONTENT_METHOD_NAME,
     GENERATIVE_MODEL_CLASS_NAME,
+    PROMPT_TOKEN_COUNT_KEY,
     SEND_MESSAGE_ASYNC_METHOD_NAME,
     SEND_MESSAGE_METHOD_NAME,
+    TOTAL_TOKEN_COUNT_KEY,
     VERTEXAI_GENERATIVE_MODELS_MODULE,
 )
 from respan_instrumentation_vertexai._otel_emitter import build_generate_content_attrs
+from respan_instrumentation_vertexai._translator import extract_usage
 from respan_instrumentation_vertexai._translator import request_payload_from_call
 from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT
 from respan_sdk.constants.span_attributes import (
@@ -427,3 +431,53 @@ def test_request_payload_reads_model_defaults(
     assert payload["contents"] == "Hello"
     assert payload["system_instruction"] == "Use short answers"
     assert payload["tools"] == [tool]
+
+
+def test_thinking_tokens_reconcile_against_the_reported_total() -> None:
+    """Prompt plus completion must equal the total the API returned.
+
+    The merged change pins the individual values. This pins the invariant they have
+    to satisfy, which is what anything costing off the span actually depends on.
+    """
+    usage = Obj(
+        prompt_token_count=100,
+        candidates_token_count=50,
+        thoughts_token_count=800,
+        total_token_count=950,
+    )
+
+    result = extract_usage(make_response(usage=usage))
+
+    assert result[PROMPT_TOKEN_COUNT_KEY] == 100
+    assert result[CANDIDATES_TOKEN_COUNT_KEY] == 850
+    assert (
+        result[PROMPT_TOKEN_COUNT_KEY] + result[CANDIDATES_TOKEN_COUNT_KEY]
+        == result[TOTAL_TOKEN_COUNT_KEY]
+    )
+
+
+def test_usage_is_unchanged_when_the_model_does_not_think() -> None:
+    """Control: no thoughts field at all, which is every non-thinking model.
+
+    This is the shape of every pre-existing fixture, which is why the defect went
+    unnoticed. It pins that the fold stays inert on the common path.
+    """
+    result = extract_usage(make_response(usage=make_usage(100, 50)))
+
+    assert result[CANDIDATES_TOKEN_COUNT_KEY] == 50
+    assert result[TOTAL_TOKEN_COUNT_KEY] == 150
+
+
+def test_zero_thinking_tokens_leave_the_output_count_alone() -> None:
+    """A thinking budget of zero still emits the field, and must be a no-op."""
+    usage = Obj(
+        prompt_token_count=100,
+        candidates_token_count=50,
+        thoughts_token_count=0,
+        total_token_count=150,
+    )
+
+    result = extract_usage(make_response(usage=usage))
+
+    assert result[CANDIDATES_TOKEN_COUNT_KEY] == 50
+    assert result[TOTAL_TOKEN_COUNT_KEY] == 150
