@@ -1,0 +1,8 @@
+{
+  "summary": "Include Gemini thinking tokens in output usage for the Vertex AI and Google Gen AI instrumentations",
+  "packages": {
+    "@respan/instrumentation-vertexai": "patch",
+    "respan-instrumentation-google-genai": "patch",
+    "respan-instrumentation-vertexai": "patch"
+  }
+}

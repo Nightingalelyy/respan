@@ -192,6 +192,25 @@ def test_activate_patches_generate_content_and_emits_chat_span(
     instrumentor.deactivate()
 
 
+def test_thinking_tokens_are_included_in_output_usage() -> None:
+    usage = Obj(
+        prompt_token_count=100,
+        candidates_token_count=50,
+        thoughts_token_count=800,
+        total_token_count=950,
+    )
+
+    attrs = build_generate_content_attrs(
+        request_payload={"model": "gemini-2.5-flash", "contents": "Explain"},
+        response_or_chunks=make_response(text="Reasoned answer", usage=usage),
+    )
+
+    assert attrs[GenAIAttributes.GEN_AI_USAGE_INPUT_TOKENS] == 100
+    assert attrs[GenAIAttributes.GEN_AI_USAGE_OUTPUT_TOKENS] == 850
+    assert attrs[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] == 850
+    assert attrs[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] == 950
+
+
 def test_stream_emits_one_span_after_iterator_is_consumed(
     fake_vertexai: tuple[type[Any], type[Any]],
     captured_spans: list[Any],
