@@ -100,9 +100,12 @@ export abstract class SetupBaseCommand extends BaseCommand {
       return;
     }
 
-    this.logStep(step++, 'Open which coding agent?');
-    const detected = detectAgents(projectRoot, home);
-    const selectedTool = await this.selectAgent(opts.agent as CliTool | undefined, detected);
+    let selectedTool: CliTool | null = null;
+    if (!opts.noInstrument) {
+      this.logStep(step++, 'Open which coding agent?');
+      const detected = detectAgents(projectRoot, home);
+      selectedTool = await this.selectAgent(opts.agent as CliTool | undefined, detected);
+    }
 
     // Install the full skill bundle for every agent, regardless of selection.
     this.logStep(step++, 'Install skill');
@@ -125,9 +128,9 @@ export abstract class SetupBaseCommand extends BaseCommand {
     this.notifySetup(this.getGitEmail()).catch(() => {});
 
     // Open the agent only if one was selected.
-    if (selectedTool && !opts.noInstrument) {
+    if (selectedTool) {
       await this.launchAgent(selectedTool, projectRoot, resolvedMode);
-    } else if (!selectedTool) {
+    } else if (!opts.noInstrument) {
       this.log(`  ${DIM}No agent selected, but the skill is installed. Open your agent any time and use the ${RESET}/respan${DIM} skill.${RESET}`);
     }
   }

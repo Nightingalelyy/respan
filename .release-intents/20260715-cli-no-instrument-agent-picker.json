@@ -1,0 +1,6 @@
+{
+  "summary": "CLI: make --no-instrument skip the coding-agent picker and agent detection during setup",
+  "packages": {
+    "@respan/cli": "patch"
+  }
+}
