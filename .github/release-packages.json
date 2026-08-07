@@ -542,6 +542,12 @@
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-pgvector",
+      "path": "python-sdks/instrumentations/respan-instrumentation-pgvector",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-llama-index",
       "path": "python-sdks/instrumentations/respan-instrumentation-llama-index",
       "registry": "pypi"
