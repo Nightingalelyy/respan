@@ -1,0 +1,7 @@
+{
+  "summary": "Add canonical OpenRouter reasoning and provider request parameter types",
+  "packages": {
+    "@respan/respan-sdk": "patch",
+    "respan-sdk": "patch"
+  }
+}
