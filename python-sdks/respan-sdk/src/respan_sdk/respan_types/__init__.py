@@ -24,6 +24,7 @@ from ._internal_types import (
     Message,
     Usage,
     LiteLLMCompletionParams,
+    LiteLLMProviderCompletionParams,
     OpenRouterCompletionParams,
     BasicEmbeddingParams,
 )
@@ -81,6 +82,7 @@ __all__ = [
     "Message",
     "Usage",
     "LiteLLMCompletionParams",
+    "LiteLLMProviderCompletionParams",
     "OpenRouterCompletionParams",
     "BasicEmbeddingParams",
     "ExporterSessionState",
