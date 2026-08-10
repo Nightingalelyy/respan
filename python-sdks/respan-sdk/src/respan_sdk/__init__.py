@@ -12,7 +12,7 @@ from .respan_types import (
     EvaluationParams,
     RetryParams,
     Message,
-    LiteLLMOpenRouterCompletionParams,
+    LiteLLMProviderCompletionParams,
     OpenRouterCompletionParams,
     Usage,
 )
@@ -42,7 +42,7 @@ __all__ = [
     "EvaluationParams",
     "RetryParams",
     "Message",
-    "LiteLLMOpenRouterCompletionParams",
+    "LiteLLMProviderCompletionParams",
     "OpenRouterCompletionParams",
     "Usage",
 
