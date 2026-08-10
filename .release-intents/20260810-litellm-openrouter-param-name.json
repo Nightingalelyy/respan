@@ -1,0 +1,7 @@
+{
+  "summary": "Clarify that OpenRouter completion parameters extend LiteLLM",
+  "packages": {
+    "@respan/respan-sdk": "patch",
+    "respan-sdk": "patch"
+  }
+}

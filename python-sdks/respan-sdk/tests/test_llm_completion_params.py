@@ -1,7 +1,10 @@
 import pytest
 from pydantic import ValidationError
 
-from respan_sdk import OpenRouterCompletionParams
+from respan_sdk import (
+    LiteLLMOpenRouterCompletionParams,
+    OpenRouterCompletionParams,
+)
 from respan_sdk.respan_types._internal_types import LiteLLMCompletionParams
 
 
@@ -19,7 +22,7 @@ def test_service_tier_is_preserved_for_provider_request():
 
 
 def test_openrouter_request_params_are_preserved():
-    params = OpenRouterCompletionParams.model_validate(
+    params = LiteLLMOpenRouterCompletionParams.model_validate(
         {
             "model": "openrouter/deepseek/deepseek-v4-flash-0731",
             "messages": [{"role": "user", "content": "hello"}],
@@ -34,7 +37,7 @@ def test_openrouter_request_params_are_preserved():
 
 def test_openrouter_reasoning_rejects_log_output_list():
     with pytest.raises(ValidationError):
-        OpenRouterCompletionParams.model_validate(
+        LiteLLMOpenRouterCompletionParams.model_validate(
             {
                 "model": "openrouter/deepseek/deepseek-v4-flash-0731",
                 "messages": [{"role": "user", "content": "hello"}],
@@ -56,3 +59,7 @@ def test_generic_completion_params_do_not_claim_openrouter_fields():
     dumped = params.model_dump()
     assert "reasoning" not in dumped
     assert "provider" not in dumped
+
+
+def test_previous_openrouter_type_name_remains_compatible():
+    assert OpenRouterCompletionParams is LiteLLMOpenRouterCompletionParams
