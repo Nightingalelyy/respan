@@ -276,6 +276,13 @@ class LiteLLMCompletionParams(BasicLLMParams):
         return v
 
 
+class OpenRouterCompletionParams(LiteLLMCompletionParams):
+    """OpenRouter-native request parameters accepted by the gateway."""
+
+    reasoning: Optional[Dict[str, Any]] = None
+    provider: Optional[Dict[str, Any]] = None
+
+
 class Usage(RespanBaseModel):
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None

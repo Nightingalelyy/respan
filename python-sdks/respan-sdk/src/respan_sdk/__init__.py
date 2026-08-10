@@ -12,6 +12,7 @@ from .respan_types import (
     EvaluationParams,
     RetryParams,
     Message,
+    OpenRouterCompletionParams,
     Usage,
 )
 
@@ -40,6 +41,7 @@ __all__ = [
     "EvaluationParams",
     "RetryParams",
     "Message",
+    "OpenRouterCompletionParams",
     "Usage",
 
     # Filter types

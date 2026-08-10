@@ -403,6 +403,15 @@ const BasicLLMParamsSchema = z.object({
   top_p: z.number().optional(),
 });
 
+const OpenRouterCompletionParamsSchema = BasicLLMParamsSchema.extend({
+  reasoning: z.record(z.string(), z.any()).optional(),
+  provider: z.record(z.string(), z.any()).optional(),
+});
+
+export type OpenRouterCompletionParams = z.input<
+  typeof OpenRouterCompletionParamsSchema
+>;
+
 // Basic Embedding Parameters Schema (placeholder)
 const BasicEmbeddingParamsSchema = z.object({
   input: z.union([z.string(), z.array(z.string())]).optional(),
@@ -589,6 +598,7 @@ export type RespanPayload = z.input<typeof RespanPayloadSchema>;
 export {
   RespanParamsSchema,
   BasicLLMParamsSchema,
+  OpenRouterCompletionParamsSchema,
   BasicEmbeddingParamsSchema,
   MessageSchema,
   ToolCallSchema,

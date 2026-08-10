@@ -24,6 +24,7 @@ from ._internal_types import (
     Message,
     Usage,
     LiteLLMCompletionParams,
+    OpenRouterCompletionParams,
     BasicEmbeddingParams,
 )
 from .exporter_session_types import ExporterSessionState, PendingToolState
@@ -80,6 +81,7 @@ __all__ = [
     "Message",
     "Usage",
     "LiteLLMCompletionParams",
+    "OpenRouterCompletionParams",
     "BasicEmbeddingParams",
     "ExporterSessionState",
     "PendingToolState",
