@@ -185,8 +185,11 @@ export class GoogleADKInstrumentor {
     const tracerProvider = trace.getTracerProvider() as any;
     return (
       tracerProvider?.activeSpanProcessor ??
+      tracerProvider?._activeSpanProcessor ??
       tracerProvider?._delegate?.activeSpanProcessor ??
-      tracerProvider?._delegate?._tracerProvider?.activeSpanProcessor
+      tracerProvider?._delegate?._activeSpanProcessor ??
+      tracerProvider?._delegate?._tracerProvider?.activeSpanProcessor ??
+      tracerProvider?._delegate?._tracerProvider?._activeSpanProcessor
     );
   }
 
@@ -301,7 +304,7 @@ function getAttributes(span: ReadableSpan): Attributes | undefined {
 function getInstrumentationScopeName(span: ReadableSpan): string {
   return (
     ((span as any).instrumentationScope?.name as string | undefined) ??
-    ((span as any).instrumentationLibrary?.name as string | undefined) ??
+    ((span as any).instrumentationScope?.name as string | undefined) ??
     ""
   );
 }

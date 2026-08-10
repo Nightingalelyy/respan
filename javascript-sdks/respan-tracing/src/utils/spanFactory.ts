@@ -140,7 +140,10 @@ export function buildReadableSpan(opts: BuildSpanOptions): ReadableSpan {
       traceFlags: 1,
       isRemote: false,
     }),
-    parentSpanId,
+    // OTEL 2.x: parent is a SpanContext (parentSpanId was removed in 2.0)
+    parentSpanContext: parentSpanId
+      ? { traceId, spanId: parentSpanId, traceFlags: 1, isRemote: false }
+      : undefined,
     startTime,
     endTime,
     duration: hrTimeDuration(startTime, endTime),
@@ -149,7 +152,8 @@ export function buildReadableSpan(opts: BuildSpanOptions): ReadableSpan {
     links: [],
     events: [],
     resource: { attributes: {} } as any,
-    instrumentationLibrary: {
+    // OTEL 2.x: instrumentationLibrary was renamed to instrumentationScope
+    instrumentationScope: {
       name: RESPAN_PACKAGE_NAME,
       version: "1.0.0",
     },
@@ -157,7 +161,7 @@ export function buildReadableSpan(opts: BuildSpanOptions): ReadableSpan {
     droppedAttributesCount: 0,
     droppedEventsCount: 0,
     droppedLinksCount: 0,
-  } as unknown as ReadableSpan;
+  } satisfies ReadableSpan;
 }
 
 // ── Inject into OTEL pipeline ───────────────────────────────────────────────
@@ -169,8 +173,14 @@ export function buildReadableSpan(opts: BuildSpanOptions): ReadableSpan {
  */
 export function injectSpan(span: ReadableSpan): boolean {
   const tp = trace.getTracerProvider() as any;
+  // OTEL 2.x renamed the internal field to `_activeSpanProcessor` (underscore).
+  // Check both so injection works on 1.x and 2.x, at the top level and under
+  // the ProxyTracerProvider's `_delegate`.
   const processor =
-    tp?.activeSpanProcessor ?? tp?._delegate?.activeSpanProcessor;
+    tp?.activeSpanProcessor ??
+    tp?._activeSpanProcessor ??
+    tp?._delegate?.activeSpanProcessor ??
+    tp?._delegate?._activeSpanProcessor;
   if (processor && typeof processor.onEnd === "function") {
     processor.onEnd(span);
     return true;
