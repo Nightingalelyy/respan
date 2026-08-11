@@ -7,8 +7,8 @@ readme = "README.md"
 license = "MIT"
 packages = [{include = "respan_exporter_haystack", from = "src"}]
 homepage = "https://respan.ai"
-repository = "https://github.com/respan-ai/respan-sdks"
-documentation = "https://docs.respan.ai"
+repository = "https://github.com/respanai/respan"
+documentation = "https://www.respan.ai/docs"
 keywords = ["haystack", "respan", "llm", "observability", "tracing", "monitoring"]
 
 [tool.poetry.dependencies]

@@ -1,6 +1,6 @@
 # Respan Tracing SDK
 
-**[respan.ai](https://respan.ai)** | **[Documentation](https://docs.respan.ai)**
+**[respan.ai](https://respan.ai)** | **[Documentation](https://www.respan.ai/docs)**
 
 A lightweight OpenTelemetry-based tracing SDK for Respan, built with minimal dependencies and optional instrumentation support.
 Inspired by [Openllmetry](https://github.com/traceloop/openllmetry-js)

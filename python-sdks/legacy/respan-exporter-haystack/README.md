@@ -1,6 +1,6 @@
 # Respan Haystack Integration
 
-**[respan.ai](https://respan.ai)** | **[Documentation](https://docs.respan.ai)** | **[PyPI](https://pypi.org/project/respan-exporter-haystack/)**
+**[respan.ai](https://respan.ai)** | **[Documentation](https://www.respan.ai/docs)** | **[PyPI](https://pypi.org/project/respan-exporter-haystack/)**
 
 Respan integration for Haystack pipelines with tracing and logging support.
 
@@ -316,9 +316,9 @@ python examples/combined_example.py
 
 ## Support
 
-- **Documentation:** https://docs.respan.ai/
+- **Documentation:** https://www.respan.ai/docs/
 - **Dashboard:** https://platform.respan.ai/
-- **Issues:** [GitHub Issues](https://github.com/Repsan/respan/issues)
+- **Issues:** [GitHub Issues](https://github.com/respanai/respan/issues)
 
 ---
 
