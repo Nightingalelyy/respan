@@ -314,6 +314,37 @@ export const startTracing = async (options: RespanOptions) => {
       exporterUrl,
       instrumentationCount: instrumentationsList.length,
     });
+
+    // The composite acquires the process-global transformer host before
+    // NodeSDK.start(). A partial start must therefore shut down both the SDK
+    // and the composite before clearing the singleton references; otherwise a
+    // plugin can register successfully against a tracing runtime that never
+    // became operational. Composite shutdown is idempotent so this remains
+    // safe when NodeSDK.shutdown() already reached the span processor.
+    const failedSdk = _sdk;
+    const failedCompositeProcessor = _compositeProcessor;
+    try {
+      await failedSdk?.shutdown();
+    } catch (cleanupError) {
+      console.error(
+        "[Respan Debug] Failed to shut down partially started OpenTelemetry SDK:",
+        cleanupError,
+      );
+    }
+    try {
+      await failedCompositeProcessor?.shutdown();
+    } catch (cleanupError) {
+      console.error(
+        "[Respan Debug] Failed to release partially started Respan processor:",
+        cleanupError,
+      );
+    } finally {
+      _initialized = false;
+      _compositeProcessor = undefined;
+      _sdk = undefined;
+      _flushPromise = undefined;
+      _shutdownPromise = undefined;
+    }
     throw error;
   }
 };

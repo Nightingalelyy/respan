@@ -1,8 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
+import { context, trace } from "@opentelemetry/api";
 
-import { trace } from "@opentelemetry/api";
+import {
+  BasicTracerProvider,
+  InMemorySpanExporter,
+} from "@opentelemetry/sdk-trace-base";
+import { getRegisteredSpanTransformerKeys } from "@respan/tracing";
+import {
+  MultiProcessorManager,
+  RespanCompositeProcessor,
+} from "@respan/tracing/dist/processor/index.js";
 import {
   ensureAISDKTelemetry,
   releaseOwnedAISDKTelemetry,
@@ -10,7 +19,6 @@ import {
 } from "../dist/_ai_sdk_telemetry.js";
 import {
   VercelAIInstrumentor,
-  VercelAITranslator,
 } from "../dist/index.js";
 
 const telemetryMarker = Symbol.for(
@@ -58,28 +66,164 @@ function fakeAISDK7Modules(imports) {
   };
 }
 
-function createTranslatorSpan() {
-  const name = "ai.generateText.doGenerate";
+function createOTel2Harness(spanNameStyle = "legacy") {
+  const exporter = new InMemorySpanExporter();
+  const manager = new MultiProcessorManager({
+    disableBatch: true,
+    spanNameStyle,
+  });
+  manager.addProcessor({
+    exporter,
+    name: "default",
+    disableBatch: true,
+  });
+  const composite = new RespanCompositeProcessor(manager);
+  const provider = new BasicTracerProvider({ spanProcessors: [composite] });
   return {
-    name,
-    instrumentationScope: { name: "ai" },
-    attributes: {
-      "ai.model.id": "gpt-4o-mini",
-      "ai.prompt": "hello",
-      "ai.response.text": "world",
-    },
-    setAttribute(key, value) {
-      this.attributes[key] = value;
-    },
+    composite,
+    exporter,
+    provider,
+    tracer: provider.getTracer("gen_ai"),
   };
 }
 
-function runTranslatorProcessor(processor) {
-  const span = createTranslatorSpan();
-  processor.onStart(span, undefined);
-  processor.onEnd(span);
-  return span.attributes;
+async function exportNestedModernEmbedding(spanNameStyle) {
+  const harness = createOTel2Harness(spanNameStyle);
+  const instrumentor = new VercelAIInstrumentor({
+    autoRegisterAISDKTelemetry: false,
+  });
+
+  try {
+    await instrumentor.activate();
+    const root = harness.tracer.startSpan("embeddings probe-embedding", {
+      attributes: {
+        "gen_ai.operation.name": "embeddings",
+        "gen_ai.request.model": "probe-embedding",
+        "ai.value": "otel2 embedding input",
+      },
+    });
+    const rootContext = trace.setSpan(context.active(), root);
+    const child = harness.tracer.startSpan(
+      "embeddings probe-embedding",
+      {
+        attributes: {
+          "gen_ai.operation.name": "embeddings",
+          "gen_ai.request.model": "probe-embedding",
+          "ai.values": ["otel2 embedding input"],
+          // OTEL attributes cannot contain nested arrays; the AI SDK encodes
+          // each vector as JSON inside a string array.
+          "ai.embeddings": [JSON.stringify([0.11, 0.22, 0.33])],
+        },
+      },
+      rootContext,
+    );
+
+    child.end();
+    root.end();
+    await harness.provider.forceFlush();
+    return {
+      spans: harness.exporter.getFinishedSpans(),
+      rootSpanId: root.spanContext().spanId,
+    };
+  } finally {
+    instrumentor.deactivate();
+    await harness.provider.shutdown();
+  }
 }
+
+test("semantic OTel 2 export collapses a nested AI SDK 7 embedding to one call", async () => {
+  const { spans } = await exportNestedModernEmbedding("semantic");
+
+  assert.equal(spans.length, 1);
+  const [embedding] = spans;
+  assert.equal(embedding.name, "embedding");
+  assert.equal(embedding.attributes["respan.entity.log_type"], "embedding");
+  assert.equal(embedding.parentSpanContext, undefined);
+  assert.deepEqual(
+    JSON.parse(embedding.attributes["traceloop.entity.input"]),
+    ["otel2 embedding input"],
+  );
+  assert.deepEqual(
+    JSON.parse(embedding.attributes["traceloop.entity.output"]),
+    [[0.11, 0.22, 0.33]],
+  );
+  assert.equal(embedding.attributes["respan.internal.drop_span"], undefined);
+  assert.equal(
+    embedding.attributes["respan.internal.export_parent_span_id"],
+    undefined,
+  );
+});
+
+test("legacy OTel 2 export preserves the nested AI SDK 7 embedding tree", async () => {
+  const { spans, rootSpanId } = await exportNestedModernEmbedding("legacy");
+
+  assert.equal(spans.length, 2);
+  const child = spans.find(span => span.parentSpanContext?.spanId === rootSpanId);
+  const root = spans.find(span => span.spanContext().spanId === rootSpanId);
+  assert.ok(child);
+  assert.ok(root);
+  assert.equal(child.name, "embeddings probe-embedding");
+  assert.equal(root.name, "embeddings probe-embedding");
+  assert.equal(child.attributes["respan.entity.log_type"], "embedding");
+  assert.equal(root.attributes["respan.entity.log_type"], "embedding");
+  for (const span of spans) {
+    assert.equal(span.attributes["respan.internal.drop_span"], undefined);
+    assert.equal(
+      span.attributes["respan.internal.export_parent_span_id"],
+      undefined,
+    );
+  }
+});
+
+test("nested embedding correlation drains after final deactivate and reactivates cleanly", async () => {
+  const harness = createOTel2Harness("semantic");
+  const instrumentor = new VercelAIInstrumentor({
+    autoRegisterAISDKTelemetry: false,
+  });
+
+  try {
+    await instrumentor.activate();
+    const root = harness.tracer.startSpan("embeddings drain-model", {
+      attributes: { "gen_ai.operation.name": "embeddings", "ai.value": "drain" },
+    });
+    const child = harness.tracer.startSpan(
+      "embeddings drain-model",
+      {
+        attributes: {
+          "gen_ai.operation.name": "embeddings",
+          "ai.values": ["drain"],
+          "ai.embeddings": [JSON.stringify([0.9, 0.8])],
+        },
+      },
+      trace.setSpan(context.active(), root),
+    );
+
+    instrumentor.deactivate();
+    assert.deepEqual(getRegisteredSpanTransformerKeys(), []);
+    child.end();
+    root.end();
+    await harness.provider.forceFlush();
+    assert.equal(harness.exporter.getFinishedSpans().length, 1);
+
+    await instrumentor.activate();
+    const standalone = harness.tracer.startSpan("embeddings drain-model", {
+      attributes: {
+        "gen_ai.operation.name": "embeddings",
+        "ai.value": "fresh",
+        "ai.embedding": [0.7, 0.6],
+      },
+    });
+    standalone.end();
+    await harness.provider.forceFlush();
+
+    const exported = harness.exporter.getFinishedSpans();
+    assert.equal(exported.length, 2);
+    assert.equal(exported[1].attributes["traceloop.entity.input"], "fresh");
+  } finally {
+    instrumentor.deactivate();
+    await harness.provider.shutdown();
+  }
+});
 
 test("two instrumentors share one owned AI SDK 7 adapter until the final release", async () => {
   await withCleanTelemetryGlobals(async () => {
@@ -198,97 +342,100 @@ test("final release removes only the exact Respan-owned integration", async () =
   });
 });
 
-test("translator ownership stops after final deactivate and resumes without duplicates", async () => {
-  const originalDescriptor = Object.getOwnPropertyDescriptor(trace, "getTracerProvider");
-  const firstProcessors = [];
-  const secondProcessors = [];
-  const firstProvider = {
-    addSpanProcessor(processor) {
-      firstProcessors.push(processor);
-    },
-  };
-  const secondProvider = {
-    addSpanProcessor(processor) {
-      secondProcessors.push(processor);
-    },
-  };
-  let currentProvider = firstProvider;
-
-  Object.defineProperty(trace, "getTracerProvider", {
-    configurable: true,
-    value: () => currentProvider,
+test("activation fails clearly when no compatible transformer host is active", async () => {
+  const instrumentor = new VercelAIInstrumentor({
+    autoRegisterAISDKTelemetry: false,
   });
 
+  await assert.rejects(
+    instrumentor.activate(),
+    /No compatible Respan span-transformer host is active/,
+  );
+  assert.equal(instrumentor.isActive(), false);
+  assert.deepEqual(getRegisteredSpanTransformerKeys(), []);
+});
+
+test("real OTel 2 provider translates once, drains in-flight spans, and reactivates", async () => {
+  const harness = createOTel2Harness();
+  assert.equal(
+    typeof harness.provider.addSpanProcessor,
+    "undefined",
+    "the regression harness must exercise the OTel 2 provider API",
+  );
   try {
     const first = new VercelAIInstrumentor({ autoRegisterAISDKTelemetry: false });
     const second = new VercelAIInstrumentor({ autoRegisterAISDKTelemetry: false });
 
     await first.activate();
-    assert.equal(firstProcessors.length, 1);
-    assert.ok(firstProcessors[0] instanceof VercelAITranslator);
-    assert.equal(runTranslatorProcessor(firstProcessors[0])["respan.entity.log_type"], "text");
-
     await second.activate();
-    assert.equal(firstProcessors.length, 1);
+    assert.deepEqual(getRegisteredSpanTransformerKeys(), [
+      "@respan/instrumentation-vercel",
+    ]);
 
-    first.deactivate();
+    const firstSpan = harness.tracer.startSpan("chat gpt-4o-mini", {
+      attributes: {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "gen_ai.input.messages": JSON.stringify([
+          { role: "user", parts: [{ type: "text", content: "hello" }] },
+        ]),
+        "gen_ai.output.messages": JSON.stringify([
+          { role: "assistant", parts: [{ type: "text", content: "world" }] },
+        ]),
+      },
+    });
+    firstSpan.end();
+    assert.equal(harness.exporter.getFinishedSpans().length, 1);
     assert.equal(
-      runTranslatorProcessor(firstProcessors[0])["respan.entity.log_type"],
+      harness.exporter.getFinishedSpans()[0].attributes["respan.entity.log_type"],
       "text",
-      "the remaining owner keeps translation active",
     );
 
-    const inFlightSpan = createTranslatorSpan();
-    firstProcessors[0].onStart(inFlightSpan, undefined);
+    first.deactivate();
+    const inFlightSpan = harness.tracer.startSpan("chat gpt-4o-mini", {
+      attributes: {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "gen_ai.input.messages": JSON.stringify([
+          { role: "user", parts: [{ type: "text", content: "in flight" }] },
+        ]),
+        "gen_ai.output.messages": JSON.stringify([
+          { role: "assistant", parts: [{ type: "text", content: "drained" }] },
+        ]),
+      },
+    });
     second.deactivate();
-    firstProcessors[0].onEnd(inFlightSpan);
+    inFlightSpan.end();
     assert.equal(
-      inFlightSpan.attributes["respan.entity.log_type"],
+      harness.exporter.getFinishedSpans()[1].attributes["respan.entity.log_type"],
       "text",
       "a span started while active is fully translated after final deactivate",
     );
+    assert.deepEqual(getRegisteredSpanTransformerKeys(), []);
 
-    const inactiveAttrs = runTranslatorProcessor(firstProcessors[0]);
-    assert.equal(inactiveAttrs["respan.entity.log_type"], undefined);
-    assert.equal(inactiveAttrs["ai.model.id"], "gpt-4o-mini");
+    const inactiveSpan = harness.tracer.startSpan("chat gpt-4o-mini", {
+      attributes: { "gen_ai.operation.name": "chat" },
+    });
+    inactiveSpan.end();
+    assert.equal(harness.exporter.getFinishedSpans().length, 2);
 
     await first.activate();
-    assert.equal(firstProcessors.length, 1);
-    const reactivatedAttrs = runTranslatorProcessor(firstProcessors[0]);
-    assert.equal(reactivatedAttrs["respan.entity.log_type"], "text");
-    assert.equal(reactivatedAttrs["traceloop.entity.path"], "");
-    first.deactivate();
-
-    currentProvider = secondProvider;
-    const newProvider = new VercelAIInstrumentor({
-      autoRegisterAISDKTelemetry: false,
+    const reactivatedSpan = harness.tracer.startSpan("chat gpt-4o-mini", {
+      attributes: {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.request.model": "gpt-4o-mini",
+      },
     });
-    await newProvider.activate();
-    assert.equal(secondProcessors.length, 1);
-    assert.ok(secondProcessors[0] instanceof VercelAITranslator);
-    newProvider.deactivate();
+    reactivatedSpan.end();
+    assert.equal(harness.exporter.getFinishedSpans().length, 3);
+    first.deactivate();
   } finally {
-    if (originalDescriptor) {
-      Object.defineProperty(trace, "getTracerProvider", originalDescriptor);
-    } else {
-      delete trace.getTracerProvider;
-    }
+    await harness.provider.shutdown();
   }
 });
 
 test("failed adapter activation rolls back translator ownership and remains retryable", async () => {
-  const originalDescriptor = Object.getOwnPropertyDescriptor(trace, "getTracerProvider");
-  const processors = [];
-  const provider = {
-    addSpanProcessor(processor) {
-      processors.push(processor);
-    },
-  };
-
-  Object.defineProperty(trace, "getTracerProvider", {
-    configurable: true,
-    value: () => provider,
-  });
+  const harness = createOTel2Harness();
 
   class RetryableInstrumentor extends VercelAIInstrumentor {
     attempts = 0;
@@ -309,19 +456,17 @@ test("failed adapter activation rolls back translator ownership and remains retr
       /adapter registration failed/,
     );
 
-    assert.equal(processors.length, 1);
-    assert.equal(runTranslatorProcessor(processors[0])["respan.entity.log_type"], undefined);
+    assert.equal(instrumentor.isActive(), false);
+    assert.deepEqual(getRegisteredSpanTransformerKeys(), []);
 
     await instrumentor.activate();
-    assert.equal(processors.length, 1);
-    assert.equal(runTranslatorProcessor(processors[0])["respan.entity.log_type"], "text");
+    assert.equal(instrumentor.isActive(), true);
+    assert.deepEqual(getRegisteredSpanTransformerKeys(), [
+      "@respan/instrumentation-vercel",
+    ]);
     instrumentor.deactivate();
   } finally {
-    if (originalDescriptor) {
-      Object.defineProperty(trace, "getTracerProvider", originalDescriptor);
-    } else {
-      delete trace.getTracerProvider;
-    }
+    await harness.provider.shutdown();
   }
 });
 

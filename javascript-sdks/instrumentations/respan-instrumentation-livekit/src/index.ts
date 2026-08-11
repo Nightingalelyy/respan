@@ -1,16 +1,13 @@
-import { trace, type Span, type TracerProvider } from "@opentelemetry/api";
+import { trace, type TracerProvider } from "@opentelemetry/api";
+import * as RespanTracing from "@respan/tracing";
+import type { SpanTransformerRegistration } from "@respan/tracing";
 import { LIVEKIT_INSTRUMENTATION_NAME } from "./_constants.js";
-import {
-  getSpanAttributes,
-  type MutableAttributes,
-  translateLiveKitSpan,
-} from "./_translator.js";
-
-const PATCHED_SPAN = Symbol.for("respan.instrumentation.livekit.patchedSpan");
-const TRANSLATED_SPAN = Symbol.for("respan.instrumentation.livekit.translatedSpan");
+import { translateLiveKitSpan } from "./_translator.js";
+import { LiveKitSpanTransformer } from "./_transformer.js";
 
 type AnyFunction = (...args: any[]) => any;
-type PatchableTracer = Record<string, unknown>;
+const LIVEKIT_TRANSFORMER_KEY = "@respan/instrumentation-livekit";
+const SHARED_LIVEKIT_TRANSFORMER = new LiveKitSpanTransformer();
 
 export interface LiveKitTelemetryModule {
   tracer?: {
@@ -35,13 +32,12 @@ export interface LiveKitInstrumentorOptions {
 export class LiveKitInstrumentor {
   public readonly name = LIVEKIT_INSTRUMENTATION_NAME;
 
-  private static _originals: Map<string, AnyFunction> = new Map();
-  private static _patchCount = 0;
-  private static _patchedTracer?: PatchableTracer;
-
   private readonly _livekitModule?: LiveKitAgentsModule;
   private readonly _telemetryModule?: LiveKitTelemetryModule;
   private readonly _syncTracerProvider: boolean;
+  private _transformerRegistration: SpanTransformerRegistration | undefined;
+  private _activationPromise: Promise<void> | undefined;
+  private _activationGeneration = 0;
   private _isInstrumented = false;
 
   constructor(options: LiveKitInstrumentorOptions = {}) {
@@ -55,7 +51,30 @@ export class LiveKitInstrumentor {
       return;
     }
 
+    // All callers in one activation wave share the same registry acquisition.
+    // This prevents concurrent activate() calls from incrementing the shared
+    // transformer's refcount twice and overwriting one registration handle.
+    if (this._activationPromise) {
+      return this._activationPromise;
+    }
+
+    const activationGeneration = ++this._activationGeneration;
+    const activationPromise = this._activate(activationGeneration);
+    this._activationPromise = activationPromise;
+    try {
+      await activationPromise;
+    } finally {
+      if (this._activationPromise === activationPromise) {
+        this._activationPromise = undefined;
+      }
+    }
+  }
+
+  private async _activate(activationGeneration: number): Promise<void> {
     const telemetryModule = await this._resolveTelemetryModule();
+    if (activationGeneration !== this._activationGeneration) {
+      return;
+    }
     if (!telemetryModule?.tracer) {
       return;
     }
@@ -64,22 +83,27 @@ export class LiveKitInstrumentor {
       syncLiveKitTracerProvider(telemetryModule);
     }
 
-    this._patchTracer(telemetryModule.tracer as PatchableTracer);
+    // Registration is synchronous. The generation check immediately before it
+    // guarantees deactivate() cannot be overtaken by a late module resolution.
+    const registration = registerLiveKitTransformer();
+    if (activationGeneration !== this._activationGeneration) {
+      registration.unregister();
+      return;
+    }
+
+    this._transformerRegistration = registration;
     this._isInstrumented = true;
   }
 
   deactivate(): void {
-    if (!this._isInstrumented) {
-      return;
-    }
+    // Invalidate an activation that may still be awaiting the optional module.
+    // Clearing the shared promise also permits a fresh activate() immediately.
+    this._activationGeneration += 1;
+    this._activationPromise = undefined;
 
-    LiveKitInstrumentor._patchCount = Math.max(0, LiveKitInstrumentor._patchCount - 1);
-    if (LiveKitInstrumentor._patchCount === 0 && LiveKitInstrumentor._patchedTracer) {
-      for (const [methodName, original] of LiveKitInstrumentor._originals) {
-        LiveKitInstrumentor._patchedTracer[methodName] = original;
-      }
-      LiveKitInstrumentor._originals.clear();
-      LiveKitInstrumentor._patchedTracer = undefined;
+    if (this._transformerRegistration) {
+      this._transformerRegistration.unregister();
+      this._transformerRegistration = undefined;
     }
 
     this._isInstrumented = false;
@@ -105,59 +129,6 @@ export class LiveKitInstrumentor {
     }
   }
 
-  private _patchTracer(tracer: PatchableTracer): void {
-    if (LiveKitInstrumentor._patchCount === 0) {
-      LiveKitInstrumentor._patchedTracer = tracer;
-
-      const startSpan = tracer.startSpan;
-      if (typeof startSpan === "function") {
-        LiveKitInstrumentor._originals.set("startSpan", startSpan as AnyFunction);
-        tracer.startSpan = function instrumentedLiveKitStartSpan(
-          this: unknown,
-          options: { name?: string; attributes?: MutableAttributes } = {},
-        ): Span {
-          const span = (startSpan as AnyFunction).call(this, options);
-          return patchSpan(span, options?.name, options?.attributes);
-        };
-      }
-
-      const startActiveSpan = tracer.startActiveSpan;
-      if (typeof startActiveSpan === "function") {
-        LiveKitInstrumentor._originals.set("startActiveSpan", startActiveSpan as AnyFunction);
-        tracer.startActiveSpan = function instrumentedLiveKitStartActiveSpan<T>(
-          this: unknown,
-          fn: (span: Span) => Promise<T>,
-          options: { name?: string; attributes?: MutableAttributes } = {},
-        ): Promise<T> {
-          return (startActiveSpan as AnyFunction).call(
-            this,
-            async (span: Span) => await fn(patchSpan(span, options?.name, options?.attributes)),
-            options,
-          );
-        };
-      }
-
-      const startActiveSpanSync = tracer.startActiveSpanSync;
-      if (typeof startActiveSpanSync === "function") {
-        LiveKitInstrumentor._originals.set("startActiveSpanSync", startActiveSpanSync as AnyFunction);
-        tracer.startActiveSpanSync = function instrumentedLiveKitStartActiveSpanSync<T>(
-          this: unknown,
-          fn: (span: Span) => T,
-          options: { name?: string; attributes?: MutableAttributes } = {},
-        ): T {
-          return (startActiveSpanSync as AnyFunction).call(
-            this,
-            (span: Span) => fn(patchSpan(span, options?.name, options?.attributes)),
-            options,
-          );
-        };
-      }
-    }
-
-    if (LiveKitInstrumentor._originals.size > 0) {
-      LiveKitInstrumentor._patchCount += 1;
-    }
-  }
 }
 
 function syncLiveKitTracerProvider(telemetryModule: LiveKitTelemetryModule): void {
@@ -189,62 +160,21 @@ function resolveActiveTracerProvider(): unknown {
   return provider?._delegate ?? provider;
 }
 
-function patchSpan(
-  span: Span,
-  spanName?: string,
-  initialAttributes?: MutableAttributes,
-): Span {
-  const patchableSpan = span as Span & Record<string | symbol, any>;
-  if (patchableSpan[PATCHED_SPAN]) {
-    return span;
+function registerLiveKitTransformer(): SpanTransformerRegistration {
+  const registerSpanTransformer = (RespanTracing as Record<string, unknown>)[
+    "registerSpanTransformer"
+  ];
+  if (typeof registerSpanTransformer !== "function") {
+    throw new Error(
+      "@respan/instrumentation-livekit requires a compatible @respan/tracing " +
+      "runtime with registerSpanTransformer(). Upgrade @respan/tracing before activation.",
+    );
   }
 
-  const attrs = getSpanAttributes(span);
-  if (initialAttributes) {
-    for (const [key, value] of Object.entries(initialAttributes)) {
-      attrs[key] = value;
-    }
-  }
-
-  const originalSetAttribute = span.setAttribute.bind(span);
-  patchableSpan.setAttribute = (key: string, value: unknown): Span => {
-    attrs[key] = value;
-    return originalSetAttribute(key, value as any);
-  };
-
-  const originalSetAttributes = span.setAttributes.bind(span);
-  patchableSpan.setAttributes = (attributes: MutableAttributes): Span => {
-    for (const [key, value] of Object.entries(attributes)) {
-      attrs[key] = value;
-    }
-    return originalSetAttributes(attributes as any);
-  };
-
-  const originalEnd = span.end.bind(span);
-  patchableSpan.end = (...args: unknown[]): void => {
-    translateOnce(span, attrs, spanName);
-    (originalEnd as AnyFunction)(...args);
-  };
-
-  Object.defineProperty(patchableSpan, PATCHED_SPAN, {
-    enumerable: false,
-    value: true,
-  });
-
-  return span;
+  return (registerSpanTransformer as typeof RespanTracing.registerSpanTransformer)(
+    LIVEKIT_TRANSFORMER_KEY,
+    SHARED_LIVEKIT_TRANSFORMER,
+  );
 }
 
-function translateOnce(span: Span, attrs: MutableAttributes, spanName?: string): void {
-  const patchableSpan = span as Span & Record<string | symbol, any>;
-  if (patchableSpan[TRANSLATED_SPAN]) {
-    return;
-  }
-  Object.defineProperty(patchableSpan, TRANSLATED_SPAN, {
-    enumerable: false,
-    value: true,
-  });
-
-  translateLiveKitSpan(span, { attributes: attrs, spanName });
-}
-
-export { translateLiveKitSpan };
+export { LiveKitSpanTransformer, translateLiveKitSpan };

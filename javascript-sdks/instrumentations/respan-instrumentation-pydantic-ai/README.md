@@ -3,9 +3,10 @@
 Respan instrumentation for Pydantic AI-compatible TypeScript OpenTelemetry spans.
 
 The repository does not currently document a stable TypeScript Pydantic AI SDK API
-to patch. This package therefore installs a conservative span processor instead:
+to patch. This package therefore registers a conservative Respan span transformer:
 it normalizes Pydantic AI native OTel spans and Pydantic AI-scoped
-OpenInference spans into the canonical Respan span contract before export.
+OpenInference spans into the canonical Respan span contract before filtering
+and export.
 
 ## Installation
 
@@ -55,4 +56,4 @@ The package emits canonical Respan fields including:
 - `gen_ai.usage.*`
 
 Raw Pydantic AI/OpenInference attrs and off-contract aliases are stripped before
-delegating to the active Respan span processor.
+Respan filters and exports the span.

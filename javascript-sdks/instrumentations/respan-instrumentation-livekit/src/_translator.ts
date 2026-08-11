@@ -86,12 +86,16 @@ const GEN_AI_COMPLETION_ROLE = `${GEN_AI_COMPLETION_PREFIX}.role`;
 const GEN_AI_COMPLETION_CONTENT = `${GEN_AI_COMPLETION_PREFIX}.content`;
 const GEN_AI_COMPLETION_TOOL_CALLS = `${GEN_AI_COMPLETION_PREFIX}.tool_calls`;
 const LLM_USAGE_CACHE_READ_INPUT_TOKENS = "llm.usage.cache_read_input_tokens";
+const LANGFUSE_COMPLETION_START_TIME =
+  "langfuse.observation.completion_start_time";
 
 export type MutableAttributes = Record<string, unknown>;
 
 export interface TranslateLiveKitSpanOptions {
   attributes?: MutableAttributes;
   spanName?: string;
+  /** Skip Span API writes when translating from an onEnd transformer hook. */
+  writeToSpan?: boolean;
 }
 
 interface ChatContextJson {
@@ -117,6 +121,7 @@ export function translateLiveKitSpan(
 ): void {
   const attrs = options.attributes ?? getSpanAttributes(span);
   const spanName = options.spanName ?? getSpanName(span, attrs);
+  const writableSpan = options.writeToSpan === false ? undefined : span;
 
   if (LIVEKIT_INTERNAL_ACTIVITY_SPAN_NAMES.has(spanName)) {
     return;
@@ -127,29 +132,38 @@ export function translateLiveKitSpan(
   }
 
   const logType = resolveLogType(spanName, attrs);
-  setAttr(span, attrs, LIVEKIT_SPAN_NAME_ATTRIBUTE, spanName);
-  setAttr(span, attrs, RespanSpanAttributes.RESPAN_LOG_METHOD, LIVEKIT_LOG_METHOD_TS_TRACING);
-  setAttr(span, attrs, RespanSpanAttributes.RESPAN_LOG_TYPE, logType);
+  setAttr(writableSpan, attrs, LIVEKIT_SPAN_NAME_ATTRIBUTE, spanName);
+  setAttr(writableSpan, attrs, RespanSpanAttributes.RESPAN_LOG_METHOD, LIVEKIT_LOG_METHOD_TS_TRACING);
+  setAttr(writableSpan, attrs, RespanSpanAttributes.RESPAN_LOG_TYPE, logType);
 
   const entityName = resolveEntityName(spanName, attrs);
-  setAttr(span, attrs, SpanAttributes.TRACELOOP_ENTITY_NAME, entityName);
-  setAttr(span, attrs, SpanAttributes.TRACELOOP_ENTITY_PATH, spanName || entityName);
-  setAttr(span, attrs, SpanAttributes.TRACELOOP_ENTITY_INPUT, safeJson(buildEntityInput(spanName, attrs)));
-  setAttr(span, attrs, SpanAttributes.TRACELOOP_ENTITY_OUTPUT, safeJson(buildEntityOutput(spanName, attrs)));
+  setAttr(writableSpan, attrs, SpanAttributes.TRACELOOP_ENTITY_NAME, entityName);
+  setAttr(writableSpan, attrs, SpanAttributes.TRACELOOP_ENTITY_PATH, spanName || entityName);
+  const entityInput = buildEntityInput(spanName, attrs);
+  if (hasEntityValue(entityInput)) {
+    setAttr(writableSpan, attrs, SpanAttributes.TRACELOOP_ENTITY_INPUT, safeJson(entityInput));
+  }
+  const entityOutput = buildEntityOutput(spanName, attrs);
+  if (hasEntityValue(entityOutput)) {
+    setAttr(writableSpan, attrs, SpanAttributes.TRACELOOP_ENTITY_OUTPUT, safeJson(entityOutput));
+  }
 
   if (logType === RespanLogType.WORKFLOW) {
-    setAttr(span, attrs, SpanAttributes.TRACELOOP_WORKFLOW_NAME, entityName);
+    setAttr(writableSpan, attrs, SpanAttributes.TRACELOOP_WORKFLOW_NAME, entityName);
   }
 
   if (logType === RespanLogType.CHAT) {
-    addChatAttributes(span, attrs, spanName);
+    addChatAttributes(writableSpan, attrs);
   } else if (logType === RespanLogType.TEXT) {
-    addTextModelAttributes(span, attrs);
+    addTextModelAttributes(writableSpan, attrs);
   }
+
+  addLiveKitMetadata(writableSpan, attrs);
 
   for (const key of OFF_CONTRACT_ALIAS_KEYS) {
     delete attrs[key];
   }
+  stripLiveKitRawAttributes(attrs);
 }
 
 export function isLiveKitSpan(spanName: string, attrs: MutableAttributes): boolean {
@@ -222,28 +236,28 @@ function resolveEntityName(spanName: string, attrs: MutableAttributes): string {
 
 function buildEntityInput(spanName: string, attrs: MutableAttributes): unknown {
   if (spanName === LIVEKIT_SPAN_NAMES.FUNCTION_TOOL) {
-    return {
+    return compactRecord({
       name: stringAttr(attrs, LK_FUNCTION_TOOL_NAME),
       arguments: parseMaybeJson(attrs[LK_FUNCTION_TOOL_ARGS]),
       id: stringAttr(attrs, LK_FUNCTION_TOOL_ID),
-    };
+    });
   }
 
   if (spanName === LIVEKIT_SPAN_NAMES.LLM_NODE || spanName === LIVEKIT_SPAN_NAMES.LLM_REQUEST) {
-    return {
+    return compactRecord({
       chat_ctx: parseMaybeJson(attrs[LK_CHAT_CTX]),
       function_tools: parseMaybeJson(attrs[LK_FUNCTION_TOOLS]),
       provider_tools: parseMaybeJson(attrs[LK_PROVIDER_TOOLS]),
       tool_sets: parseMaybeJson(attrs[LK_TOOL_SETS]),
-    };
+    });
   }
 
   if (spanName === LIVEKIT_SPAN_NAMES.TTS_NODE || spanName === LIVEKIT_SPAN_NAMES.TTS_REQUEST) {
-    return {
+    return compactRecord({
       text: stringAttr(attrs, LK_TTS_INPUT_TEXT),
       streaming: attrs[LK_TTS_STREAMING],
       label: stringAttr(attrs, LK_TTS_LABEL),
-    };
+    });
   }
 
   if (spanName === LIVEKIT_SPAN_NAMES.AGENT_TURN) {
@@ -280,16 +294,11 @@ function buildEntityOutput(spanName: string, attrs: MutableAttributes): unknown 
     return compactRecord({
       text: attrs[LK_RESPONSE_TEXT],
       function_calls: parseMaybeJson(attrs[LK_RESPONSE_FUNCTION_CALLS]),
-      ttft: attrs[LK_RESPONSE_TTFT],
-      metrics: parseMaybeJson(attrs[LK_LLM_METRICS]),
     });
   }
 
   if (spanName === LIVEKIT_SPAN_NAMES.TTS_NODE || spanName === LIVEKIT_SPAN_NAMES.TTS_REQUEST) {
-    return compactRecord({
-      metrics: parseMaybeJson(attrs[LK_TTS_METRICS]),
-      ttfb: attrs[LK_RESPONSE_TTFB],
-    });
+    return undefined;
   }
 
   if (spanName === LIVEKIT_SPAN_NAMES.USER_TURN) {
@@ -298,7 +307,6 @@ function buildEntityOutput(spanName: string, attrs: MutableAttributes): unknown 
       confidence: attrs[LK_TRANSCRIPT_CONFIDENCE],
       transcription_delay: attrs[LK_TRANSCRIPTION_DELAY],
       end_of_turn_delay: attrs[LK_END_OF_TURN_DELAY],
-      provider_request_ids: attrs[LK_PROVIDER_REQUEST_IDS],
       eou: compactRecord({
         probability: attrs[LK_EOU_PROBABILITY],
         unlikely_threshold: attrs[LK_EOU_UNLIKELY_THRESHOLD],
@@ -335,7 +343,7 @@ function buildEntityOutput(spanName: string, attrs: MutableAttributes): unknown 
   });
 }
 
-function addChatAttributes(span: Span, attrs: MutableAttributes, spanName: string): void {
+function addChatAttributes(span: Span | undefined, attrs: MutableAttributes): void {
   const provider = providerName(attrs);
   const model = stringAttr(attrs, ATTR_GEN_AI_REQUEST_MODEL);
 
@@ -376,10 +384,10 @@ function addChatAttributes(span: Span, attrs: MutableAttributes, spanName: strin
   const chatCtx = parseMaybeJson(attrs[LK_CHAT_CTX]) as ChatContextJson | undefined;
   addPromptAttributes(span, attrs, chatCtx);
   addToolDefinitionAttributes(span, attrs);
-  addCompletionAttributes(span, attrs, spanName);
+  addCompletionAttributes(span, attrs);
 }
 
-function addTextModelAttributes(span: Span, attrs: MutableAttributes): void {
+function addTextModelAttributes(span: Span | undefined, attrs: MutableAttributes): void {
   const provider = providerName(attrs);
   const model = stringAttr(attrs, ATTR_GEN_AI_REQUEST_MODEL);
   if (provider) {
@@ -402,7 +410,77 @@ function addTextModelAttributes(span: Span, attrs: MutableAttributes): void {
   }
 }
 
-function addPromptAttributes(span: Span, attrs: MutableAttributes, chatCtx?: ChatContextJson): void {
+function addLiveKitMetadata(
+  span: Span | undefined,
+  attrs: MutableAttributes,
+): void {
+  const llmMetrics = parseMaybeJson(attrs[LK_LLM_METRICS]) as
+    | Record<string, unknown>
+    | undefined;
+  const providerRequestIds = normalizeProviderRequestIds([
+    attrs[LK_PROVIDER_REQUEST_IDS],
+    llmMetrics?.requestId,
+  ]);
+  if (providerRequestIds.length > 0) {
+    setMetadata(span, attrs, "provider_request_ids", providerRequestIds);
+  }
+
+  for (const [metadataKey, value] of [
+    ["time_to_first_token_seconds", attrs[LK_RESPONSE_TTFT]],
+    ["time_to_first_byte_seconds", attrs[LK_RESPONSE_TTFB]],
+    ["completion_start_time", attrs[LANGFUSE_COMPLETION_START_TIME]],
+    ["llm_ttft_ms", llmMetrics?.ttftMs],
+    ["llm_duration_ms", llmMetrics?.durationMs],
+    ["llm_tokens_per_second", llmMetrics?.tokensPerSecond],
+    ["llm_cancelled", llmMetrics?.cancelled],
+    ["retry_count", attrs[LK_RETRY_COUNT]],
+    ["e2e_latency_seconds", attrs[LK_E2E_LATENCY]],
+  ] as const) {
+    if (value !== undefined && value !== null) {
+      setMetadata(span, attrs, metadataKey, value);
+    }
+  }
+}
+
+function setMetadata(
+  span: Span | undefined,
+  attrs: MutableAttributes,
+  key: string,
+  value: unknown,
+): void {
+  const existing = parseMaybeJson(
+    attrs[RespanSpanAttributes.RESPAN_METADATA],
+  );
+  const metadata =
+    existing !== null && typeof existing === "object" && !Array.isArray(existing)
+      ? { ...(existing as Record<string, unknown>) }
+      : {};
+  if (metadata[key] === undefined) {
+    metadata[key] = value;
+  }
+  setAttr(
+    span,
+    attrs,
+    RespanSpanAttributes.RESPAN_METADATA,
+    safeJson(metadata),
+  );
+}
+
+function normalizeProviderRequestIds(values: unknown[]): string[] {
+  const requestIds = new Set<string>();
+  for (const value of values) {
+    const parsed = parseMaybeJson(value);
+    const items = Array.isArray(parsed) ? parsed : [parsed];
+    for (const item of items) {
+      if (typeof item === "string" && item.length > 0) {
+        requestIds.add(item);
+      }
+    }
+  }
+  return [...requestIds];
+}
+
+function addPromptAttributes(span: Span | undefined, attrs: MutableAttributes, chatCtx?: ChatContextJson): void {
   const items = Array.isArray(chatCtx?.items) ? chatCtx.items : [];
   let promptIndex = 0;
   for (const item of items) {
@@ -420,7 +498,7 @@ function addPromptAttributes(span: Span, attrs: MutableAttributes, chatCtx?: Cha
   }
 }
 
-function addToolDefinitionAttributes(span: Span, attrs: MutableAttributes): void {
+function addToolDefinitionAttributes(span: Span | undefined, attrs: MutableAttributes): void {
   const toolNames = parseMaybeJson(attrs[LK_FUNCTION_TOOLS]);
   if (!Array.isArray(toolNames) || toolNames.length === 0) {
     return;
@@ -435,12 +513,12 @@ function addToolDefinitionAttributes(span: Span, attrs: MutableAttributes): void
   setAttr(span, attrs, SpanAttributes.LLM_REQUEST_FUNCTIONS, safeJson(toolDefinitions));
 }
 
-function addCompletionAttributes(span: Span, attrs: MutableAttributes, spanName: string): void {
+function addCompletionAttributes(span: Span | undefined, attrs: MutableAttributes): void {
   const responseText = stringAttr(attrs, LK_RESPONSE_TEXT);
   const rawCalls = parseMaybeJson(attrs[LK_RESPONSE_FUNCTION_CALLS]);
   const toolCalls = normalizeToolCalls(rawCalls);
 
-  if (responseText === undefined && toolCalls.length === 0 && spanName !== LIVEKIT_SPAN_NAMES.LLM_NODE) {
+  if (responseText === undefined && toolCalls.length === 0) {
     return;
   }
 
@@ -511,12 +589,12 @@ function normalizeProvider(provider: string): string {
   return provider.toLowerCase().replace(/\s+/g, "_");
 }
 
-function setAttr(span: Span, attrs: MutableAttributes, key: string, value: unknown): void {
+function setAttr(span: Span | undefined, attrs: MutableAttributes, key: string, value: unknown): void {
   if (value === undefined || value === null) {
     return;
   }
   attrs[key] = value;
-  span.setAttribute(key, value as any);
+  span?.setAttribute(key, value as any);
 }
 
 function stringAttr(attrs: MutableAttributes, key: string): string | undefined {
@@ -590,6 +668,32 @@ function compactRecord(record: Record<string, unknown>): Record<string, unknown>
     compacted[key] = value;
   }
   return compacted;
+}
+
+function hasEntityValue(value: unknown): boolean {
+  if (value === undefined || value === null || value === "") {
+    return false;
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+  if (typeof value === "object") {
+    return Object.keys(value).length > 0;
+  }
+  return true;
+}
+
+/** Remove LiveKit transport attributes after their canonical values are built. */
+export function stripLiveKitRawAttributes(attrs: MutableAttributes): void {
+  for (const key of Object.keys(attrs)) {
+    if (
+      key.startsWith(LIVEKIT_RAW_ATTRIBUTE_PREFIX) ||
+      key === LIVEKIT_SPAN_NAME_ATTRIBUTE ||
+      key === LANGFUSE_COMPLETION_START_TIME
+    ) {
+      delete attrs[key];
+    }
+  }
 }
 
 export function safeJson(value: unknown): string {

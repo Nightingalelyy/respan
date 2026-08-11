@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { trace } from "@opentelemetry/api";
+import { BasicTracerProvider } from "@opentelemetry/sdk-trace-base";
+import { RespanCompositeProcessor } from "../../../respan-tracing/dist/processor/composite.js";
 
 import {
   StrandsAgentsInstrumentor,
@@ -226,59 +227,139 @@ test("enriches Strands graph and swarm spans as workflows", () => {
   assertNoOffContractAliases(graphSpan.attributes);
 });
 
-test("instrumentor wraps and restores the active span processor", () => {
+test("multiple instrumentors retain the semconv opt-in until the final owner deactivates", async () => {
+  const previousOptIn = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+  process.env.OTEL_SEMCONV_STABILITY_OPT_IN = "custom_semconv";
+
+  const manager = {
+    onStart() {},
+    onEnd() {},
+    async shutdown() {},
+    async forceFlush() {},
+  };
+  const composite = new RespanCompositeProcessor(manager);
+  const provider = new BasicTracerProvider({ spanProcessors: [composite] });
+  const first = new StrandsAgentsInstrumentor();
+  const second = new StrandsAgentsInstrumentor();
+
+  try {
+    first.activate();
+    second.activate();
+    assert.equal(
+      process.env.OTEL_SEMCONV_STABILITY_OPT_IN,
+      "custom_semconv,gen_ai_tool_definitions",
+    );
+
+    first.deactivate();
+    assert.equal(second.isActive(), true);
+    assert.equal(
+      process.env.OTEL_SEMCONV_STABILITY_OPT_IN,
+      "custom_semconv,gen_ai_tool_definitions",
+      "one owner cannot remove an opt-in still needed by another",
+    );
+
+    second.deactivate();
+    assert.equal(
+      process.env.OTEL_SEMCONV_STABILITY_OPT_IN,
+      "custom_semconv",
+      "the final owner restores the exact original value",
+    );
+  } finally {
+    first.deactivate();
+    second.deactivate();
+    await provider.shutdown();
+    if (previousOptIn === undefined) {
+      delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+    } else {
+      process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousOptIn;
+    }
+  }
+});
+
+test("OTel 2.10 cached tracers translate complete events and drain in-flight spans", async () => {
   const delegatedSpans = [];
-  const originalProcessor = {
+  const manager = {
     onStart() {},
     onEnd(span) {
       delegatedSpans.push(span);
     },
-    shutdown() {
-      return Promise.resolve();
-    },
-    forceFlush() {
-      return Promise.resolve();
-    },
+    async shutdown() {},
+    async forceFlush() {},
   };
-  const provider = { activeSpanProcessor: originalProcessor };
-  const originalGetTracerProvider = trace.getTracerProvider.bind(trace);
-
-  Object.defineProperty(trace, "getTracerProvider", {
-    configurable: true,
-    writable: true,
-    value: () => provider,
-  });
-
+  const composite = new RespanCompositeProcessor(manager);
+  const provider = new BasicTracerProvider({ spanProcessors: [composite] });
+  const tracerBeforeActivation = provider.getTracer("strands-agents");
+  const activeProcessorBefore = provider._activeSpanProcessor;
   const previousOptIn = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
   const instrumentor = new StrandsAgentsInstrumentor();
   try {
     instrumentor.activate();
-    assert.notEqual(provider.activeSpanProcessor, originalProcessor);
+    assert.equal(provider._activeSpanProcessor, activeProcessorBefore);
     assert.ok(
       process.env.OTEL_SEMCONV_STABILITY_OPT_IN.includes(
         "gen_ai_tool_definitions",
       ),
     );
 
-    const span = makeSpan({
-      name: "chat",
+    const span = tracerBeforeActivation.startSpan("chat", {
+      attributes: {
+        "gen_ai.system": "strands-agents",
+        "gen_ai.operation.name": "chat",
+        "gen_ai.request.model": "gpt-4.1-nano",
+        "gen_ai.usage.input_tokens": 8,
+        "gen_ai.usage.output_tokens": 3,
+      },
+    });
+    span.addEvent(EVENT_USER_MESSAGE, {
+      content: JSON.stringify([{ text: "hello from Strands" }]),
+    });
+    span.addEvent(EVENT_CHOICE, { message: "hello back" });
+    span.end();
+
+    assert.equal(delegatedSpans.length, 1);
+    assert.equal(delegatedSpans[0].attributes[RESPAN_LOG_TYPE], "chat");
+    assert.deepEqual(JSON.parse(delegatedSpans[0].attributes[ENTITY_INPUT]), [
+      { role: "user", content: "hello from Strands" },
+    ]);
+    assert.deepEqual(JSON.parse(delegatedSpans[0].attributes[ENTITY_OUTPUT]), [
+      { role: "assistant", content: "hello back" },
+    ]);
+    assert.equal(delegatedSpans[0].attributes["gen_ai.operation.name"], undefined);
+    assert.equal(delegatedSpans[0].attributes["gen_ai.usage.input_tokens"], 8);
+    assertNoOffContractAliases(delegatedSpans[0].attributes);
+
+    const tracerAfterActivation = provider.getTracer("strands-agents.after");
+    const draining = tracerAfterActivation.startSpan("chat", {
       attributes: {
         "gen_ai.system": "strands-agents",
         "gen_ai.operation.name": "chat",
         "gen_ai.request.model": "gpt-4.1-nano",
       },
     });
-    provider.activeSpanProcessor.onEnd(span);
+    draining.addEvent(EVENT_USER_MESSAGE, {
+      content: JSON.stringify([{ text: "drain me" }]),
+    });
+    draining.addEvent(EVENT_CHOICE, { message: "drained" });
+    instrumentor.deactivate();
+    draining.end();
+    assert.equal(delegatedSpans[1].attributes[RESPAN_LOG_TYPE], "chat");
+    assert.match(delegatedSpans[1].attributes[ENTITY_OUTPUT], /drained/);
 
-    assert.equal(delegatedSpans.length, 1);
-    assert.equal(delegatedSpans[0].attributes[RESPAN_LOG_TYPE], "chat");
+    tracerBeforeActivation.startSpan("chat", {
+      attributes: {
+        "gen_ai.system": "strands-agents",
+        "gen_ai.operation.name": "chat",
+        "gen_ai.request.model": "raw-after-deactivation",
+      },
+    }).end();
+    assert.equal(delegatedSpans[2].attributes[RESPAN_LOG_TYPE], undefined);
+    assert.equal(
+      delegatedSpans[2].attributes["gen_ai.operation.name"],
+      "chat",
+    );
   } finally {
     instrumentor.deactivate();
-    Object.defineProperty(trace, "getTracerProvider", {
-      configurable: true,
-      writable: true,
-      value: originalGetTracerProvider,
-    });
+    await provider.shutdown();
     if (previousOptIn === undefined) {
       delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
     } else {
@@ -286,5 +367,40 @@ test("instrumentor wraps and restores the active span processor", () => {
     }
   }
 
-  assert.equal(provider.activeSpanProcessor, originalProcessor);
+  if (previousOptIn === undefined) {
+    assert.equal(process.env.OTEL_SEMCONV_STABILITY_OPT_IN, undefined);
+  } else {
+    assert.equal(process.env.OTEL_SEMCONV_STABILITY_OPT_IN, previousOptIn);
+  }
+});
+
+test("failed activation releases semconv ownership and restores the exact environment", () => {
+  const previousOptIn = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+  process.env.OTEL_SEMCONV_STABILITY_OPT_IN = "existing_b,existing_a";
+  const noHost = new StrandsAgentsInstrumentor();
+
+  try {
+    assert.throws(
+      () => noHost.activate(),
+      /No compatible Respan span-transformer host is active/,
+    );
+    assert.equal(noHost.isActive(), false);
+    assert.equal(
+      process.env.OTEL_SEMCONV_STABILITY_OPT_IN,
+      "existing_b,existing_a",
+    );
+
+    noHost.deactivate();
+    assert.equal(
+      process.env.OTEL_SEMCONV_STABILITY_OPT_IN,
+      "existing_b,existing_a",
+      "deactivate after a failed activation is a no-op",
+    );
+  } finally {
+    if (previousOptIn === undefined) {
+      delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+    } else {
+      process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousOptIn;
+    }
+  }
 });

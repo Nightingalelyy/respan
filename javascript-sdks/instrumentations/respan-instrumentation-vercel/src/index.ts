@@ -1,9 +1,8 @@
 /**
  * Respan instrumentation plugin for the Vercel AI SDK.
  *
- * Registers a {@link VercelAITranslator} SpanProcessor that enriches Vercel AI SDK
- * OTEL spans with Traceloop/GenAI semantic conventions so they flow through the
- * unified Respan OTEL pipeline.
+ * Registers a {@link VercelAITranslator} with the Respan span-transformer
+ * registry so Vercel AI SDK OTEL spans are enriched before filtering/export.
  *
  * AI SDK 4-6 emit OTEL spans when experimental_telemetry is enabled. AI SDK 7
  * emits them through @ai-sdk/otel, which this instrumentor registers when that
@@ -21,7 +20,8 @@
  * ```
  */
 
-import { trace } from "@opentelemetry/api";
+import * as RespanTracing from "@respan/tracing";
+import type { SpanTransformerRegistration } from "@respan/tracing";
 import {
   ensureAISDKTelemetry,
   releaseOwnedAISDKTelemetry,
@@ -44,15 +44,15 @@ export interface VercelAIInstrumentorOptions {
   autoRegisterAISDKTelemetry?: boolean;
 }
 
+const VERCEL_TRANSFORMER_KEY = "@respan/instrumentation-vercel";
+const SHARED_VERCEL_TRANSLATOR = new VercelAITranslator();
+
 export class VercelAIInstrumentor {
   public readonly name = "vercel-ai";
 
-  /** Each live TracerProvider owns one shared translator processor. */
-  private static readonly _translatorProviders = new WeakMap<object, VercelAITranslator>();
-
   private readonly _autoRegisterAISDKTelemetry: boolean;
   private _aiSDKTelemetryLease: OwnedAISDKTelemetryLease | undefined;
-  private _translator: VercelAITranslator | undefined;
+  private _transformerRegistration: SpanTransformerRegistration | undefined;
   private _activationGeneration = 0;
   private _active = false;
 
@@ -73,34 +73,7 @@ export class VercelAIInstrumentor {
     const activationGeneration = ++this._activationGeneration;
 
     try {
-      // Walk the TracerProvider chain to find one that supports addSpanProcessor.
-      // trace.getTracerProvider() returns a ProxyTracerProvider; the real
-      // NodeTracerProvider lives at ._delegate (or ._delegate._tracerProvider).
-      const tp = trace.getTracerProvider() as any;
-      const provider =
-        (typeof tp?.addSpanProcessor === "function" && tp) ||
-        (typeof tp?._delegate?.addSpanProcessor === "function" && tp._delegate) ||
-        (typeof tp?._delegate?._tracerProvider?.addSpanProcessor === "function" &&
-          tp._delegate._tracerProvider) ||
-        null;
-
-      if (provider) {
-        let translator = VercelAIInstrumentor._translatorProviders.get(provider);
-        if (!translator) {
-          // NOTE: The translator is registered AFTER CompositeProcessor (which was
-          // added during startTracing). This means CompositeProcessor.onEnd routes
-          // spans to BatchSpanProcessor before our onEnd enriches them. This works
-          // because BatchSpanProcessor holds span references and exports async —
-          // our enrichment completes before the next batch flush. If
-          // SimpleSpanProcessor is ever used, the translator must register first.
-          translator = new VercelAITranslator({ initiallyActive: false });
-          provider.addSpanProcessor(translator);
-          VercelAIInstrumentor._translatorProviders.set(provider, translator);
-        }
-
-        translator.acquire();
-        this._translator = translator;
-      }
+      this._transformerRegistration = registerVercelTransformer();
 
       if (this._autoRegisterAISDKTelemetry && !this._aiSDKTelemetryLease) {
         const registration = await this._ensureAISDKTelemetry();
@@ -118,14 +91,14 @@ export class VercelAIInstrumentor {
         this._aiSDKTelemetryLease = registration.lease;
       }
     } catch (error) {
-      // A failed optional-adapter activation must leave this instance retryable
-      // and must return its translator ownership to the shared provider state.
+      // A failed registry or optional-adapter activation must leave this
+      // instance retryable and return every lease acquired by this attempt.
       if (activationGeneration === this._activationGeneration) {
         this._active = false;
         this._activationGeneration += 1;
-        if (this._translator) {
-          this._translator.release();
-          this._translator = undefined;
+        if (this._transformerRegistration) {
+          this._transformerRegistration.unregister();
+          this._transformerRegistration = undefined;
         }
         if (this._aiSDKTelemetryLease) {
           releaseOwnedAISDKTelemetry(this._aiSDKTelemetryLease);
@@ -139,12 +112,9 @@ export class VercelAIInstrumentor {
     this._active = false;
     this._activationGeneration += 1;
 
-    // The provider retains its single processor until shutdown. Releasing this
-    // owner's lease disables translation only after the final active owner
-    // deactivates, and later activation reuses the same processor.
-    if (this._translator) {
-      this._translator.release();
-      this._translator = undefined;
+    if (this._transformerRegistration) {
+      this._transformerRegistration.unregister();
+      this._transformerRegistration = undefined;
     }
 
     if (this._aiSDKTelemetryLease) {
@@ -152,4 +122,25 @@ export class VercelAIInstrumentor {
       this._aiSDKTelemetryLease = undefined;
     }
   }
+
+  isActive(): boolean {
+    return this._active;
+  }
+}
+
+function registerVercelTransformer(): SpanTransformerRegistration {
+  const registerSpanTransformer = (RespanTracing as Record<string, unknown>)[
+    "registerSpanTransformer"
+  ];
+  if (typeof registerSpanTransformer !== "function") {
+    throw new Error(
+      "@respan/instrumentation-vercel requires a compatible @respan/tracing " +
+      "runtime with registerSpanTransformer(). Upgrade @respan/tracing before activation.",
+    );
+  }
+
+  return (registerSpanTransformer as typeof RespanTracing.registerSpanTransformer)(
+    VERCEL_TRANSFORMER_KEY,
+    SHARED_VERCEL_TRANSLATOR,
+  );
 }

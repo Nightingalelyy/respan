@@ -1,7 +1,6 @@
-import type { Context } from "@opentelemetry/api";
+import type { Context, Span } from "@opentelemetry/api";
 import type {
   ReadableSpan,
-  Span,
   SpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 import {

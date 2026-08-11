@@ -34,6 +34,7 @@
     "@opentelemetry/sdk-trace-base": "^2.10.0",
     "@opentelemetry/semantic-conventions": "^1.43.0",
     "@respan/respan-sdk": "^1.1.7",
+    "@respan/tracing": "workspace:^",
     "@traceloop/ai-semantic-conventions": "^0.13.0"
   },
   "peerDependencies": {
