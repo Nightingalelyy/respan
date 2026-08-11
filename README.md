@@ -1,9 +1,9 @@
 <p align="center">
 <a href="https://www.respan.ai#gh-light-mode-only">
-<img width="800" src="https://cdn.respan.ai/Respan-Brand-Assets/wordmark-light.png">
+<img width="800" src="https://cdn.respan.ai/Respan-Brand-Assets/wordmark-dark.png">
 </a>
 <a href="https://www.respan.ai#gh-dark-mode-only">
-<img width="800" src="https://cdn.respan.ai/Respan-Brand-Assets/wordmark-dark.png">
+<img width="800" src="https://cdn.respan.ai/Respan-Brand-Assets/wordmark-light.png">
 </a>
 </p>
 <p align="center">
