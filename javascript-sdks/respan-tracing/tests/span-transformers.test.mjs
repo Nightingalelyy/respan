@@ -264,3 +264,53 @@ test("final host shutdown disposes active registrations and resets availability"
     /No compatible Respan span-transformer host is active/,
   );
 });
+
+test("an abandoned span (started, never ended) releases the drain barrier once collected", async (t) => {
+  if (typeof global.gc !== "function") {
+    t.skip("requires `node --expose-gc` to force collection");
+    return;
+  }
+
+  const { manager, provider } = createHarness();
+  const tracer = provider.getTracer("test.abandoned");
+  let disposeCount = 0;
+
+  const registration = registerSpanTransformer("test.abandoned", {
+    onStart(span) {
+      span.setAttribute(LOG_TYPE, "task");
+    },
+    onEnd() {},
+    dispose() {
+      disposeCount += 1;
+    },
+  });
+
+  // Start a span and drop every strong reference to it WITHOUT ending it.
+  (() => {
+    tracer.startSpan("raw.abandoned", { attributes: { [RAW_MODEL]: "abandoned" } });
+  })();
+  // The recording manager also retained the span via onStart; release it so
+  // only the registry's weak references remain.
+  manager.started.length = 0;
+
+  registration.unregister();
+  assert.equal(
+    disposeCount,
+    0,
+    "an in-flight (even if abandoned) span still holds the disposal barrier",
+  );
+
+  // Force GC and let the FinalizationRegistry callback run.
+  for (let i = 0; i < 50 && disposeCount === 0; i += 1) {
+    global.gc();
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  assert.equal(
+    disposeCount,
+    1,
+    "collecting the abandoned span drains the barrier and disposes the entry",
+  );
+
+  await provider.shutdown();
+});

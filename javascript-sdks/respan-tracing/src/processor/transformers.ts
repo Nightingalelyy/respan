@@ -1,4 +1,4 @@
-import { diag, type Context, type Span } from "@opentelemetry/api";
+import { type Context, type Span } from "@opentelemetry/api";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
 
 /**
@@ -31,12 +31,44 @@ interface TransformerEntry {
   disposed: boolean;
 }
 
+/**
+ * Per-span record of the entries whose `inFlightCount` a started span holds,
+ * plus whether that hold has already been released (by `onEnd` or by GC).
+ */
+interface InFlightHold {
+  readonly entries: readonly TransformerEntry[];
+  settled: boolean;
+}
+
 interface SpanTransformerRegistryState {
   readonly entries: Map<string, TransformerEntry>;
   readonly retainedEntries: Set<TransformerEntry>;
   spanSnapshots: WeakMap<object, readonly TransformerEntry[]>;
+  /** Live hold per started span, so `onEnd` can settle the GC watch. */
+  inFlightHolds: WeakMap<object, InFlightHold>;
+  /**
+   * Releases the drain barrier for spans that start but are never ended
+   * (abandoned/leaked). Without this, a single un-`end()`ed span would pin
+   * `inFlightCount` forever and block disposal on `unregister()`.
+   */
+  abandonedSpanWatch: FinalizationRegistry<InFlightHold>;
   hostCount: number;
   readonly version: 1;
+}
+
+/** Release an in-flight hold exactly once, decrementing and draining entries. */
+function settleInFlightHold(
+  state: SpanTransformerRegistryState,
+  hold: InFlightHold,
+): void {
+  if (hold.settled) {
+    return;
+  }
+  hold.settled = true;
+  for (const entry of hold.entries) {
+    entry.inFlightCount = Math.max(0, entry.inFlightCount - 1);
+    disposeEntryIfReady(state, entry);
+  }
 }
 
 /**
@@ -155,6 +187,7 @@ export function releaseSpanTransformerHost(): void {
     }
     state.retainedEntries.clear();
     state.spanSnapshots = new WeakMap();
+    state.inFlightHolds = new WeakMap();
   }
 }
 
@@ -171,6 +204,16 @@ export function runSpanTransformersOnStart(
   state.spanSnapshots.set(span as object, entries);
   for (const entry of entries) {
     entry.inFlightCount += 1;
+  }
+
+  // Track the hold so an abandoned span (started but never ended) still
+  // releases the drain barrier once it is garbage-collected. onEnd settles
+  // this synchronously; the FinalizationRegistry is the fallback.
+  if (entries.length > 0) {
+    const spanObject = span as object;
+    const hold: InFlightHold = { entries, settled: false };
+    state.inFlightHolds.set(spanObject, hold);
+    state.abandonedSpanWatch.register(spanObject, hold, spanObject);
   }
 
   for (const entry of entries) {
@@ -244,9 +287,21 @@ export function runSpanTransformersOnEnd(
 
     return exportSpan;
   } finally {
-    for (const entry of entries) {
-      entry.inFlightCount = Math.max(0, entry.inFlightCount - 1);
-      disposeEntryIfReady(state, entry);
+    const hold = hasStartSnapshot
+      ? state.inFlightHolds.get(spanObject)
+      : undefined;
+    if (hold) {
+      // Started span: release the hold registered at onStart exactly once and
+      // cancel its GC watch (settle decrements inFlightCount and drains).
+      state.inFlightHolds.delete(spanObject);
+      state.abandonedSpanWatch.unregister(spanObject);
+      settleInFlightHold(state, hold);
+    } else {
+      // Synthetic span (no onStart hold): decrement the counts raised above.
+      for (const entry of entries) {
+        entry.inFlightCount = Math.max(0, entry.inFlightCount - 1);
+        disposeEntryIfReady(state, entry);
+      }
     }
   }
 }
@@ -264,9 +319,16 @@ function getRegistryState(): SpanTransformerRegistryState {
     entries: new Map(),
     retainedEntries: new Set(),
     spanSnapshots: new WeakMap(),
+    inFlightHolds: new WeakMap(),
+    abandonedSpanWatch: undefined as unknown as FinalizationRegistry<InFlightHold>,
     hostCount: 0,
     version: 1,
   };
+  // The watch callback fires when an abandoned span is collected; it releases
+  // that span's drain hold. It is a no-op for spans already settled by onEnd.
+  state.abandonedSpanWatch = new FinalizationRegistry<InFlightHold>((hold) => {
+    settleInFlightHold(state, hold);
+  });
   Object.defineProperty(
     registryGlobal,
     RESPAN_SPAN_TRANSFORMER_REGISTRY_SYMBOL,
@@ -285,7 +347,11 @@ function sortedActiveEntries(
 ): readonly TransformerEntry[] {
   return [...state.entries.values()]
     .filter((entry) => entry.referenceCount > 0)
-    .sort((left, right) => left.key.localeCompare(right.key));
+    // Code-point order, not locale-sensitive localeCompare, so dotted keys like
+    // "respan.openai" order identically across ICU/locale environments.
+    .sort((left, right) =>
+      left.key < right.key ? -1 : left.key > right.key ? 1 : 0,
+    );
 }
 
 function reportTransformerError(
@@ -294,8 +360,13 @@ function reportTransformerError(
   error: unknown,
 ): void {
   const message = error instanceof Error ? error.message : String(error);
-  diag.warn(
-    `[Respan] Span transformer "${key}" failed during ${phase}; continuing export: ${message}`,
+  // Use console.error (matching RespanCompositeProcessor's postprocess-error
+  // path) rather than diag.warn: startTracing installs a diag logger whose
+  // warn() is a no-op, which would otherwise swallow every isolated hook
+  // failure silently in production.
+  console.error(
+    `[Respan] Span transformer "${key}" failed during ${phase}; continuing export:`,
+    error,
   );
 }
 
