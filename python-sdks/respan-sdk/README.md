@@ -1,6 +1,6 @@
 ## Respan SDK
 
-**[respan.ai](https://respan.ai)** | **[Documentation](https://docs.respan.ai)** | **[PyPI](https://pypi.org/project/respan-sdk/)**
+**[respan.ai](https://respan.ai)** | **[Documentation](https://www.respan.ai/docs)** | **[PyPI](https://pypi.org/project/respan-sdk/)**
 
 Light weight library for Respan type definitions and API payload preprocessing
 
@@ -10,7 +10,7 @@ Features:
 - Conversion, converting input types from Anthropic API format into OpenAI API format.
 - **Filter types** — typed vocabulary for the Respan filter system, shared across BE and SDKs.
 
-For **tracing**, please go to [Respan Tracing](https://github.com/respan-ai/respan-sdks/tree/main/python-sdks/respan-tracing) instead.
+For **tracing**, please go to [Respan Tracing](https://github.com/respanai/respan/tree/main/python-sdks/respan-tracing) instead.
 
 ### Filter Types
 

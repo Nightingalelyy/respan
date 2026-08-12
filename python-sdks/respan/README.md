@@ -1,6 +1,6 @@
 # Respan Python SDK
 
-**[respan.ai](https://respan.ai)** | **[Documentation](https://docs.respan.ai)** | **[PyPI](https://pypi.org/project/respan-ai/)**
+**[respan.ai](https://respan.ai)** | **[Documentation](https://www.respan.ai/docs)** | **[PyPI](https://pypi.org/project/respan-ai/)**
 
 `respan-ai` is the unified Python entry point for Respan tracing, decorators, context propagation, and first-party instrumentation plugins. It automatically discovers eligible direct LLM SDK adapters while keeping frameworks, agents, wrappers, and observability bridges explicit to avoid duplicate spans.
 
@@ -160,5 +160,5 @@ Apache 2.0 — see the repository [LICENSE](../../LICENSE).
 ## Support
 
 - Email: [team@respan.ai](mailto:team@respan.ai)
-- Documentation: [https://docs.respan.ai](https://docs.respan.ai)
+- Documentation: [https://www.respan.ai/docs](https://www.respan.ai/docs)
 - Issues: [GitHub Issues](https://github.com/respanai/respan/issues)

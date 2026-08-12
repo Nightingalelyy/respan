@@ -33,5 +33,5 @@ dev = ["pytest", "python-dotenv"]
 
 [tool.poetry.urls]
 Homepage = "https://respan.ai"
-Repository = "https://github.com/respan-ai/respan-sdks.git"
-Documentation = "https://docs.respan.ai"
+Repository = "https://github.com/respanai/respan.git"
+Documentation = "https://www.respan.ai/docs"

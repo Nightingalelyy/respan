@@ -1,9 +1,9 @@
 <p align="center">
 <a href="https://www.respan.ai#gh-light-mode-only">
-<img width="800" src="https://respan-static.s3.us-east-1.amazonaws.com/social_media_images/logo-header.jpg">
+<img width="800" src="https://cdn.respan.ai/Respan-Brand-Assets/wordmark-dark.png">
 </a>
 <a href="https://www.respan.ai#gh-dark-mode-only">
-<img width="800" src="https://respan-static.s3.us-east-1.amazonaws.com/social_media_images/logo-header-dark.jpg">
+<img width="800" src="https://cdn.respan.ai/Respan-Brand-Assets/wordmark-light.png">
 </a>
 </p>
 <p align="center">
@@ -13,7 +13,7 @@
 <div align="center">
   <a href="https://www.ycombinator.com/companies/respan"><img src="https://img.shields.io/badge/Y%20Combinator-W24-orange" alt="Y Combinator W24"></a>
   <a href="https://www.respan.ai"><img src="https://img.shields.io/badge/Platform-green.svg?style=flat-square" alt="Platform" style="height: 20px;"></a>
-  <a href="https://docs.respan.ai/get-started/overview"><img src="https://img.shields.io/badge/Documentation-blue.svg?style=flat-square" alt="Documentation" style="height: 20px;"></a>
+  <a href="https://www.respan.ai/docs/documentation/get-started/quickstart"><img src="https://img.shields.io/badge/Documentation-blue.svg?style=flat-square" alt="Documentation" style="height: 20px;"></a>
   <a href="https://x.com/respan/"><img src="https://img.shields.io/twitter/follow/respan?style=social" alt="Twitter" style="height: 20px;"></a>
   <a href="https://discord.com/invite/KEanfAafQQ"><img src="https://img.shields.io/badge/discord-7289da.svg?style=flat-square&logo=discord" alt="Discord" style="height: 20px;"></a>
 
@@ -21,7 +21,7 @@
 
 # Respan Tracing
 <div align="center">
-<img src="https://respan-static.s3.us-east-1.amazonaws.com/social_media_images/github-cover.jpg" width="800"></img>
+<img src="https://cdn.respan.ai/respan_landing/respan/og-home-tracing.png" width="800"></img>
 </div>
 
 Respan's library for sending telemetries of LLM applications in [OpenLLMetry](https://github.com/traceloop/openllmetry) format.
@@ -30,9 +30,9 @@ Respan's library for sending telemetries of LLM applications in [OpenLLMetry](ht
 ## Integrations
 <div align="center" style="background-color: white; padding: 20px; border-radius: 10px; margin: 0 auto; max-width: 800px;">
   <div style="display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 120px; margin-bottom: 20px;">
-    <a href="https://docs.respan.ai/features/monitoring/traces/integrations/openai-agents-sdk"><img src="https://respan-static.s3.us-east-1.amazonaws.com/github/openai-agents-sdk.jpg" height="45" alt="OpenAI Agents SDK"></a>
-        <a href="https://docs.respan.ai/features/monitoring/traces/integrations/langgraph"><img src="https://respan-static.s3.us-east-1.amazonaws.com/github/langgraph.jpg" height="45" alt="LangGraph"></a>
-    <a href="https://docs.respan.ai/features/monitoring/traces/integrations/vercel-ai-sdk"><img src="https://respan-static.s3.us-east-1.amazonaws.com/github/vercel.jpg" height="45" alt="Vercel AI SDK"></a>
+    <a href="https://www.respan.ai/docs/integrations/openai-agents-sdk"><img src="https://cdn.respan.ai/github/openai-agents-sdk.jpg" height="45" alt="OpenAI Agents SDK"></a>
+        <a href="https://www.respan.ai/docs/integrations/langgraph"><img src="https://cdn.respan.ai/github/langgraph.jpg" height="45" alt="LangGraph"></a>
+    <a href="https://www.respan.ai/docs/integrations/vercel-ai-sdk"><img src="https://cdn.respan.ai/github/vercel.jpg" height="45" alt="Vercel AI SDK"></a>
   </div>
 
 </div>
@@ -125,7 +125,7 @@ await respan.shutdown();
 See your traces in the [Respan platform](https://platform.respan.ai).
 
 <div align="center">
-<img src="https://respan-static.s3.us-east-1.amazonaws.com/github/traces-output.png" width="800"> </img>
+<img src="https://cdn.respan.ai/github/traces-output.png" width="800"> </img>
 </div>
 
 ## Further Reading

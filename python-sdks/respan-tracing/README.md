@@ -1,6 +1,6 @@
 # Building an LLM Workflow with Respan Tracing
 
-**[respan.ai](https://respan.ai)** | **[Documentation](https://docs.respan.ai)** | **[PyPI](https://pypi.org/project/respan-tracing/)**
+**[respan.ai](https://respan.ai)** | **[Documentation](https://www.respan.ai/docs)** | **[PyPI](https://pypi.org/project/respan-tracing/)**
 
 This tutorial demonstrates how to build and trace complex LLM workflows using Respan Tracing. We'll create an example that generates jokes, translates them to pirate language, and simulates audience reactions - all while capturing detailed telemetry of our LLM calls.
 

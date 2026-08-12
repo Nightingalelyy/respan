@@ -313,6 +313,6 @@ if __name__ == "__main__":
 
     print("\n🎉 All examples completed!")
     print("\nFor more information, check out:")
-    print("- Respan Documentation: https://docs.respan.ai")
-    print("- API Reference: https://docs.respan.ai/api")
-    print("- Testing Guide: https://github.com/Repsan/respan/blob/main/python-sdks/respan/TESTING_STRATEGY.md")
+    print("- Respan Documentation: https://www.respan.ai/docs")
+    print("- API Reference: https://www.respan.ai/docs")
+    print("- Testing Guide: https://github.com/respanai/respan/blob/main/python-sdks/respan/TESTING_STRATEGY.md")

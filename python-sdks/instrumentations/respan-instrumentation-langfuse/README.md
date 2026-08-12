@@ -1,6 +1,6 @@
 # Respan Instrumentation for Langfuse
 
-**[respan.ai](https://respan.ai)** | **[Documentation](https://docs.respan.ai)** | **[PyPI](https://pypi.org/project/respan-instrumentation-langfuse/)**
+**[respan.ai](https://respan.ai)** | **[Documentation](https://www.respan.ai/docs)** | **[PyPI](https://pypi.org/project/respan-instrumentation-langfuse/)**
 
 **OTEL-compliant** automatic instrumentation for Langfuse to send traces to Respan.
 
@@ -200,6 +200,6 @@ Apache 2.0
 
 ## Support
 
-- Documentation: https://docs.respan.ai
-- Issues: https://github.com/Repsan/respan/issues
+- Documentation: https://www.respan.ai/docs
+- Issues: https://github.com/respanai/respan/issues
 - Email: support@respan.ai
