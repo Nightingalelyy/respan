@@ -1,4 +1,4 @@
-import { Context } from "@opentelemetry/api";
+import { Context, Span } from "@opentelemetry/api";
 import {
   SpanProcessor,
   ReadableSpan,
@@ -11,6 +11,12 @@ import {
 import { MultiProcessorManager } from "./manager.js";
 import { getEntityPath, getPropagatedAttributes } from "../utils/context.js";
 import { metadataAttributeKey, LOG_PREFIX, LOG_PREFIX_DEBUG, LOG_PREFIX_ERROR } from "../constants/index.js";
+import {
+  acquireSpanTransformerHost,
+  releaseSpanTransformerHost,
+  runSpanTransformersOnEnd,
+  runSpanTransformersOnStart,
+} from "./transformers.js";
 
 // ── LLM span name patterns ────────────────────────────────────────────────
 // Recognized span name substrings from auto-instrumentation libraries.
@@ -36,6 +42,8 @@ const LLM_SPAN_NAME_PATTERNS = [
 export class RespanCompositeProcessor implements SpanProcessor {
   private readonly _processorManager: MultiProcessorManager;
   private readonly _postprocessCallback?: (span: ReadableSpan) => void;
+  private _transformerHostReleased = false;
+  private _shutdownPromise?: Promise<void>;
 
   constructor(
     processorManager: MultiProcessorManager,
@@ -43,21 +51,27 @@ export class RespanCompositeProcessor implements SpanProcessor {
   ) {
     this._processorManager = processorManager;
     this._postprocessCallback = postprocessCallback;
+    acquireSpanTransformerHost();
   }
 
-  onStart(span: ReadableSpan, parentContext: Context): void {
+  onStart(span: Span, parentContext: Context): void {
+    runSpanTransformersOnStart(span, parentContext);
+    const readableSpan = span as unknown as ReadableSpan;
+
     // Check if this span is being created within an entity context
     // If so, add the entityPath attribute so it gets preserved by our filtering
     const entityPath = getEntityPath(parentContext);
-    if (entityPath && !span.attributes[SpanAttributes.TRACELOOP_SPAN_KIND]) {
+    if (
+      entityPath &&
+      !readableSpan.attributes[SpanAttributes.TRACELOOP_SPAN_KIND]
+    ) {
       // This is an auto-instrumentation span within an entity context
       // Add the entityPath attribute so it doesn't get filtered out
       console.debug(
-        `[Respan Debug] Adding entityPath to auto-instrumentation span: ${span.name} (entityPath: ${entityPath})`
+        `[Respan Debug] Adding entityPath to auto-instrumentation span: ${readableSpan.name} (entityPath: ${entityPath})`
       );
 
-      // We need to cast to any to set attributes during onStart
-      (span as any).setAttribute(SpanAttributes.TRACELOOP_ENTITY_PATH, entityPath);
+      span.setAttribute(SpanAttributes.TRACELOOP_ENTITY_PATH, entityPath);
     }
 
     // Apply propagated attributes (customer_identifier, thread_identifier, etc.)
@@ -70,24 +84,26 @@ export class RespanCompositeProcessor implements SpanProcessor {
 
         if (key === "metadata" && typeof value === "object") {
           for (const [mk, mv] of Object.entries(value as Record<string, any>)) {
-            (span as any).setAttribute(
+            span.setAttribute(
               metadataAttributeKey(mk),
               typeof mv === "string" ? mv : JSON.stringify(mv)
             );
           }
         } else if (key === "prompt" && typeof value === "object") {
-          (span as any).setAttribute(attrKey, JSON.stringify(value));
+          span.setAttribute(attrKey, JSON.stringify(value));
         } else {
-          (span as any).setAttribute(attrKey, value as any);
+          span.setAttribute(attrKey, value as any);
         }
       }
     }
 
     // Forward to processor manager
-    this._processorManager.onStart(span, parentContext);
+    this._processorManager.onStart(readableSpan, parentContext);
   }
 
   onEnd(span: ReadableSpan): void {
+    span = runSpanTransformersOnEnd(span);
+
     // Strip OTEL/infrastructure attributes that pollute metadata on the backend.
     const attrs = (span as any).attributes;
     if (attrs) {
@@ -209,7 +225,20 @@ export class RespanCompositeProcessor implements SpanProcessor {
   }
 
   async shutdown(): Promise<void> {
-    await this._processorManager.shutdown();
+    if (!this._shutdownPromise) {
+      this._shutdownPromise = (async () => {
+        try {
+          await this._processorManager.shutdown();
+        } finally {
+          if (!this._transformerHostReleased) {
+            this._transformerHostReleased = true;
+            releaseSpanTransformerHost();
+          }
+        }
+      })();
+    }
+
+    await this._shutdownPromise;
   }
 
   async forceFlush(): Promise<void> {

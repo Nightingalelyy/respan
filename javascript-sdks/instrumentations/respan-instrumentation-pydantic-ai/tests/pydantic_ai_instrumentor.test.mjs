@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { trace } from "@opentelemetry/api";
+import { BasicTracerProvider } from "@opentelemetry/sdk-trace-base";
+import { RespanCompositeProcessor } from "../../../respan-tracing/dist/processor/composite.js";
 
 import {
   PydanticAIInstrumentor,
@@ -216,55 +217,97 @@ test("does not translate generic GenAI spans without Pydantic AI evidence", () =
   assert.equal(span.attributes[RESPAN_LOG_TYPE], undefined);
 });
 
-test("instrumentor wraps and restores the active span processor", () => {
+test("OTel 2.10 cached tracers translate complete content and drain in-flight spans", async () => {
   const delegatedSpans = [];
-  const originalProcessor = {
+  const manager = {
     onStart() {},
     onEnd(span) {
       delegatedSpans.push(span);
     },
-    shutdown() {
-      return Promise.resolve();
-    },
-    forceFlush() {
-      return Promise.resolve();
-    },
+    async shutdown() {},
+    async forceFlush() {},
   };
-  const provider = { activeSpanProcessor: originalProcessor };
-  const originalGetTracerProvider = trace.getTracerProvider.bind(trace);
-
-  Object.defineProperty(trace, "getTracerProvider", {
-    configurable: true,
-    writable: true,
-    value: () => provider,
-  });
-
+  const composite = new RespanCompositeProcessor(manager);
+  const provider = new BasicTracerProvider({ spanProcessors: [composite] });
+  const tracerBeforeActivation = provider.getTracer("pydantic-ai");
+  const activeProcessorBefore = provider._activeSpanProcessor;
   const instrumentor = new PydanticAIInstrumentor();
   try {
     instrumentor.activate();
-    assert.notEqual(provider.activeSpanProcessor, originalProcessor);
+    assert.equal(provider._activeSpanProcessor, activeProcessorBefore);
 
-    const span = makeSpan({
-      name: "chat completion",
+    tracerBeforeActivation.startSpan("chat completion", {
       attributes: {
         "gen_ai.operation.name": "chat",
+        "gen_ai.request.model": "gpt-4o-mini",
         "gen_ai.input.messages": JSON.stringify([
           { role: "user", content: "hello" },
         ]),
+        "gen_ai.output.messages": JSON.stringify([
+          { role: "assistant", content: "hi" },
+        ]),
       },
-    });
-    provider.activeSpanProcessor.onEnd(span);
+    }).end();
 
     assert.equal(delegatedSpans.length, 1);
     assert.equal(delegatedSpans[0].attributes[RESPAN_LOG_TYPE], "chat");
+    assert.deepEqual(JSON.parse(delegatedSpans[0].attributes[ENTITY_INPUT]), [
+      { role: "user", content: "hello" },
+    ]);
+    assert.deepEqual(JSON.parse(delegatedSpans[0].attributes[ENTITY_OUTPUT]), [
+      { role: "assistant", content: "hi" },
+    ]);
+    assert.equal(
+      delegatedSpans[0].attributes["gen_ai.input.messages"],
+      undefined,
+    );
+    assert.equal(
+      delegatedSpans[0].attributes["gen_ai.output.messages"],
+      undefined,
+    );
+    assertNoOffContractAliases(delegatedSpans[0].attributes);
+
+    const tracerAfterActivation = provider.getTracer("pydantic-ai.after");
+    const draining = tracerAfterActivation.startSpan("chat completion", {
+      attributes: {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "gen_ai.input.messages": JSON.stringify([
+          { role: "user", content: "drain me" },
+        ]),
+        "gen_ai.output.messages": JSON.stringify([
+          { role: "assistant", content: "drained" },
+        ]),
+      },
+    });
+    instrumentor.deactivate();
+    draining.end();
+    assert.equal(delegatedSpans[1].attributes[RESPAN_LOG_TYPE], "chat");
+    assert.match(delegatedSpans[1].attributes[ENTITY_OUTPUT], /drained/);
+
+    tracerBeforeActivation.startSpan("chat completion", {
+      attributes: {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.request.model": "raw-after-deactivation",
+        "gen_ai.input.messages": JSON.stringify([
+          { role: "user", content: "raw" },
+        ]),
+      },
+    }).end();
+    assert.equal(delegatedSpans[2].attributes[RESPAN_LOG_TYPE], undefined);
+    assert.equal(
+      delegatedSpans[2].attributes["gen_ai.input.messages"],
+      JSON.stringify([{ role: "user", content: "raw" }]),
+    );
   } finally {
     instrumentor.deactivate();
-    Object.defineProperty(trace, "getTracerProvider", {
-      configurable: true,
-      writable: true,
-      value: originalGetTracerProvider,
-    });
+    await provider.shutdown();
   }
 
-  assert.equal(provider.activeSpanProcessor, originalProcessor);
+  const noHost = new PydanticAIInstrumentor();
+  assert.throws(
+    () => noHost.activate(),
+    /No compatible Respan span-transformer host is active/,
+  );
+  assert.equal(noHost.isActive(), false);
 });

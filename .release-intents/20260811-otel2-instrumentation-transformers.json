@@ -1,0 +1,12 @@
+{
+  "summary": "Restore OpenTelemetry 2.x translation and canonical span content for BeeAI, Eve, LiveKit, Pydantic AI, Strands, and Vercel instrumentations, backed by a public drain-safe tracing transformer registry.",
+  "packages": {
+    "@respan/instrumentation-beeai": "minor",
+    "@respan/instrumentation-eve": "patch",
+    "@respan/instrumentation-livekit": "patch",
+    "@respan/instrumentation-pydantic-ai": "patch",
+    "@respan/instrumentation-strands-agents": "patch",
+    "@respan/instrumentation-vercel": "minor",
+    "@respan/tracing": "minor"
+  }
+}

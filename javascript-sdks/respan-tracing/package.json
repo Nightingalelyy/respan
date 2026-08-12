@@ -15,6 +15,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "test": "npm run build && node --expose-gc --test tests/*.test.mjs",
     "watch:test": "tsc -p tsconfig.test.json --watch",
     "dev": "yarn build && cd examples && yarn dev",
     "examples:install": "cd examples && yarn install",

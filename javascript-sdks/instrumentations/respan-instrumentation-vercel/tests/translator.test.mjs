@@ -593,6 +593,13 @@ test("AI SDK 7 invoke_agent spans are structural agent roots", () => {
   assert.equal(attrs["respan.entity.log_type"], "agent");
   assert.equal(attrs["traceloop.entity.name"], "research-agent");
   assert.equal(attrs["traceloop.entity.path"], "");
+  assert.deepEqual(JSON.parse(attrs["traceloop.entity.input"]), [
+    { role: "user", content: "research this" },
+  ]);
+  assert.deepEqual(JSON.parse(attrs["traceloop.entity.output"]), {
+    role: "assistant",
+    content: "done",
+  });
   assertNoLLMSpecificAttrs(attrs);
   assertNoRawAIAttrs(attrs);
   assertNoOffContractAliases(attrs);
@@ -718,4 +725,216 @@ test("root wrapper children are marked for root promotion", () => {
   };
   translator.onStart(child, undefined);
   assert.equal(attributes["respan.internal.export_parent_span_id"], "");
+});
+
+function makeCorrelatedSpan({
+  name,
+  traceId,
+  spanId,
+  parentSpanId,
+  attributes = {},
+  scope = "gen_ai",
+}) {
+  const span = {
+    name,
+    attributes: { ...attributes },
+    instrumentationScope: { name: scope },
+    parentSpanContext: parentSpanId
+      ? { traceId, spanId: parentSpanId }
+      : undefined,
+    spanContext: () => ({ traceId, spanId }),
+    setAttribute(key, value) {
+      span.attributes[key] = value;
+    },
+  };
+  return span;
+}
+
+test("AI SDK 7 nested embeddings drop only the proven structural parent", () => {
+  const translator = new VercelAITranslator();
+  const root = makeCorrelatedSpan({
+    name: "embeddings probe-embedding",
+    traceId: "trace-embedding",
+    spanId: "embedding-root",
+    parentSpanId: "agent-root",
+    attributes: {
+      "gen_ai.operation.name": "embeddings",
+      "ai.value": "embed this",
+    },
+  });
+
+  translator.onStart(root, undefined);
+  assert.equal(root.attributes["respan.internal.drop_span"], undefined);
+
+  const child = makeCorrelatedSpan({
+    name: "embeddings probe-embedding",
+    traceId: "trace-embedding",
+    spanId: "embedding-child",
+    parentSpanId: "embedding-root",
+    attributes: {
+      "gen_ai.operation.name": "embeddings",
+      "ai.values": ["embed this"],
+      "ai.embeddings": [[0.1, 0.2, 0.3]],
+    },
+  });
+  translator.onStart(child, undefined);
+
+  assert.equal(root.attributes["respan.internal.drop_span"], true);
+  assert.equal(child.attributes["respan.internal.drop_span"], undefined);
+  assert.equal(
+    child.attributes["respan.internal.export_parent_span_id"],
+    "agent-root",
+  );
+
+  translator.onEnd(child);
+  translator.onEnd(root);
+  assert.equal(child.attributes["respan.entity.log_type"], "embedding");
+  assert.deepEqual(
+    JSON.parse(child.attributes["traceloop.entity.input"]),
+    ["embed this"],
+  );
+});
+
+test("AI SDK 7 standalone embeddings remain canonical export candidates", () => {
+  const translator = new VercelAITranslator();
+  const standalone = makeCorrelatedSpan({
+    name: "embeddings standalone-model",
+    traceId: "trace-standalone",
+    spanId: "standalone",
+    attributes: {
+      "gen_ai.operation.name": "embeddings",
+      "ai.value": "standalone input",
+      "ai.embedding": [0.4, 0.5],
+    },
+  });
+
+  translator.onStart(standalone, undefined);
+  translator.onEnd(standalone);
+
+  assert.equal(standalone.attributes["respan.internal.drop_span"], undefined);
+  assert.equal(standalone.attributes["respan.entity.log_type"], "embedding");
+  assert.equal(
+    standalone.attributes["traceloop.entity.input"],
+    "standalone input",
+  );
+  assert.deepEqual(
+    JSON.parse(standalone.attributes["traceloop.entity.output"]),
+    [0.4, 0.5],
+  );
+});
+
+for (const [wrapperName, childName] of [
+  ["ai.embed", "ai.embed.doEmbed"],
+  ["ai.embedMany", "ai.embedMany.doEmbed"],
+]) {
+  test(`${wrapperName} is a classic structural embedding wrapper`, () => {
+    const translator = new VercelAITranslator();
+    const wrapper = makeCorrelatedSpan({
+      name: wrapperName,
+      traceId: `trace-${wrapperName}`,
+      spanId: "classic-wrapper",
+      parentSpanId: "classic-agent",
+      scope: "ai",
+    });
+    const child = makeCorrelatedSpan({
+      name: childName,
+      traceId: `trace-${wrapperName}`,
+      spanId: "classic-child",
+      parentSpanId: "classic-wrapper",
+      attributes: {
+        "ai.values": ["classic input"],
+        "ai.embeddings": [[0.6, 0.7]],
+      },
+      scope: "ai",
+    });
+
+    translator.onStart(wrapper, undefined);
+    translator.onStart(child, undefined);
+
+    assert.equal(wrapper.attributes["respan.internal.drop_span"], true);
+    assert.equal(
+      child.attributes["respan.internal.export_parent_span_id"],
+      "classic-agent",
+    );
+    assert.equal(child.attributes["respan.entity.log_type"], "embedding");
+  });
+}
+
+test("embedding correlation is isolated by trace under concurrent reused span IDs", () => {
+  const translator = new VercelAITranslator();
+  const rootA = makeCorrelatedSpan({
+    name: "embeddings shared-model",
+    traceId: "trace-a",
+    spanId: "reused-root",
+    attributes: { "gen_ai.operation.name": "embeddings" },
+  });
+  const rootB = makeCorrelatedSpan({
+    name: "embeddings shared-model",
+    traceId: "trace-b",
+    spanId: "reused-root",
+    attributes: { "gen_ai.operation.name": "embeddings" },
+  });
+  translator.onStart(rootA, undefined);
+  translator.onStart(rootB, undefined);
+
+  const childA = makeCorrelatedSpan({
+    name: "embeddings shared-model",
+    traceId: "trace-a",
+    spanId: "child-a",
+    parentSpanId: "reused-root",
+    attributes: { "gen_ai.operation.name": "embeddings" },
+  });
+  translator.onStart(childA, undefined);
+
+  assert.equal(rootA.attributes["respan.internal.drop_span"], true);
+  assert.equal(rootB.attributes["respan.internal.drop_span"], undefined);
+  assert.equal(childA.attributes["respan.internal.export_parent_span_id"], "");
+});
+
+test("ended and disposed embedding candidates cannot capture later spans", () => {
+  const translator = new VercelAITranslator();
+  const ended = makeCorrelatedSpan({
+    name: "embeddings cleanup-model",
+    traceId: "trace-ended",
+    spanId: "candidate",
+    attributes: { "gen_ai.operation.name": "embeddings" },
+  });
+  translator.onStart(ended, undefined);
+  translator.onEnd(ended);
+  const lateAfterEnd = makeCorrelatedSpan({
+    name: ended.name,
+    traceId: "trace-ended",
+    spanId: "late-after-end",
+    parentSpanId: "candidate",
+    attributes: { "gen_ai.operation.name": "embeddings" },
+  });
+  translator.onStart(lateAfterEnd, undefined);
+  assert.equal(ended.attributes["respan.internal.drop_span"], undefined);
+  assert.equal(
+    lateAfterEnd.attributes["respan.internal.export_parent_span_id"],
+    undefined,
+  );
+
+  const disposed = makeCorrelatedSpan({
+    name: "embeddings cleanup-model",
+    traceId: "trace-disposed",
+    spanId: "candidate",
+    attributes: { "gen_ai.operation.name": "embeddings" },
+  });
+  translator.onStart(disposed, undefined);
+  translator.dispose();
+  translator.dispose();
+  const lateAfterDispose = makeCorrelatedSpan({
+    name: disposed.name,
+    traceId: "trace-disposed",
+    spanId: "late-after-dispose",
+    parentSpanId: "candidate",
+    attributes: { "gen_ai.operation.name": "embeddings" },
+  });
+  translator.onStart(lateAfterDispose, undefined);
+  assert.equal(disposed.attributes["respan.internal.drop_span"], undefined);
+  assert.equal(
+    lateAfterDispose.attributes["respan.internal.export_parent_span_id"],
+    undefined,
+  );
 });

@@ -6,11 +6,15 @@
  *
  * ```typescript
  * import * as beeaiFramework from "beeai-framework";
+ * import { BeeAIInstrumentation as OpenInferenceBeeAIInstrumentation } from "@arizeai/openinference-instrumentation-beeai";
  * import { Respan } from "@respan/respan";
  * import { BeeAIInstrumentor } from "@respan/instrumentation-beeai";
  *
  * const respan = new Respan({
- *   instrumentations: [new BeeAIInstrumentor({ sdkModule: beeaiFramework })],
+ *   instrumentations: [new BeeAIInstrumentor({
+ *     sdkModule: beeaiFramework,
+ *     instrumentationClass: OpenInferenceBeeAIInstrumentation,
+ *   })],
  * });
  * await respan.initialize();
  * ```
@@ -22,37 +26,114 @@ import {
   ATTR_GEN_AI_COMPLETION,
   ATTR_GEN_AI_PROMPT,
   ATTR_GEN_AI_REQUEST_MODEL,
+  ATTR_GEN_AI_SYSTEM,
   ATTR_GEN_AI_USAGE_COMPLETION_TOKENS,
   ATTR_GEN_AI_USAGE_INPUT_TOKENS,
   ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
   ATTR_GEN_AI_USAGE_PROMPT_TOKENS,
 } from "@opentelemetry/semantic-conventions/incubating";
 import { BeeAIInstrumentation } from "@arizeai/openinference-instrumentation-beeai";
+import {
+  INPUT_VALUE as OPENINFERENCE_INPUT_VALUE,
+  LLM_MODEL_NAME,
+  LLM_PROVIDER,
+  LLM_SYSTEM,
+  LLM_TOKEN_COUNT_COMPLETION,
+  LLM_TOKEN_COUNT_PROMPT,
+  LLM_TOKEN_COUNT_TOTAL,
+  METADATA as OPENINFERENCE_METADATA,
+  OUTPUT_VALUE as OPENINFERENCE_OUTPUT_VALUE,
+} from "@arizeai/openinference-semantic-conventions";
 import { RespanLogType, RespanSpanAttributes } from "@respan/respan-sdk";
 import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
 
-type BeeAIInstrumentationClass = new (...args: any[]) => any;
+export type BeeAIInstrumentationClass = new (...args: any[]) => any;
 type ProcessorOnStart = (span: ReadableSpan, parentContext: unknown) => void;
 type ProcessorOnEnd = (span: ReadableSpan) => void;
 
 const BEEAI_SCOPE_NAME = "@arizeai/openinference-instrumentation-beeai";
 const BEEAI_TARGET = "target";
 const BEEAI_DATA = "data";
-const BEEAI_METADATA = "metadata";
 const BEEAI_TRACE_ID = "traceId";
 const BEEAI_VERSION = "beeai.version";
 const OTEL_SCOPE_NAME = "otel.scope.name";
-const OPENINFERENCE_INPUT_VALUE = "input.value";
-const OPENINFERENCE_OUTPUT_VALUE = "output.value";
 const MAX_PENDING_CHAT_INPUTS = 20;
+const MAX_PENDING_CHAT_SPANS_PER_TRACE = 64;
+const MAX_DROPPED_SPAN_PARENTS_PER_TRACE = 256;
+const MAX_TRACKED_TRACES = 256;
+const TRACE_STATE_TTL_MS = 5 * 60 * 1_000;
+const OFF_CONTRACT_ALIASES = new Set([
+  "model",
+  "prompt_tokens",
+  "completion_tokens",
+  "total_request_tokens",
+  "tools",
+  "tool_calls",
+  "span_tools",
+  "has_tool_calls",
+  "parallel_tool_calls",
+  RespanSpanAttributes.RESPAN_SPAN_TOOLS,
+  RespanSpanAttributes.RESPAN_SPAN_TOOL_CALLS,
+  RespanSpanAttributes.RESPAN_SPAN_HANDOFFS,
+]);
 
-const DIRECT_MODEL = "model";
-const DIRECT_PROMPT_TOKENS = "prompt_tokens";
-const DIRECT_COMPLETION_TOKENS = "completion_tokens";
-const DIRECT_TOTAL_REQUEST_TOKENS = "total_request_tokens";
+interface PendingChatSpan {
+  span: ReadableSpan;
+  exportSpan: ProcessorOnEnd;
+}
 
 const droppedSpanParentsByTrace = new Map<string, Map<string, string | undefined>>();
 const workflowSpanIdsByTrace = new Map<string, string>();
+const pendingChatInputsByTrace = new Map<string, unknown[]>();
+const pendingChatSpansByTrace = new Map<string, PendingChatSpan[]>();
+const traceStateTouchedAt = new Map<string, number>();
+
+function clearTraceState(traceId: string, flushPending = true): void {
+  const pendingSpans = pendingChatSpansByTrace.get(traceId);
+
+  droppedSpanParentsByTrace.delete(traceId);
+  workflowSpanIdsByTrace.delete(traceId);
+  pendingChatInputsByTrace.delete(traceId);
+  pendingChatSpansByTrace.delete(traceId);
+  traceStateTouchedAt.delete(traceId);
+
+  if (!flushPending || !pendingSpans) return;
+  for (const { span, exportSpan } of pendingSpans) {
+    try {
+      exportSpan(span);
+    } catch {
+      // State eviction must not block other spans from exporting.
+    }
+  }
+}
+
+function exportPendingChatSpan({ span, exportSpan }: PendingChatSpan): void {
+  try {
+    exportSpan(span);
+  } catch {
+    // State compaction must not block other spans from exporting.
+  }
+}
+
+function pruneTraceState(now = Date.now()): void {
+  for (const [traceId, touchedAt] of Array.from(traceStateTouchedAt.entries())) {
+    if (now - touchedAt > TRACE_STATE_TTL_MS) {
+      clearTraceState(traceId);
+    }
+  }
+
+  while (traceStateTouchedAt.size > MAX_TRACKED_TRACES) {
+    const oldestTraceId = traceStateTouchedAt.keys().next().value as string | undefined;
+    if (!oldestTraceId) break;
+    clearTraceState(oldestTraceId);
+  }
+}
+
+function touchTraceState(traceId: string): void {
+  traceStateTouchedAt.delete(traceId);
+  traceStateTouchedAt.set(traceId, Date.now());
+  pruneTraceState();
+}
 
 function setDefault(attrs: Record<string, any>, key: string, value: any): void {
   if (attrs[key] === undefined) attrs[key] = value;
@@ -104,9 +185,17 @@ function firstDefined<T>(...values: Array<T | undefined>): T | undefined {
 function getInstrumentationScopeName(span: ReadableSpan): string {
   return (
     ((span as any).instrumentationScope?.name as string | undefined) ??
-    ((span as any).instrumentationScope?.name as string | undefined) ??
+    ((span as any).instrumentationLibrary?.name as string | undefined) ??
     ((span as any).attributes?.[OTEL_SCOPE_NAME] as string | undefined) ??
     ""
+  );
+}
+
+function isBeeAIChatStartTarget(target: unknown): target is string {
+  return (
+    typeof target === "string" &&
+    target.startsWith("backend.") &&
+    target.endsWith(".chat.start")
   );
 }
 
@@ -126,27 +215,39 @@ function getBeeAIEventLogType(target: unknown): string | undefined {
   return undefined;
 }
 
+function inferProviderFromTarget(target: unknown): string | undefined {
+  if (typeof target !== "string") return undefined;
+  const match = /^backend\.([^.]+)\.(?:chat|embedding)\./.exec(target);
+  return match?.[1]?.toLowerCase();
+}
+
 function setTokenAttributes(
   attrs: Record<string, any>,
   usage: Record<string, any> | undefined,
 ): void {
-  if (!usage) return;
-
   const promptTokens = firstDefined(
-    usage.promptTokens,
-    usage.prompt_tokens,
-    usage.inputTokens,
-    usage.input_tokens,
+    attrs[ATTR_GEN_AI_USAGE_INPUT_TOKENS],
+    attrs[ATTR_GEN_AI_USAGE_PROMPT_TOKENS],
+    usage?.promptTokens,
+    usage?.prompt_tokens,
+    usage?.inputTokens,
+    usage?.input_tokens,
+    attrs[LLM_TOKEN_COUNT_PROMPT],
   );
   const completionTokens = firstDefined(
-    usage.completionTokens,
-    usage.completion_tokens,
-    usage.outputTokens,
-    usage.output_tokens,
+    attrs[ATTR_GEN_AI_USAGE_OUTPUT_TOKENS],
+    attrs[ATTR_GEN_AI_USAGE_COMPLETION_TOKENS],
+    usage?.completionTokens,
+    usage?.completion_tokens,
+    usage?.outputTokens,
+    usage?.output_tokens,
+    attrs[LLM_TOKEN_COUNT_COMPLETION],
   );
   const totalTokens = firstDefined(
-    usage.totalTokens,
-    usage.total_tokens,
+    attrs[SpanAttributes.LLM_USAGE_TOTAL_TOKENS],
+    usage?.totalTokens,
+    usage?.total_tokens,
+    attrs[LLM_TOKEN_COUNT_TOTAL],
     promptTokens !== undefined && completionTokens !== undefined
       ? Number(promptTokens) + Number(completionTokens)
       : undefined,
@@ -155,26 +256,22 @@ function setTokenAttributes(
   if (promptTokens !== undefined) {
     setDefault(attrs, ATTR_GEN_AI_USAGE_PROMPT_TOKENS, promptTokens);
     setDefault(attrs, ATTR_GEN_AI_USAGE_INPUT_TOKENS, promptTokens);
-    setDefault(attrs, DIRECT_PROMPT_TOKENS, promptTokens);
   }
   if (completionTokens !== undefined) {
     setDefault(attrs, ATTR_GEN_AI_USAGE_COMPLETION_TOKENS, completionTokens);
     setDefault(attrs, ATTR_GEN_AI_USAGE_OUTPUT_TOKENS, completionTokens);
-    setDefault(attrs, DIRECT_COMPLETION_TOKENS, completionTokens);
   }
   if (totalTokens !== undefined) {
     setDefault(attrs, SpanAttributes.LLM_USAGE_TOTAL_TOKENS, totalTokens);
-    setDefault(attrs, DIRECT_TOTAL_REQUEST_TOKENS, totalTokens);
   }
 }
-
-const pendingChatInputsByTrace = new Map<string, unknown[]>();
-const pendingChatSpansByTrace = new Map<string, ReadableSpan[]>();
 
 function getSpanTraceKey(span: ReadableSpan, attrs: Record<string, any>): string | undefined {
   const spanContext = typeof (span as any).spanContext === "function"
     ? (span as any).spanContext()
     : undefined;
+  // BeeAI emits related lifecycle events as separate OTEL spans, so its
+  // framework trace id is the correlation key when available.
   const traceId = firstDefined(attrs[BEEAI_TRACE_ID], spanContext?.traceId);
   return typeof traceId === "string" && traceId.length > 0 ? traceId : undefined;
 }
@@ -209,22 +306,34 @@ function rememberDroppedSpanParent(span: ReadableSpan): void {
   if (!traceId || !spanId) return;
 
   const traceParents = droppedSpanParentsByTrace.get(traceId) ?? new Map();
+  traceParents.delete(spanId);
   traceParents.set(spanId, getOtelParentSpanId(span));
+  while (traceParents.size > MAX_DROPPED_SPAN_PARENTS_PER_TRACE) {
+    const oldestSpanId = traceParents.keys().next().value as string | undefined;
+    if (!oldestSpanId) break;
+    traceParents.delete(oldestSpanId);
+  }
   droppedSpanParentsByTrace.set(traceId, traceParents);
+  touchTraceState(traceId);
+}
+
+function isWorkflowSpan(span: ReadableSpan, attrs: Record<string, any>): boolean {
+  const spanKind = attrs[SpanAttributes.TRACELOOP_SPAN_KIND];
+  return (
+    (typeof spanKind === "string" && spanKind.toLowerCase() === "workflow") ||
+    span.name.endsWith(".workflow.workflow")
+  );
 }
 
 function rememberWorkflowSpan(span: ReadableSpan, attrs: Record<string, any>): void {
-  const spanKind = attrs[SpanAttributes.TRACELOOP_SPAN_KIND];
-  const isWorkflowSpan =
-    (typeof spanKind === "string" && spanKind.toLowerCase() === "workflow") ||
-    span.name.endsWith(".workflow.workflow");
-  if (!isWorkflowSpan) return;
+  if (!isWorkflowSpan(span, attrs)) return;
 
   const traceId = getOtelTraceId(span);
   const spanId = getOtelSpanId(span);
   if (!traceId || !spanId) return;
 
   workflowSpanIdsByTrace.set(traceId, spanId);
+  touchTraceState(traceId);
 }
 
 function resolveExportParentSpanId(span: ReadableSpan): string | undefined {
@@ -234,6 +343,7 @@ function resolveExportParentSpanId(span: ReadableSpan): string | undefined {
 
   const traceParents = droppedSpanParentsByTrace.get(traceId);
   if (!traceParents) return parentSpanId;
+  touchTraceState(traceId);
 
   const visited = new Set<string>();
   while (parentSpanId && traceParents.has(parentSpanId) && !visited.has(parentSpanId)) {
@@ -294,6 +404,7 @@ function enqueuePendingChatInput(
     queue.shift();
   }
   pendingChatInputsByTrace.set(traceKey, queue);
+  touchTraceState(traceKey);
 }
 
 function dequeuePendingChatInput(
@@ -305,6 +416,7 @@ function dequeuePendingChatInput(
 
   const queue = pendingChatInputsByTrace.get(traceKey);
   if (!queue || queue.length === 0) return undefined;
+  touchTraceState(traceKey);
 
   const input = queue.shift();
   if (queue.length === 0) {
@@ -486,14 +598,23 @@ function setChatInputAttributes(span: ReadableSpan, input: unknown): void {
   setChatPromptAttributes(attrs, input, true);
 }
 
-function queuePendingChatSpan(span: ReadableSpan, attrs: Record<string, any>): void {
-  const traceKey = getSpanTraceKey(span, attrs);
+function queuePendingChatSpan(
+  span: ReadableSpan,
+  attrs: Record<string, any>,
+  exportSpan: ProcessorOnEnd,
+  traceKey = getSpanTraceKey(span, attrs),
+): void {
   if (!traceKey) return;
 
   const queue = pendingChatSpansByTrace.get(traceKey) ?? [];
-  if (!queue.includes(span)) {
-    queue.push(span);
+  if (!queue.some((entry) => entry.span === span)) {
+    queue.push({ span, exportSpan });
+    while (queue.length > MAX_PENDING_CHAT_SPANS_PER_TRACE) {
+      const oldestPendingSpan = queue.shift();
+      if (oldestPendingSpan) exportPendingChatSpan(oldestPendingSpan);
+    }
     pendingChatSpansByTrace.set(traceKey, queue);
+    touchTraceState(traceKey);
   }
 }
 
@@ -501,27 +622,26 @@ function flushPendingChatSpansFromState(
   span: ReadableSpan,
   attrs: Record<string, any>,
   state: Record<string, any> | undefined,
-  exportSpan: ProcessorOnEnd | undefined,
 ): void {
-  if (!exportSpan) return;
-
   const traceKey = getSpanTraceKey(span, attrs);
   if (!traceKey) return;
 
   const queue = pendingChatSpansByTrace.get(traceKey);
   if (!queue || queue.length === 0) return;
+  touchTraceState(traceKey);
 
-  const remaining: ReadableSpan[] = [];
-  for (const pendingSpan of queue) {
+  const remaining: PendingChatSpan[] = [];
+  for (const entry of queue) {
+    const pendingSpan = entry.span;
     const pendingAttrs = (pendingSpan as any).attributes as Record<string, any> | undefined;
     const input = getPendingChatInputFromState(state, pendingSpan);
     if (!pendingAttrs || input === undefined) {
-      remaining.push(pendingSpan);
+      remaining.push(entry);
       continue;
     }
 
     setChatInputAttributes(pendingSpan, input);
-    exportSpan(pendingSpan);
+    entry.exportSpan(pendingSpan);
   }
 
   if (remaining.length > 0) {
@@ -531,12 +651,14 @@ function flushPendingChatSpansFromState(
   }
 }
 
-function flushAllPendingChatSpans(exportSpan: ProcessorOnEnd | null): void {
-  if (!exportSpan) return;
-
+function flushAllPendingChatSpans(): void {
   for (const queue of pendingChatSpansByTrace.values()) {
-    for (const pendingSpan of queue) {
-      exportSpan(pendingSpan);
+    for (const { span, exportSpan } of queue) {
+      try {
+        exportSpan(span);
+      } catch {
+        // Best-effort flush during deactivation.
+      }
     }
   }
   pendingChatSpansByTrace.clear();
@@ -549,8 +671,8 @@ function shouldDelayMissingChatInputSpan(span: ReadableSpan): boolean {
   return (
     attrs[RespanSpanAttributes.RESPAN_LOG_TYPE] === RespanLogType.CHAT &&
     attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] === undefined &&
-    typeof attrs[BEEAI_TARGET] === "string" &&
-    attrs[BEEAI_TARGET].endsWith(".success")
+    typeof attrs[SpanAttributes.TRACELOOP_ENTITY_NAME] === "string" &&
+    attrs[SpanAttributes.TRACELOOP_ENTITY_NAME].endsWith(".success")
   );
 }
 
@@ -686,7 +808,7 @@ function setChatPromptAttributes(
       setPromptAttribute(`${prefix}.tool_call_id`, record.tool_call_id);
     }
     if (record.tool_calls !== undefined) {
-      setPromptAttribute(`${prefix}.tool_calls`, record.tool_calls);
+      setPromptAttribute(`${prefix}.tool_calls`, safeJsonStr(record.tool_calls));
     }
   }
 }
@@ -718,13 +840,8 @@ function setChatCompletionAttributes(
   if (assistantMessage.tool_calls !== undefined) {
     setDefault(
       attrs,
-      RespanSpanAttributes.RESPAN_SPAN_TOOL_CALLS,
-      safeJsonStr(assistantMessage.tool_calls),
-    );
-    setDefault(
-      attrs,
       `${completionPrefix}.tool_calls`,
-      assistantMessage.tool_calls,
+      safeJsonStr(assistantMessage.tool_calls),
     );
   }
 }
@@ -771,7 +888,7 @@ function cacheBeeAIStartSpan(span: ReadableSpan): void {
 
   const target = attrs[BEEAI_TARGET];
   const data = asRecord(parseJson(attrs[BEEAI_DATA]));
-  const metadata = asRecord(parseJson(attrs[BEEAI_METADATA]));
+  const metadata = asRecord(parseJson(attrs[OPENINFERENCE_METADATA]));
   const state = asRecord(firstDefined(data?.state, metadata?.state));
 
   if (typeof target === "string" && target === "agent.toolCalling.start") {
@@ -782,7 +899,7 @@ function cacheBeeAIStartSpan(span: ReadableSpan): void {
     rememberDroppedSpanParent(span);
   }
 
-  if (target !== "backend.openai.chat.start") return;
+  if (!isBeeAIChatStartTarget(target)) return;
 
   const directInput = firstDefined(data?.input, getOpenInferenceInput(attrs));
   if (directInput !== undefined) {
@@ -799,19 +916,32 @@ function cacheChatInputFromAgentState(
 }
 
 function cleanupBeeAIRawAttributes(attrs: Record<string, any>): void {
+  delete attrs[BEEAI_TARGET];
   delete attrs[BEEAI_DATA];
-  delete attrs[BEEAI_METADATA];
+  delete attrs[OPENINFERENCE_METADATA];
+  delete attrs[BEEAI_TRACE_ID];
   delete attrs[BEEAI_VERSION];
   delete attrs.source;
   delete attrs[OPENINFERENCE_INPUT_VALUE];
   delete attrs[OPENINFERENCE_OUTPUT_VALUE];
   delete attrs["input.mime_type"];
   delete attrs["output.mime_type"];
+  delete attrs[LLM_MODEL_NAME];
+  delete attrs[LLM_PROVIDER];
+  delete attrs[LLM_SYSTEM];
+  delete attrs[LLM_TOKEN_COUNT_PROMPT];
+  delete attrs[LLM_TOKEN_COUNT_COMPLETION];
+  delete attrs[LLM_TOKEN_COUNT_TOTAL];
+  delete attrs[`${OPENINFERENCE_METADATA}.model_name`];
 
   for (const key of Object.keys(attrs)) {
     if (key.startsWith("llm.input_messages.") || key.startsWith("llm.output_messages.")) {
       delete attrs[key];
     }
+  }
+
+  for (const key of OFF_CONTRACT_ALIASES) {
+    delete attrs[key];
   }
 }
 
@@ -823,7 +953,7 @@ function setInputOutputAttributes(
   data: Record<string, any> | undefined,
   value: Record<string, any> | undefined,
 ): void {
-  const metadata = asRecord(parseJson(attrs[BEEAI_METADATA]));
+  const metadata = asRecord(parseJson(attrs[OPENINFERENCE_METADATA]));
   const state = asRecord(firstDefined(data?.state, metadata?.state));
   const toolCallMsg = asRecord(firstDefined(data?.toolCallMsg, metadata?.toolCallMsg));
   const targetValue = typeof target === "string" ? target : "";
@@ -882,9 +1012,26 @@ function setInputOutputAttributes(
   }
 }
 
-function translateBeeAIEventSpan(span: ReadableSpan, exportSpan?: ProcessorOnEnd): void {
+function hasMeaningfulCanonicalEntityContent(attrs: Record<string, any>): boolean {
+  return (
+    isMeaningfulStructuredValue(
+      parseJson(attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT]),
+    ) ||
+    isMeaningfulStructuredValue(
+      parseJson(attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]),
+    )
+  );
+}
+
+function translateBeeAIEventSpan(span: ReadableSpan): void {
   const attrs = (span as any).attributes as Record<string, any> | undefined;
   if (!attrs) return;
+
+  // OITracer intentionally starts the underlying OTEL span without attributes
+  // and applies them immediately afterwards. Re-run start-event caching here,
+  // when ReadableSpan attributes are complete, while retaining onStart support
+  // for instrumentors that populate attributes eagerly.
+  cacheBeeAIStartSpan(span);
 
   if (isBeeAIFrameworkParentSpan(span, attrs)) {
     dropSpan(span, attrs);
@@ -895,17 +1042,11 @@ function translateBeeAIEventSpan(span: ReadableSpan, exportSpan?: ProcessorOnEnd
 
   const target = attrs[BEEAI_TARGET];
   const data = asRecord(parseJson(attrs[BEEAI_DATA]));
-  const metadata = asRecord(parseJson(attrs[BEEAI_METADATA]));
+  const metadata = asRecord(parseJson(attrs[OPENINFERENCE_METADATA]));
   const state = asRecord(firstDefined(data?.state, metadata?.state));
 
-  if (typeof target === "string" && target === "backend.openai.chat.start") {
-    if (data?.input !== undefined) {
-      enqueuePendingChatInput(span, attrs, normalizeInputValue(data.input));
-    }
-  }
-
   if (typeof target === "string" && target === "agent.toolCalling.success") {
-    flushPendingChatSpansFromState(span, attrs, state, exportSpan);
+    flushPendingChatSpansFromState(span, attrs, state);
     cacheChatInputFromAgentState(span, attrs, state);
   }
 
@@ -933,13 +1074,38 @@ function translateBeeAIEventSpan(span: ReadableSpan, exportSpan?: ProcessorOnEnd
   const usage = asRecord(firstDefined(value?.usage, data?.usage));
   setTokenAttributes(attrs, usage);
 
-  const model = firstDefined(data?.model, value?.model);
+  const provider = firstDefined(
+    attrs[ATTR_GEN_AI_SYSTEM],
+    attrs[LLM_PROVIDER],
+    attrs[LLM_SYSTEM],
+    inferProviderFromTarget(target),
+  );
+  if (typeof provider === "string" && provider.length > 0) {
+    setDefault(attrs, ATTR_GEN_AI_SYSTEM, provider.toLowerCase());
+  }
+
+  const model = firstDefined(
+    attrs[ATTR_GEN_AI_REQUEST_MODEL],
+    attrs[LLM_MODEL_NAME],
+    attrs[`${OPENINFERENCE_METADATA}.model_name`],
+    data?.model,
+    value?.model,
+    metadata?.model_name,
+    metadata?.modelName,
+  );
   if (model !== undefined) {
     setDefault(attrs, ATTR_GEN_AI_REQUEST_MODEL, model);
-    setDefault(attrs, DIRECT_MODEL, model);
   }
 
   setInputOutputAttributes(span, attrs, logType, target, data, value);
+  if (
+    target === "agent.toolCalling.success" &&
+    !hasMeaningfulCanonicalEntityContent(attrs)
+  ) {
+    dropSpan(span, attrs);
+    cleanupBeeAIRawAttributes(attrs);
+    return;
+  }
   reparentFromDroppedSpans(span);
   cleanupBeeAIRawAttributes(attrs);
 }
@@ -969,7 +1135,13 @@ export interface BeeAIInstrumentorOptions {
    */
   sdkModule?: Record<string, unknown>;
   /**
-   * Internal extension point for tests and compatible OpenInference subclasses.
+   * Optional OpenInference BeeAI instrumentation constructor.
+   *
+   * Pass the constructor resolved by the application when a linked package,
+   * pnpm workspace, or bundler can install more than one `beeai-framework`
+   * module instance. Keeping this constructor in the same dependency realm as
+   * `sdkModule` preserves the upstream instrumentor's `instanceof ChatModel`
+   * checks and therefore its model, input/output, and usage serialization.
    */
   instrumentationClass?: BeeAIInstrumentationClass;
   /**
@@ -985,6 +1157,9 @@ export class BeeAIInstrumentor {
   private readonly _instrumentationClass: BeeAIInstrumentationClass;
   private readonly _delegateFactory?: DelegateFactory;
   private _delegate: InstrumentationDelegate | null = null;
+  private _activationPromise: Promise<void> | null = null;
+  private _activationGeneration = 0;
+  private _activationRequested = false;
   private _ownsTranslatorHook = false;
 
   private static _translatorHookRefCount = 0;
@@ -993,6 +1168,11 @@ export class BeeAIInstrumentor {
   private static _wrappedProcessorOnStart: ProcessorOnStart | null = null;
   private static _originalProcessorOnEnd: ProcessorOnEnd | null = null;
   private static _wrappedProcessorOnEnd: ProcessorOnEnd | null = null;
+  private static _trackedBeeAISpans = new Set<ReadableSpan>();
+  private static _pendingDelegateDeactivations = new Set<InstrumentationDelegate>();
+  private static _preDelegateProcessor: any = null;
+  private static _preDelegateProcessorOnEnd: ProcessorOnEnd | null = null;
+  private static _expectedNestedDelegateRestoreOnEnd: ProcessorOnEnd | null = null;
 
   constructor(options: BeeAIInstrumentorOptions = {}) {
     this._sdkModule = options.sdkModule;
@@ -1002,35 +1182,133 @@ export class BeeAIInstrumentor {
   }
 
   async activate(): Promise<void> {
+    this._activationRequested = true;
     if (this._delegate) {
       return;
     }
 
-    const sdkModule = this._sdkModule ?? (await this._loadBeeAIFramework());
-    this._delegate = await this._createDelegate(sdkModule);
-    this._delegate.activate();
+    const pendingActivation = this._activationPromise;
+    if (pendingActivation) {
+      await pendingActivation;
+      if (this._activationRequested && !this._delegate) {
+        await this.activate();
+      }
+      return;
+    }
 
-    if (BeeAIInstrumentor._installTranslatorHook()) {
-      BeeAIInstrumentor._translatorHookRefCount += 1;
-      this._ownsTranslatorHook = true;
+    const generation = this._activationGeneration;
+    const activationPromise = this._activateGeneration(generation);
+    this._activationPromise = activationPromise;
+    try {
+      await activationPromise;
+    } finally {
+      if (this._activationPromise === activationPromise) {
+        this._activationPromise = null;
+      }
     }
   }
 
   deactivate(): void {
-    if (this._ownsTranslatorHook) {
-      BeeAIInstrumentor._translatorHookRefCount = Math.max(
-        0,
-        BeeAIInstrumentor._translatorHookRefCount - 1,
-      );
-      this._ownsTranslatorHook = false;
+    this._activationRequested = false;
+    this._activationGeneration += 1;
 
-      if (BeeAIInstrumentor._translatorHookRefCount === 0) {
-        BeeAIInstrumentor._restoreTranslatorHook();
-      }
-    }
-
-    this._delegate?.deactivate();
+    const delegate = this._delegate;
     this._delegate = null;
+    if (this._ownsTranslatorHook && delegate) {
+      // The OpenInference delegate owns the processor handler wrapped by the
+      // BeeAI translator. Restore the outer hook first so the delegate can
+      // safely restore its own handler. If BeeAI spans are still open, both
+      // restorations are deferred until those spans finish.
+      BeeAIInstrumentor._pendingDelegateDeactivations.add(delegate);
+      this._releaseTranslatorHookOwnership();
+    } else {
+      this._releaseTranslatorHookOwnership();
+      delegate?.deactivate();
+    }
+  }
+
+  private async _activateGeneration(generation: number): Promise<void> {
+    let delegate: InstrumentationDelegate | null = null;
+    let activationAttempted = false;
+    let ownsTranslatorHook = false;
+
+    try {
+      const sdkModule = this._sdkModule ?? (await this._loadBeeAIFramework());
+      if (!this._isActivationCurrent(generation)) return;
+
+      delegate = await this._createDelegate(sdkModule);
+      if (!this._isActivationCurrent(generation)) return;
+
+      const processorBeforeDelegate = BeeAIInstrumentor._getActiveSpanProcessor();
+      const processorOnEndBeforeDelegate = typeof processorBeforeDelegate?.onEnd === "function"
+        ? processorBeforeDelegate.onEnd as ProcessorOnEnd
+        : null;
+      activationAttempted = true;
+      delegate.activate();
+      const expectedNestedDelegateRestoreOnEnd =
+        (delegate.constructor as any)?._originalProcessorOnEnd as ProcessorOnEnd | null;
+      if (!this._isActivationCurrent(generation)) {
+        delegate.deactivate();
+        return;
+      }
+
+      if (BeeAIInstrumentor._installTranslatorHook()) {
+        if (!BeeAIInstrumentor._preDelegateProcessor && processorOnEndBeforeDelegate) {
+          BeeAIInstrumentor._preDelegateProcessor = processorBeforeDelegate;
+          BeeAIInstrumentor._preDelegateProcessorOnEnd = processorOnEndBeforeDelegate;
+          BeeAIInstrumentor._expectedNestedDelegateRestoreOnEnd =
+            expectedNestedDelegateRestoreOnEnd;
+        }
+        BeeAIInstrumentor._translatorHookRefCount += 1;
+        ownsTranslatorHook = true;
+      }
+
+      if (!this._isActivationCurrent(generation)) {
+        if (ownsTranslatorHook) {
+          BeeAIInstrumentor._pendingDelegateDeactivations.add(delegate);
+          BeeAIInstrumentor._releaseTranslatorHookReference();
+        } else {
+          delegate.deactivate();
+        }
+        return;
+      }
+
+      this._delegate = delegate;
+      this._ownsTranslatorHook = ownsTranslatorHook;
+    } catch (error) {
+      if (ownsTranslatorHook) {
+        if (delegate) {
+          BeeAIInstrumentor._pendingDelegateDeactivations.add(delegate);
+        }
+        BeeAIInstrumentor._releaseTranslatorHookReference();
+      }
+      if (delegate && activationAttempted && !ownsTranslatorHook) {
+        try {
+          delegate.deactivate();
+        } catch {
+          // Preserve the activation error so a later activate() can retry.
+        }
+      }
+      throw error;
+    }
+  }
+
+  private _isActivationCurrent(generation: number): boolean {
+    return this._activationRequested && this._activationGeneration === generation;
+  }
+
+  private _releaseTranslatorHookOwnership(): void {
+    if (!this._ownsTranslatorHook) return;
+    this._ownsTranslatorHook = false;
+    BeeAIInstrumentor._releaseTranslatorHookReference();
+  }
+
+  private static _releaseTranslatorHookReference(): void {
+    BeeAIInstrumentor._translatorHookRefCount = Math.max(
+      0,
+      BeeAIInstrumentor._translatorHookRefCount - 1,
+    );
+    BeeAIInstrumentor._maybeRestoreTranslatorHookAfterDrain();
   }
 
   private static _getActiveSpanProcessor(): any {
@@ -1045,6 +1323,67 @@ export class BeeAIInstrumentor {
     );
   }
 
+  private static _shouldTrackBeeAISpan(span: ReadableSpan): boolean {
+    return (
+      getInstrumentationScopeName(span) === BEEAI_SCOPE_NAME ||
+      span.name === "beeai-framework-main"
+    );
+  }
+
+  private static _clearCompletedTraceState(span: ReadableSpan): void {
+    const attrs = ((span as any).attributes ?? {}) as Record<string, any>;
+    if (!isWorkflowSpan(span, attrs)) return;
+
+    const traceId = getOtelTraceId(span);
+    if (traceId) clearTraceState(traceId);
+  }
+
+  private static _maybeRestoreTranslatorHookAfterDrain(): void {
+    if (
+      BeeAIInstrumentor._translatorHookRefCount !== 0 ||
+      BeeAIInstrumentor._trackedBeeAISpans.size !== 0
+    ) return;
+
+    const outerOnEndRestored = BeeAIInstrumentor._patchedProcessor
+      ? BeeAIInstrumentor._restoreTranslatorHook()
+      : false;
+    BeeAIInstrumentor._deactivatePendingDelegates(outerOnEndRestored);
+  }
+
+  private static _deactivatePendingDelegates(outerOnEndRestored: boolean): void {
+    const pendingDelegates = Array.from(BeeAIInstrumentor._pendingDelegateDeactivations);
+    BeeAIInstrumentor._pendingDelegateDeactivations.clear();
+    try {
+      for (const delegate of pendingDelegates) {
+        try {
+          delegate.deactivate();
+        } catch (error) {
+          console.warn(
+            "[respan] BeeAIInstrumentor: deferred OpenInference deactivation failed.",
+            error,
+          );
+        }
+      }
+    } finally {
+      const processor = BeeAIInstrumentor._preDelegateProcessor;
+      const originalOnEnd = BeeAIInstrumentor._preDelegateProcessorOnEnd;
+      const expectedNestedRestoreOnEnd =
+        BeeAIInstrumentor._expectedNestedDelegateRestoreOnEnd;
+      if (
+        outerOnEndRestored &&
+        processor &&
+        originalOnEnd &&
+        expectedNestedRestoreOnEnd &&
+        processor.onEnd === expectedNestedRestoreOnEnd
+      ) {
+        processor.onEnd = originalOnEnd;
+      }
+      BeeAIInstrumentor._preDelegateProcessor = null;
+      BeeAIInstrumentor._preDelegateProcessorOnEnd = null;
+      BeeAIInstrumentor._expectedNestedDelegateRestoreOnEnd = null;
+    }
+  }
+
   private static _installTranslatorHook(): boolean {
     const processor = BeeAIInstrumentor._getActiveSpanProcessor();
     if (!processor || typeof processor.onEnd !== "function") {
@@ -1057,31 +1396,63 @@ export class BeeAIInstrumentor {
 
     BeeAIInstrumentor._restoreTranslatorHook();
 
-    const originalProcessorOnEnd = processor.onEnd.bind(processor);
+    const originalProcessorOnEnd = processor.onEnd as ProcessorOnEnd;
     const originalProcessorOnStart = typeof processor.onStart === "function"
-      ? processor.onStart.bind(processor)
+      ? processor.onStart as ProcessorOnStart
       : null;
+    const callOriginalProcessorOnEnd = (span: ReadableSpan) =>
+      originalProcessorOnEnd.call(processor, span);
     const wrappedProcessorOnStart = originalProcessorOnStart
       ? (span: ReadableSpan, parentContext: unknown) => {
-          try {
-            cacheBeeAIStartSpan(span);
-          } catch {
-            // Translation must never block span export.
+          if (BeeAIInstrumentor._translatorHookRefCount > 0) {
+            if (BeeAIInstrumentor._shouldTrackBeeAISpan(span)) {
+              BeeAIInstrumentor._trackedBeeAISpans.add(span);
+            }
+            try {
+              cacheBeeAIStartSpan(span);
+            } catch {
+              // Translation must never block span export.
+            }
           }
-          return originalProcessorOnStart(span, parentContext);
+          return originalProcessorOnStart.call(processor, span, parentContext);
         }
       : null;
     const wrappedProcessorOnEnd = (span: ReadableSpan) => {
+      const wasTracked = BeeAIInstrumentor._trackedBeeAISpans.delete(span);
+      const shouldTranslate =
+        BeeAIInstrumentor._translatorHookRefCount > 0 || wasTracked;
+      const attrs = ((span as any).attributes ?? {}) as Record<string, any>;
+      const beeAITraceKey = getSpanTraceKey(span, attrs);
+      let shouldDelayExport = false;
+
       try {
-        translateBeeAIEventSpan(span, originalProcessorOnEnd);
-        if (shouldDelayMissingChatInputSpan(span)) {
-          queuePendingChatSpan(span, ((span as any).attributes ?? {}) as Record<string, any>);
-          return;
+        if (shouldTranslate) {
+          translateBeeAIEventSpan(span);
+          if (shouldDelayMissingChatInputSpan(span)) {
+            queuePendingChatSpan(
+              span,
+              attrs,
+              callOriginalProcessorOnEnd,
+              beeAITraceKey,
+            );
+            shouldDelayExport = true;
+          }
         }
       } catch {
         // Translation must never block span export.
       }
-      return originalProcessorOnEnd(span);
+
+      if (shouldDelayExport) {
+        BeeAIInstrumentor._maybeRestoreTranslatorHookAfterDrain();
+        return;
+      }
+
+      try {
+        return callOriginalProcessorOnEnd(span);
+      } finally {
+        BeeAIInstrumentor._clearCompletedTraceState(span);
+        BeeAIInstrumentor._maybeRestoreTranslatorHookAfterDrain();
+      }
     };
 
     if (wrappedProcessorOnStart) {
@@ -1096,12 +1467,13 @@ export class BeeAIInstrumentor {
     return true;
   }
 
-  private static _restoreTranslatorHook(): void {
+  private static _restoreTranslatorHook(): boolean {
     const processor = BeeAIInstrumentor._patchedProcessor;
     const originalOnStart = BeeAIInstrumentor._originalProcessorOnStart;
     const wrappedOnStart = BeeAIInstrumentor._wrappedProcessorOnStart;
     const originalOnEnd = BeeAIInstrumentor._originalProcessorOnEnd;
     const wrappedOnEnd = BeeAIInstrumentor._wrappedProcessorOnEnd;
+    let restoredOnEnd = false;
 
     if (processor && originalOnStart) {
       if (!wrappedOnStart || processor.onStart === wrappedOnStart) {
@@ -1116,6 +1488,7 @@ export class BeeAIInstrumentor {
     if (processor && originalOnEnd) {
       if (!wrappedOnEnd || processor.onEnd === wrappedOnEnd) {
         processor.onEnd = originalOnEnd;
+        restoredOnEnd = true;
       } else {
         console.warn(
           "[respan] BeeAIInstrumentor: active span processor onEnd was modified externally; original handler could not be restored.",
@@ -1123,16 +1496,19 @@ export class BeeAIInstrumentor {
       }
     }
 
-    flushAllPendingChatSpans(originalOnEnd);
+    flushAllPendingChatSpans();
     pendingChatInputsByTrace.clear();
     pendingChatSpansByTrace.clear();
     droppedSpanParentsByTrace.clear();
     workflowSpanIdsByTrace.clear();
+    traceStateTouchedAt.clear();
+    BeeAIInstrumentor._trackedBeeAISpans.clear();
     BeeAIInstrumentor._patchedProcessor = null;
     BeeAIInstrumentor._originalProcessorOnStart = null;
     BeeAIInstrumentor._wrappedProcessorOnStart = null;
     BeeAIInstrumentor._originalProcessorOnEnd = null;
     BeeAIInstrumentor._wrappedProcessorOnEnd = null;
+    return restoredOnEnd;
   }
 
   private async _createDelegate(

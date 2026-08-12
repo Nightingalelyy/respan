@@ -1,7 +1,6 @@
-import type { Context } from "@opentelemetry/api";
+import type { Context, Span } from "@opentelemetry/api";
 import type {
   ReadableSpan,
-  Span,
   SpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 import { RespanLogType } from "@respan/respan-sdk";
@@ -977,11 +976,7 @@ function replaceSpanAttributes(
 
 function getInstrumentationScopeName(span: ReadableSpan): string {
   const spanAny = span as any;
-  return String(
-    spanAny.instrumentationScope?.name ??
-      spanAny.instrumentationScope?.name ??
-      "",
-  );
+  return String(spanAny.instrumentationScope?.name ?? "");
 }
 
 function scopeLooksLikePydanticAI(scopeName: string): boolean {

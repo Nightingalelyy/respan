@@ -4,8 +4,8 @@ Respan instrumentation plugin for the
 [Strands Agents TypeScript SDK](https://strandsagents.com/).
 
 This package consumes Strands Agents' native OpenTelemetry spans and normalizes
-them into the Respan span contract before the existing Respan OTLP exporter
-sends them. It does not require OpenInference at runtime.
+them through Respan's span-transformer lifecycle before filtering and OTLP
+export. It does not require OpenInference at runtime.
 
 ## Install
 
