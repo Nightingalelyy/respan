@@ -1,7 +1,6 @@
 {
   "summary": "Remove broken link",
   "packages": {
-    "@respan/respan-sdk": "patch",
-    "respan-sdk": "patch"
+    "respan-tracing": "patch"
   }
 }
