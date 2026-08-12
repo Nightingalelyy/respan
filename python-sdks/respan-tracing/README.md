@@ -9,7 +9,7 @@ This tutorial demonstrates how to build and trace complex LLM workflows using Re
 - Python 3.11+
 - OpenAI API key
 - Anthropic API key
-- Respan API key, you can get your API key from the [API keys page](https://platform.respan.co/platform/api/api-keys)
+- Respan API key
 
 ## Installation
 ```bash
