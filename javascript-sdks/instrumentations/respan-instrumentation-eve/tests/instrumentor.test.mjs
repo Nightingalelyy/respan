@@ -1,31 +1,35 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { trace } from "@opentelemetry/api";
+import { BasicTracerProvider } from "@opentelemetry/sdk-trace-base";
+import { RespanCompositeProcessor } from "../../../respan-tracing/dist/processor/composite.js";
 import { EveInstrumentor } from "../dist/index.js";
 
-function makeTurn(sessionId, suffix) {
-  const attributes = {
-    "ai.telemetry.functionId": "support-agent",
-    "eve.environment": "test",
-    "eve.session.id": sessionId,
-    "eve.version": "0.26.1",
-  };
-  return {
-    name: "ai.eve.turn",
-    instrumentationScope: { name: "eve" },
-    attributes,
-    spanContext() {
-      return {
-        traceId: suffix.padStart(32, "0"),
-        spanId: suffix.padStart(16, "0"),
-        traceFlags: 1,
-      };
+class RecordingManager {
+  started = [];
+  ended = [];
+
+  onStart(span) {
+    this.started.push(span);
+  }
+
+  onEnd(span) {
+    this.ended.push(span);
+  }
+
+  async shutdown() {}
+  async forceFlush() {}
+}
+
+function startTurn(tracer, sessionId) {
+  return tracer.startSpan("ai.eve.turn", {
+    attributes: {
+      "ai.telemetry.functionId": "support-agent",
+      "eve.environment": "test",
+      "eve.session.id": sessionId,
+      "eve.version": "0.26.1",
     },
-    setAttribute(key, value) {
-      attributes[key] = value;
-    },
-  };
+  });
 }
 
 function assertCanonicalTurn(span, sessionId) {
@@ -37,77 +41,60 @@ function assertCanonicalTurn(span, sessionId) {
   );
   assert.equal(span.attributes["traceloop.workflow.name"], "support-agent");
   assert.equal(span.attributes["eve.session.id"], undefined);
+  assert.equal(span.attributes["traceloop.span.kind"], undefined);
 }
 
-test("wraps the active processor with shared ownership and drain-safe deactivation", () => {
-  const delegatedSpans = [];
-  const originalProcessor = {
-    onStart() {},
-    onEnd(span) {
-      delegatedSpans.push(span);
-    },
-    shutdown() {
-      return Promise.resolve();
-    },
-    forceFlush() {
-      return Promise.resolve();
-    },
-  };
-  const provider = { activeSpanProcessor: originalProcessor };
-  const originalGetTracerProvider = trace.getTracerProvider.bind(trace);
-
-  Object.defineProperty(trace, "getTracerProvider", {
-    configurable: true,
-    writable: true,
-    value: () => provider,
-  });
-
+test("OTel 2.10 transformers support cached tracers, shared ownership, and drain-safe deactivation", async () => {
+  const manager = new RecordingManager();
+  const composite = new RespanCompositeProcessor(manager);
+  const provider = new BasicTracerProvider({ spanProcessors: [composite] });
+  const tracerBeforeActivation = provider.getTracer("eve");
+  const activeProcessorBefore = provider._activeSpanProcessor;
   const first = new EveInstrumentor();
   const second = new EveInstrumentor();
 
   try {
     first.activate();
     second.activate();
-
-    const wrapper = provider.activeSpanProcessor;
-    assert.notEqual(wrapper, originalProcessor);
+    assert.equal(provider._activeSpanProcessor, activeProcessorBefore);
     assert.equal(first.isActive(), true);
     assert.equal(second.isActive(), true);
 
-    const both = makeTurn("session-both", "1");
-    wrapper.onStart(both, undefined);
-    wrapper.onEnd(both);
-    assertCanonicalTurn(delegatedSpans[0], "session-both");
+    startTurn(tracerBeforeActivation, "session-both").end();
+    assertCanonicalTurn(manager.ended[0], "session-both");
 
     first.deactivate();
-    assert.equal(provider.activeSpanProcessor, wrapper);
+    const tracerAfterActivation = provider.getTracer("eve.after-activation");
+    startTurn(tracerAfterActivation, "session-second-owner").end();
+    assertCanonicalTurn(manager.ended[1], "session-second-owner");
 
-    const secondOwner = makeTurn("session-second-owner", "2");
-    wrapper.onStart(secondOwner, undefined);
-    wrapper.onEnd(secondOwner);
-    assertCanonicalTurn(delegatedSpans[1], "session-second-owner");
-
-    const draining = makeTurn("session-draining", "3");
-    wrapper.onStart(draining, undefined);
+    const draining = startTurn(tracerBeforeActivation, "session-draining");
     second.deactivate();
-    assert.equal(provider.activeSpanProcessor, originalProcessor);
-    wrapper.onEnd(draining);
-    assertCanonicalTurn(delegatedSpans[2], "session-draining");
+    draining.end();
+    assertCanonicalTurn(manager.ended[2], "session-draining");
 
-    const inactive = makeTurn("session-after-deactivation", "4");
-    originalProcessor.onStart(inactive, undefined);
-    originalProcessor.onEnd(inactive);
+    const inactive = tracerAfterActivation.startSpan("ai.eve.turn", {
+      attributes: {
+        "eve.session.id": "session-after-deactivation",
+        "gen_ai.request.model": "raw-model-keeps-span-routable",
+      },
+    });
+    inactive.end();
+    assert.equal(manager.ended[3].attributes["respan.entity.log_type"], undefined);
     assert.equal(
-      delegatedSpans[3].attributes["respan.entity.log_type"],
-      undefined,
+      manager.ended[3].attributes["eve.session.id"],
+      "session-after-deactivation",
     );
   } finally {
     first.deactivate();
     second.deactivate();
-    Object.defineProperty(trace, "getTracerProvider", {
-      configurable: true,
-      writable: true,
-      value: originalGetTracerProvider,
-    });
+    await provider.shutdown();
   }
+
+  const noHost = new EveInstrumentor();
+  assert.throws(
+    () => noHost.activate(),
+    /No compatible Respan span-transformer host is active/,
+  );
+  assert.equal(noHost.isActive(), false);
 });

@@ -26,6 +26,7 @@
     "instrumentations/respan-instrumentation-openai",
     "instrumentations/respan-instrumentation-openai-agents",
     "instrumentations/respan-instrumentation-openinference",
+    "instrumentations/respan-instrumentation-pydantic-ai",
     "instrumentations/respan-instrumentation-superagent",
     "instrumentations/respan-instrumentation-vertexai",
     "instrumentations/respan-instrumentation-vercel",
@@ -37,7 +38,6 @@
     "instrumentations/respan-instrumentation-eve"
   ],
   "resolutions": {
-    "@opentelemetry/core": "2.10.0",
     "adm-zip": "0.6.0",
     "tar": "7.5.22",
     "undici@npm:^5.29.0": "npm:6.28.0",

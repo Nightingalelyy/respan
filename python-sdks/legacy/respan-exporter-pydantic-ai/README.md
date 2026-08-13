@@ -1,6 +1,6 @@
 # Respan Exporter for Pydantic AI
 
-**[respan.ai](https://respan.ai)** · **[Documentation](https://docs.respan.ai)** · **[PyPI](https://pypi.org/project/respan-exporter-pydantic-ai/)**
+**[respan.ai](https://respan.ai)** · **[Documentation](https://www.respan.ai/docs)** · **[PyPI](https://pypi.org/project/respan-exporter-pydantic-ai/)**
 
 Instrument [Pydantic AI](https://ai.pydantic.dev/) agents with Respan: traces, spans, and metrics are sent to Respan via OpenTelemetry and standard semantic conventions. Requires [respan-tracing](https://pypi.org/project/respan-tracing/) (installed automatically).
 
@@ -125,7 +125,7 @@ RESPAN_API_KEY="your-key" poetry run python scripts/run_real_gateway_test.py
 ## Further Reading
 
 - [Pydantic AI example project](https://github.com/Nightingalelyy/respan-example-projects/tree/main/python/tracing/pydantic-ai) — runnable integration examples
-- [Respan documentation](https://docs.respan.ai)
+- [Respan documentation](https://www.respan.ai/docs)
 - [Pydantic AI documentation](https://ai.pydantic.dev/)
 - [respan-tracing on PyPI](https://pypi.org/project/respan-tracing/)
 - [OpenTelemetry Semantic Conventions for LLM spans](https://opentelemetry.io/docs/semconv/ai/llm-spans/)

@@ -1,0 +1,6 @@
+{
+  "summary": "Add pgvector instrumentation",
+  "packages": {
+    "respan-instrumentation-pgvector": "new"
+  }
+}

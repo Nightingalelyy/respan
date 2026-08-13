@@ -276,6 +276,17 @@ class LiteLLMCompletionParams(BasicLLMParams):
         return v
 
 
+class LiteLLMProviderCompletionParams(LiteLLMCompletionParams):
+    """LiteLLM completion parameters with provider-specific extensions."""
+
+    reasoning: Optional[Dict[str, Any]] = None
+    provider: Optional[Dict[str, Any]] = None
+
+
+# Backward-compatible alias for the name published in respan-sdk 2.7.3.
+OpenRouterCompletionParams = LiteLLMProviderCompletionParams
+
+
 class Usage(RespanBaseModel):
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None

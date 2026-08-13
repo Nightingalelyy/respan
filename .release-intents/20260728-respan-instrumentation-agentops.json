@@ -1,0 +1,6 @@
+{
+  "summary": "Add AgentOps instrumentation",
+  "packages": {
+    "respan-instrumentation-agentops": "new"
+  }
+}

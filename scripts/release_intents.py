@@ -268,6 +268,112 @@ def resolved_base_version(entry: dict, prefer_registry: bool) -> str:
     return max_version(current_version, registry_version)
 
 
+def resolved_release_version(entry: dict, bump: str, prefer_registry: bool) -> str:
+    if bump == "new":
+        manifest = release_inventory.load_manifest(entry)
+        current_version = release_inventory.manifest_version(entry, manifest)
+        registry_version = latest_registry_version(entry)
+        if registry_version is not None:
+            raise ValueError(
+                f"package {entry['name']} already exists in the registry at {registry_version}; "
+                "cannot use bump type 'new'"
+            )
+        return current_version
+
+    base_version = resolved_base_version(entry, prefer_registry=prefer_registry)
+    return bump_version(base_version, bump)
+
+
+def resolve_versions(records: list[dict], prefer_registry: bool) -> dict[str, str]:
+    entries = inventory_entries_by_name()
+    return {
+        record["name"]: resolved_release_version(
+            entries[record["name"]],
+            record["bump"],
+            prefer_registry=prefer_registry,
+        )
+        for record in records
+    }
+
+
+def validate_version_mapping(payload: object) -> dict[str, str]:
+    if not isinstance(payload, dict) or not payload:
+        raise ValueError("version mapping must contain a non-empty object")
+
+    for package_name, version in payload.items():
+        if not isinstance(package_name, str) or not isinstance(version, str):
+            raise ValueError("version mapping must map package names to version strings")
+        parse_semver(version)
+
+    return payload
+
+
+def apply_resolved_versions(payload: dict[str, str], package_name: str) -> str:
+    if package_name not in payload:
+        raise KeyError(package_name)
+    set_versions(payload)
+    return payload[package_name]
+
+
+def apply_resolved_versions_for_plan(
+    payload: dict[str, str],
+    package_names: list[str],
+) -> dict[str, str]:
+    planned_names = set(package_names)
+    resolved_names = set(payload)
+    if planned_names != resolved_names:
+        missing = sorted(planned_names - resolved_names)
+        unexpected = sorted(resolved_names - planned_names)
+        details: list[str] = []
+        if missing:
+            details.append(f"missing resolved versions for {missing}")
+        if unexpected:
+            details.append(f"unexpected resolved versions for {unexpected}")
+        raise ValueError("javascript publication plan/version mismatch: " + "; ".join(details))
+
+    set_versions(payload)
+    return payload
+
+
+def collect_published_versions(artifact_root: Path) -> dict[str, str]:
+    versions: dict[str, str] = {}
+
+    def add_version(package_name: object, version: object, source: Path) -> None:
+        if not isinstance(package_name, str) or not isinstance(version, str):
+            raise ValueError(f"invalid published version payload in {source}")
+        parse_semver(version)
+        previous = versions.get(package_name)
+        if previous is not None and previous != version:
+            raise ValueError(
+                f"conflicting published versions for {package_name}: {previous} != {version}"
+            )
+        versions[package_name] = version
+
+    for payload_path in sorted(artifact_root.glob("*/version.json")):
+        payload = json.loads(payload_path.read_text())
+        if not isinstance(payload, dict):
+            raise ValueError(f"invalid published version payload in {payload_path}")
+        add_version(payload.get("name"), payload.get("version"), payload_path)
+
+    for payload_path in sorted(artifact_root.glob("*/versions.json")):
+        payload = json.loads(payload_path.read_text())
+        if not isinstance(payload, dict):
+            raise ValueError(f"invalid published versions payload in {payload_path}")
+        for package_name, version in payload.items():
+            add_version(package_name, version, payload_path)
+
+    if not versions:
+        raise ValueError(f"no published version artifacts found under {artifact_root}")
+    return dict(sorted(versions.items()))
+
+
+def write_published_version_mapping(artifact_root: Path, output_path: Path) -> dict[str, str]:
+    versions = collect_published_versions(artifact_root)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(versions, indent=2, sort_keys=True) + "\n")
+    return versions
+
+
 def print_records(records: list[dict], fmt: str, count: bool) -> int:
     if count:
         print(len(records))
@@ -289,15 +395,24 @@ def main() -> int:
 
     validate_parser = subparsers.add_parser("validate")
 
-    common_plan = argparse.ArgumentParser(add_help=False)
-    common_plan.add_argument("--ecosystem", choices=["all", "javascript", "python"], default="all")
-    common_plan.add_argument("--changed-from")
-    common_plan.add_argument("--changed-to")
+    common_selection = argparse.ArgumentParser(add_help=False)
+    common_selection.add_argument(
+        "--ecosystem",
+        choices=["all", "javascript", "python"],
+        default="all",
+    )
+    common_selection.add_argument("--changed-from")
+    common_selection.add_argument("--changed-to")
+
+    common_plan = argparse.ArgumentParser(add_help=False, parents=[common_selection])
     common_plan.add_argument("--count", action="store_true")
     common_plan.add_argument("--format", choices=["json", "github-matrix", "names"], default="json")
 
     subparsers.add_parser("plan", parents=[common_plan])
     subparsers.add_parser("missing", parents=[common_plan])
+
+    resolve_versions_parser = subparsers.add_parser("resolve-versions", parents=[common_selection])
+    resolve_versions_parser.add_argument("--prefer-registry", action="store_true")
 
     apply_parser = subparsers.add_parser("apply")
     apply_parser.add_argument("--package", required=True)
@@ -306,6 +421,16 @@ def main() -> int:
 
     set_versions_parser = subparsers.add_parser("set-versions")
     set_versions_parser.add_argument("--file", required=True)
+
+    apply_resolved_parser = subparsers.add_parser("apply-resolved-versions")
+    apply_resolved_parser.add_argument("--versions-json", required=True)
+    apply_target = apply_resolved_parser.add_mutually_exclusive_group(required=True)
+    apply_target.add_argument("--package")
+    apply_target.add_argument("--plan-file", type=Path)
+
+    merge_versions_parser = subparsers.add_parser("merge-version-artifacts")
+    merge_versions_parser.add_argument("--artifact-root", type=Path, required=True)
+    merge_versions_parser.add_argument("--output", type=Path, required=True)
 
     args = parser.parse_args()
 
@@ -326,6 +451,16 @@ def main() -> int:
         records = [{"name": name} for name in missing_intents(args.changed_from, args.changed_to, args.ecosystem)]
         return print_records(records, args.format, args.count)
 
+    if args.command == "resolve-versions":
+        records = planned_records(args.changed_from, args.changed_to, args.ecosystem)
+        try:
+            versions = resolve_versions(records, prefer_registry=args.prefer_registry)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(json.dumps(versions, separators=(",", ":"), sort_keys=True))
+        return 0
+
     if args.command == "apply":
         entries = inventory_entries_by_name()
         entry = entries.get(args.package)
@@ -333,42 +468,25 @@ def main() -> int:
             print(f"unknown release-managed package: {args.package}", file=sys.stderr)
             return 1
 
-        if args.bump == "new":
-            manifest = release_inventory.load_manifest(entry)
-            current_version = release_inventory.manifest_version(entry, manifest)
-            registry_version = latest_registry_version(entry)
-            if registry_version is not None:
-                print(
-                    f"package {args.package} already exists in the registry at {registry_version}; "
-                    "cannot use bump type 'new'",
-                    file=sys.stderr,
-                )
-                return 1
-            set_manifest_version(entry, current_version)
-            print(current_version)
-            return 0
-
-        base_version = resolved_base_version(entry, prefer_registry=args.prefer_registry)
-        next_version = bump_version(base_version, args.bump)
+        try:
+            next_version = resolved_release_version(
+                entry,
+                args.bump,
+                prefer_registry=args.prefer_registry,
+            )
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
         set_manifest_version(entry, next_version)
         print(next_version)
         return 0
 
     if args.command == "set-versions":
-        payload = json.loads(Path(args.file).read_text())
-        if not isinstance(payload, dict) or not payload:
-            print("version mapping file must contain a non-empty object", file=sys.stderr)
+        try:
+            payload = validate_version_mapping(json.loads(Path(args.file).read_text()))
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
             return 1
-
-        for package_name, version in payload.items():
-            if not isinstance(package_name, str) or not isinstance(version, str):
-                print("version mapping file must map package names to version strings", file=sys.stderr)
-                return 1
-            try:
-                parse_semver(version)
-            except ValueError as exc:
-                print(str(exc), file=sys.stderr)
-                return 1
 
         try:
             updated_paths = set_versions(payload)
@@ -378,6 +496,38 @@ def main() -> int:
 
         for updated_path in updated_paths:
             print(updated_path)
+        return 0
+
+    if args.command == "apply-resolved-versions":
+        try:
+            payload = validate_version_mapping(json.loads(args.versions_json))
+            if args.plan_file:
+                package_names = release_inventory.javascript_plan_package_names(args.plan_file)
+                applied_versions = apply_resolved_versions_for_plan(payload, package_names)
+                print(json.dumps(applied_versions, separators=(",", ":"), sort_keys=True))
+                return 0
+
+            release_version = apply_resolved_versions(payload, args.package)
+        except json.JSONDecodeError as exc:
+            print(f"version mapping is not valid JSON: {exc}", file=sys.stderr)
+            return 1
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        except KeyError as exc:
+            print(f"unknown package in resolved version mapping: {exc.args[0]}", file=sys.stderr)
+            return 1
+
+        print(release_version)
+        return 0
+
+    if args.command == "merge-version-artifacts":
+        try:
+            write_published_version_mapping(args.artifact_root, args.output)
+        except (json.JSONDecodeError, OSError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(args.output)
         return 0
 
     return 1

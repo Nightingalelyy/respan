@@ -93,8 +93,8 @@ Check higher-priority categories first. If a match is found, use that instrument
 | OpenAI Agents SDK | `openai-agents` | `@openai/agents` | `respan-instrumentation-openai-agents` | `@respan/instrumentation-openai-agents` | [docs](https://respan.ai/docs/integrations/openai-agents-sdk.md) |
 | Claude Agent SDK | `claude-agent-sdk` | — | `respan-instrumentation-claude-agent-sdk` | — | [docs](https://respan.ai/docs/integrations/claude-agents-sdk.md) |
 | Pydantic AI | `pydantic-ai` | — | `respan-instrumentation-pydantic-ai` | — | [docs](https://respan.ai/docs/integrations/pydantic-ai.md) |
-| LangChain | `langchain` | `langchain` | `respan-instrumentation-langchain` (callback) | — | [docs](https://respan.ai/docs/integrations/langchain.md) |
-| LangGraph | `langgraph` | — | `respan-instrumentation-langchain` (callback) | — | [docs](https://respan.ai/docs/integrations/langgraph.md) |
+| LangChain | `langchain` | `langchain` | `respan-instrumentation-langchain` | `@respan/instrumentation-langchain` | [docs](https://respan.ai/docs/integrations/langchain.md) |
+| LangGraph | `langgraph` | `@langchain/langgraph` | `respan-instrumentation-langchain` | `@respan/instrumentation-langchain` | [docs](https://respan.ai/docs/integrations/langgraph.md) |
 | CrewAI | `crewai` | — | `respan-instrumentation-crewai` | — | [docs](https://respan.ai/docs/integrations/crewai.md) |
 | LlamaIndex | `llama-index` | — | `respan-instrumentation-llama-index` | — | [docs](https://respan.ai/docs/integrations/llama-index.md) |
 | Haystack | `haystack-ai` | — | `respan-instrumentation-haystack` | — | [docs](https://respan.ai/docs/integrations/haystack.md) |
@@ -103,23 +103,27 @@ Check higher-priority categories first. If a match is found, use that instrument
 
 If a Priority 1 framework is found, use its instrumentation. Do NOT also add Priority 2 instrumentation for the same provider.
 
-**LangChain / LangGraph use a callback pattern, not `Respan(instrumentations=[...])`.** Set up `RespanTelemetry` and pass `add_respan_callback(config=...)` into the chain/graph invocation: `from respan_tracing import RespanTelemetry` + `from respan_instrumentation_langchain import add_respan_callback`. (The other Priority-1 frameworks use the standard `Respan(instrumentations=[XInstrumentor()])` plugin pattern.)
+**LangChain / LangGraph setup differs by language** (one package covers both frameworks: `respan-instrumentation-langchain` / `@respan/instrumentation-langchain`). In **Python**, pass `LangChainInstrumentor()` to `Respan(instrumentations=[...])` — it patches the LangChain and LangGraph callback managers globally on init, so every chain, graph, node, LLM, tool, and retriever run is traced **automatically with no per-call setup**. `add_respan_callback(config=...)` is optional and only labels a run with a name, tags, or metadata. In **TypeScript**, create a `LangChainInstrumentor`, pass it to `new Respan({ instrumentations: [...] })`, **and** attach `instrumentor.addCallback(...)` to the **outermost** chain or graph invocation (`.invoke()` / `.stream()`, not inside a node — LangChain/LangGraph propagate it to nested runs); the TypeScript instrumentor does **not** patch globally, so without the callback no spans are emitted. (The other Priority-1 frameworks use the standard `Respan(instrumentations=[XInstrumentor()])` plugin pattern.)
 
 **Priority 2 — Direct LLM SDKs** (only if no P1 framework covers this provider):
 
-These are **auto-instrumented** — just `Respan()` / `new Respan()`, no extra packages needed:
+The integrations listed for each language are **auto-instrumented** with `Respan()` / `new Respan()`. The application still provides the provider SDK; the matching first-party instrumentation adapter is bundled by the Respan facade. A dash means that language currently requires an explicit instrumentation package and instrumentor.
 
-| Library | Python package | JS/TS package | Docs |
-|---------|---------------|---------------|------|
+| Library | Python SDK (auto) | JS/TS SDK (auto) | Docs |
+|---------|-------------------|------------------|------|
 | OpenAI SDK | `openai` | `openai` | [docs](https://respan.ai/docs/integrations/openai-sdk.md) |
 | Anthropic SDK | `anthropic` | `@anthropic-ai/sdk` | [docs](https://respan.ai/docs/integrations/anthropic.md) |
-| Azure OpenAI | `openai` (azure config) | `openai` | [docs](https://respan.ai/docs/integrations/providers/azure.md) |
-| Google Vertex AI | `google-cloud-aiplatform` | — | [docs](https://respan.ai/docs/integrations/vertex-ai.md) |
-| AWS Bedrock | `boto3` | — | [docs](https://respan.ai/docs/integrations/aws-bedrock.md) |
-| Cohere | `cohere` | — | [docs](https://respan.ai/docs/integrations/providers/cohere.md) |
-| Together AI | `together` | — | [docs](https://respan.ai/docs/integrations/together-ai.md) |
+| Azure OpenAI | `openai` (Azure config) | `openai` (Azure client) | [docs](https://respan.ai/docs/integrations/providers/azure.md) |
+| Google Vertex AI | `google-cloud-aiplatform` | `@google-cloud/vertexai` | [docs](https://respan.ai/docs/integrations/vertex-ai.md) |
+| Google GenAI | `google-genai` | — | [docs](https://respan.ai/docs/integrations/google-genai.md) |
+| AWS Bedrock | `boto3` | `@aws-sdk/client-bedrock-runtime` | [docs](https://respan.ai/docs/integrations/aws-bedrock.md) |
+| Cohere | — | `cohere-ai` | [docs](https://respan.ai/docs/integrations/providers/cohere.md) |
+| Together AI | `together` | `together-ai` | [docs](https://respan.ai/docs/integrations/together-ai.md) |
+| OpenRouter | — | `@openrouter/sdk` | [docs](https://respan.ai/docs/integrations/providers/openrouter.md) |
+| Writer | — | `writer-sdk` | [docs](https://respan.ai/docs/integrations/writer.md) |
+| Ollama | `ollama` | — | [docs](https://respan.ai/docs/integrations/ollama.md) |
 
-**Note:** LiteLLM in JS uses the OpenAI-compatible API, so the OpenAI auto-instrument covers it. For Python LiteLLM, see [LiteLLM guide](https://respan.ai/docs/integrations/litellm.md). For Google GenAI (`@google/genai`), see [Google GenAI guide](https://respan.ai/docs/integrations/google-genai.md).
+**Note:** LLM wrappers such as Python LiteLLM stay explicit-only to avoid overlapping provider spans. See the [LiteLLM guide](https://respan.ai/docs/integrations/litellm.md) for its explicit setup.
 
 **1c. Read the actual code and understand the workflow:**
 

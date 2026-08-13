@@ -61,9 +61,9 @@ _AGENT_FRAMEWORK_REASON = (
 _FRAMEWORK_REASON = (
     "framework/wrapper instrumentations are opt-in to avoid duplicating direct SDK spans"
 )
-_NATIVE_GATEWAY_UNVERIFIED_REASON = (
-    "native SDK instrumentation is opt-in because it is not verified for real Respan "
-    "gateway calls with only RESPAN_API_KEY"
+_UNBUNDLED_PROVIDER_REASON = (
+    "provider instrumentation is opt-in until its adapter can be bundled without "
+    "adding incompatible or heavyweight dependencies"
 )
 _OPENAI_COMPATIBLE_GATEWAY_REASON = (
     "provider gateway calls use OpenAI-compatible transport, so OpenAI "
@@ -109,8 +109,6 @@ AUTO_INSTRUMENTATION_REGISTRY: Tuple[AutoInstrumentationSpec, ...] = (
         instrumentation_package="respan-instrumentation-vertexai",
         entry_point="vertexai",
         import_path="respan_instrumentation_vertexai:VertexAIInstrumentor",
-        enabled_by_default=False,
-        auto_disabled_reason=_PROVIDER_CREDENTIAL_REASON,
         priority=30,
     ),
     AutoInstrumentationSpec(
@@ -131,8 +129,6 @@ AUTO_INSTRUMENTATION_REGISTRY: Tuple[AutoInstrumentationSpec, ...] = (
         instrumentation_package="respan-instrumentation-aws-bedrock",
         entry_point="aws-bedrock",
         import_path="respan_instrumentation_aws_bedrock:AWSBedrockInstrumentor",
-        enabled_by_default=False,
-        auto_disabled_reason=_OPENAI_COMPATIBLE_GATEWAY_REASON,
         priority=40,
         aliases=("bedrock",),
     ),
@@ -178,6 +174,8 @@ AUTO_INSTRUMENTATION_REGISTRY: Tuple[AutoInstrumentationSpec, ...] = (
         instrumentation_package="respan-instrumentation-mistralai",
         entry_point="mistralai",
         import_path="respan_instrumentation_mistralai:MistralAIInstrumentor",
+        enabled_by_default=False,
+        auto_disabled_reason=_UNBUNDLED_PROVIDER_REASON,
         priority=80,
     ),
     AutoInstrumentationSpec(
@@ -188,8 +186,6 @@ AUTO_INSTRUMENTATION_REGISTRY: Tuple[AutoInstrumentationSpec, ...] = (
         instrumentation_package="respan-instrumentation-ollama",
         entry_point="ollama",
         import_path="respan_instrumentation_ollama:OllamaInstrumentor",
-        enabled_by_default=False,
-        auto_disabled_reason=_PROVIDER_CREDENTIAL_REASON,
         priority=90,
     ),
     AutoInstrumentationSpec(
@@ -224,6 +220,8 @@ AUTO_INSTRUMENTATION_REGISTRY: Tuple[AutoInstrumentationSpec, ...] = (
         instrumentation_package="respan-instrumentation-litellm",
         entry_point="litellm",
         import_path="respan_instrumentation_litellm:LiteLLMInstrumentor",
+        enabled_by_default=False,
+        auto_disabled_reason=_FRAMEWORK_REASON,
         priority=120,
     ),
     AutoInstrumentationSpec(
@@ -521,6 +519,80 @@ AUTO_INSTRUMENTATION_REGISTRY: Tuple[AutoInstrumentationSpec, ...] = (
         auto_disabled_reason=_AGENT_FRAMEWORK_REASON,
     ),
     AutoInstrumentationSpec(
+        id="agentscope",
+        category="agent_framework",
+        provider="AgentScope",
+        sdk_package="agentscope",
+        instrumentation_package="respan-instrumentation-agentscope",
+        entry_point="agentscope",
+        import_path="respan_instrumentation_agentscope:AgentScopeInstrumentor",
+        enabled_by_default=False,
+        auto_disabled_reason=_AGENT_FRAMEWORK_REASON,
+    ),
+    AutoInstrumentationSpec(
+        id="livekit",
+        category="agent_framework",
+        provider="LiveKit Agents",
+        sdk_package="livekit-agents",
+        instrumentation_package="respan-instrumentation-livekit",
+        entry_point="livekit",
+        import_path="respan_instrumentation_livekit:LiveKitInstrumentor",
+        enabled_by_default=False,
+        auto_disabled_reason=_AGENT_FRAMEWORK_REASON,
+    ),
+    AutoInstrumentationSpec(
+        id="microsoft-agent-framework",
+        category="agent_framework",
+        provider="Microsoft Agent Framework",
+        sdk_package="agent-framework-core",
+        instrumentation_package="respan-instrumentation-microsoft-agent-framework",
+        entry_point="microsoft-agent-framework",
+        import_path=(
+            "respan_instrumentation_microsoft_agent_framework:"
+            "MicrosoftAgentFrameworkInstrumentor"
+        ),
+        enabled_by_default=False,
+        auto_disabled_reason=_AGENT_FRAMEWORK_REASON,
+    ),
+    AutoInstrumentationSpec(
+        id="watson-orchestrate-adk",
+        category="agent_framework",
+        provider="IBM watsonx Orchestrate ADK",
+        sdk_package="ibm-watsonx-orchestrate",
+        instrumentation_package="respan-instrumentation-watson-orchestrate-adk",
+        entry_point="watson-orchestrate-adk",
+        import_path=(
+            "respan_instrumentation_watson_orchestrate_adk:"
+            "WatsonOrchestrateADKInstrumentor"
+        ),
+        enabled_by_default=False,
+        auto_disabled_reason=_AGENT_FRAMEWORK_REASON,
+    ),
+    AutoInstrumentationSpec(
+        id="semantic-kernel",
+        category="framework",
+        provider="Microsoft Semantic Kernel",
+        sdk_package="semantic-kernel",
+        instrumentation_package="respan-instrumentation-semantic-kernel",
+        entry_point="semantic-kernel",
+        import_path=(
+            "respan_instrumentation_semantic_kernel:SemanticKernelInstrumentor"
+        ),
+        enabled_by_default=False,
+        auto_disabled_reason=_FRAMEWORK_REASON,
+    ),
+    AutoInstrumentationSpec(
+        id="cursor-sdk",
+        category="protocol",
+        provider="Cursor SDK",
+        sdk_package="cursor",
+        instrumentation_package="respan-instrumentation-cursor-sdk",
+        entry_point="cursor-sdk",
+        import_path="respan_instrumentation_cursor_sdk:CursorSDKInstrumentor",
+        enabled_by_default=False,
+        auto_disabled_reason=_PROTOCOL_REASON,
+    ),
+    AutoInstrumentationSpec(
         id="mcp",
         category="protocol",
         provider="MCP",
@@ -589,6 +661,10 @@ AUTO_INSTRUMENTATION_REGISTRY: Tuple[AutoInstrumentationSpec, ...] = (
 )
 
 
+def _is_auto_enabled(spec: AutoInstrumentationSpec) -> bool:
+    return spec.category == "direct_llm" and spec.enabled_by_default
+
+
 def list_auto_instrumentation_specs(
     *,
     include_disabled: bool = True,
@@ -598,7 +674,7 @@ def list_auto_instrumentation_specs(
     if include_disabled:
         return AUTO_INSTRUMENTATION_REGISTRY
     return tuple(
-        spec for spec in AUTO_INSTRUMENTATION_REGISTRY if spec.enabled_by_default
+        spec for spec in AUTO_INSTRUMENTATION_REGISTRY if _is_auto_enabled(spec)
     )
 
 
@@ -693,6 +769,19 @@ def activate_auto_instrumentations(
     activations = []
 
     for spec in sorted(registry, key=lambda item: (item.priority, item.id)):
+        if spec.category != "direct_llm":
+            activations.append(
+                AutoInstrumentationActivation(
+                    status=_status(
+                        spec,
+                        "disabled",
+                        reason=spec.auto_disabled_reason
+                        or "only direct LLM SDK instrumentations are eligible for auto mode",
+                    )
+                )
+            )
+            continue
+
         if not spec.enabled_by_default:
             activations.append(
                 AutoInstrumentationActivation(

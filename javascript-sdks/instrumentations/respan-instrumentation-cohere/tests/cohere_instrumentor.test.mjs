@@ -168,6 +168,18 @@ test.beforeEach(() => {
   captureState.spans = [];
 });
 
+test("does not activate when the installed SDK has no supported methods", async () => {
+  class UnsupportedCohereClient {}
+
+  const instrumentor = new CohereInstrumentor({
+    sdkModule: { CohereClient: UnsupportedCohereClient },
+  });
+  await instrumentor.activate();
+
+  assert.equal(instrumentor.isActive(), false);
+  instrumentor.deactivate();
+});
+
 test("captures v2 chat tools with canonical Cohere LLM attributes", async () => {
   const module = fakeModule();
   const instrumentor = new CohereInstrumentor({ sdkModule: module });
@@ -197,7 +209,7 @@ test("captures v2 chat tools with canonical Cohere LLM attributes", async () => 
   const [span] = captureState.spans;
   const attrs = span.attributes;
 
-  assert.equal(span.instrumentationLibrary?.name, "@respan/instrumentation-cohere");
+  assert.equal(span.instrumentationScope?.name, "@respan/instrumentation-cohere");
   assert.equal(attrs["respan.entity.log_type"], "chat");
   assert.equal(attrs["respan.entity.log_method"], "ts_tracing");
   assert.equal(attrs["gen_ai.system"], "cohere");

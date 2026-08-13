@@ -1,0 +1,13 @@
+{
+  "summary": "Patch package metadata and READMEs to repair broken documentation, GitHub, and CDN asset links",
+  "packages": {
+    "@respan/respan": "patch",
+    "@respan/respan-sdk": "patch",
+    "@respan/tracing": "patch",
+    "respan-ai": "patch",
+    "respan-exporter-openai-agents": "patch",
+    "respan-instrumentation-langfuse": "patch",
+    "respan-sdk": "patch",
+    "respan-tracing": "patch"
+  }
+}

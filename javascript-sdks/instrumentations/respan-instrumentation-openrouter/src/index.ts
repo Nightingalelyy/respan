@@ -29,7 +29,7 @@ type AnyFunction = (...args: any[]) => any;
 type Patch = () => void;
 type ParentContext = { traceId?: string; parentId?: string };
 
-const instrumentationLibrary = {
+const instrumentationScope = {
   name: INSTRUMENTATION_NAME,
   version: INSTRUMENTATION_VERSION,
 };
@@ -44,13 +44,53 @@ const ATTR_LLM_REQUEST_FUNCTIONS = TL.LLM_REQUEST_FUNCTIONS ?? "llm.request.func
 const ATTR_LLM_USAGE_TOTAL_TOKENS = TL.LLM_USAGE_TOTAL_TOKENS ?? "llm.usage.total_tokens";
 
 export class OpenRouterInstrumentor {
-  private patches: Patch[] = [];
+  public readonly name = "openrouter";
+
+  private static readonly _sharedState = {
+    activeInstances: 0,
+    patches: [] as Patch[],
+    activation: undefined as Promise<boolean> | undefined,
+  };
+
   private enabled = false;
+  private activation?: Promise<void>;
 
   async activate(): Promise<void> {
     if (this.enabled) return;
+
+    if (!this.activation) {
+      this.activation = this.acquireActivation();
+    }
+    const activation = this.activation;
+    try {
+      await activation;
+    } finally {
+      if (this.activation === activation) this.activation = undefined;
+    }
+  }
+
+  private async acquireActivation(): Promise<void> {
+    const shared = OpenRouterInstrumentor._sharedState;
+    let patchesInstalled: boolean;
+    if (shared.activation) {
+      patchesInstalled = await shared.activation;
+    } else if (shared.patches.length > 0) {
+      patchesInstalled = true;
+    } else {
+      const activation = this.installPatches();
+      shared.activation = activation;
+      try {
+        patchesInstalled = await activation;
+      } finally {
+        if (shared.activation === activation) {
+          shared.activation = undefined;
+        }
+      }
+    }
+    if (!patchesInstalled || this.enabled) return;
+
+    shared.activeInstances += 1;
     this.enabled = true;
-    await Promise.all([this.patchChat(), this.patchEmbeddings()]);
   }
 
   async deactivate(): Promise<void> {
@@ -58,26 +98,53 @@ export class OpenRouterInstrumentor {
   }
 
   enable(): void {
-    if (this.enabled) return;
-    this.enabled = true;
-    Promise.all([this.patchChat(), this.patchEmbeddings()]).catch(() => undefined);
+    void this.activate().catch(() => undefined);
+  }
+
+  isActive(): boolean {
+    return this.enabled;
   }
 
   disable(): void {
-    for (const undo of [...this.patches].reverse()) undo();
-    this.patches = [];
+    if (!this.enabled) return;
+
+    const shared = OpenRouterInstrumentor._sharedState;
+    shared.activeInstances = Math.max(0, shared.activeInstances - 1);
     this.enabled = false;
+    if (shared.activeInstances === 0) this.restorePatches();
+  }
+
+  private async installPatches(): Promise<boolean> {
+    try {
+      await this.patchChat();
+      await this.patchEmbeddings();
+    } catch (error) {
+      this.restorePatches();
+      throw error;
+    }
+    return OpenRouterInstrumentor._sharedState.patches.length > 0;
+  }
+
+  private restorePatches(): void {
+    const shared = OpenRouterInstrumentor._sharedState;
+    for (const undo of [...shared.patches].reverse()) undo();
+    shared.patches = [];
   }
 
   private async patchChat(): Promise<void> {
     const mod = await importOpenRouterSdkModule("@openrouter/sdk/sdk/chat.js");
     const proto = (mod as AnyRecord).Chat?.prototype;
-    if (!proto || proto.__respanPatchedSend) return;
+    if (!proto || proto.__respanPatchedSend || typeof proto.send !== "function") return;
 
     const original = proto.send as AnyFunction;
-    const instrumentor = this;
-    proto.send = function patchedSend(this: unknown, request: AnyRecord, options?: AnyRecord) {
-      if (!instrumentor.enabled) return original.apply(this, arguments as any);
+    const patchedSend: AnyFunction = function patchedSend(
+      this: unknown,
+      request: AnyRecord,
+      options?: AnyRecord,
+    ) {
+      if (OpenRouterInstrumentor._sharedState.activeInstances === 0) {
+        return original.apply(this, arguments as any);
+      }
       const parent = activeParentContext();
       const startedAt = new Date();
       const chatRequest = resolveChatRequest(request);
@@ -105,9 +172,10 @@ export class OpenRouterInstrumentor {
         throw error;
       }
     };
+    proto.send = patchedSend;
     proto.__respanPatchedSend = true;
-    this.patches.push(() => {
-      proto.send = original;
+    OpenRouterInstrumentor._sharedState.patches.push(() => {
+      if (proto.send === patchedSend) proto.send = original;
       delete proto.__respanPatchedSend;
     });
   }
@@ -115,12 +183,21 @@ export class OpenRouterInstrumentor {
   private async patchEmbeddings(): Promise<void> {
     const mod = await importOpenRouterSdkModule("@openrouter/sdk/sdk/embeddings.js");
     const proto = (mod as AnyRecord).Embeddings?.prototype;
-    if (!proto || proto.__respanPatchedGenerate) return;
+    if (
+      !proto ||
+      proto.__respanPatchedGenerate ||
+      typeof proto.generate !== "function"
+    ) return;
 
     const original = proto.generate as AnyFunction;
-    const instrumentor = this;
-    proto.generate = function patchedGenerate(this: unknown, request: AnyRecord, options?: AnyRecord) {
-      if (!instrumentor.enabled) return original.apply(this, arguments as any);
+    const patchedGenerate: AnyFunction = function patchedGenerate(
+      this: unknown,
+      request: AnyRecord,
+      options?: AnyRecord,
+    ) {
+      if (OpenRouterInstrumentor._sharedState.activeInstances === 0) {
+        return original.apply(this, arguments as any);
+      }
       const parent = activeParentContext();
       const startedAt = new Date();
       const requestBody = resolveEmbeddingRequestBody(request);
@@ -146,9 +223,10 @@ export class OpenRouterInstrumentor {
         throw error;
       }
     };
+    proto.generate = patchedGenerate;
     proto.__respanPatchedGenerate = true;
-    this.patches.push(() => {
-      proto.generate = original;
+    OpenRouterInstrumentor._sharedState.patches.push(() => {
+      if (proto.generate === patchedGenerate) proto.generate = original;
       delete proto.__respanPatchedGenerate;
     });
   }

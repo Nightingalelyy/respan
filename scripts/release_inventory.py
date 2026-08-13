@@ -322,9 +322,42 @@ def ecosystem_shared_change(entry: dict, files: set[str]) -> bool:
 
 
 def javascript_build_order(entries: list[dict], package_name: str) -> list[dict]:
+    return javascript_build_order_for_packages(entries, [package_name])
+
+
+def javascript_build_order_for_packages(
+    entries: list[dict],
+    package_names: list[str],
+) -> list[dict]:
+    return javascript_topological_order(
+        entries,
+        package_names,
+        include_transitive_dependencies=True,
+    )
+
+
+def javascript_publish_order(
+    entries: list[dict],
+    package_names: list[str],
+) -> list[dict]:
+    return javascript_topological_order(
+        entries,
+        package_names,
+        include_transitive_dependencies=False,
+    )
+
+
+def javascript_topological_order(
+    entries: list[dict],
+    package_names: list[str],
+    *,
+    include_transitive_dependencies: bool,
+) -> list[dict]:
     js_entries = {entry["name"]: entry for entry in entries if entry["ecosystem"] == "javascript"}
-    if package_name not in js_entries:
-        raise KeyError(package_name)
+    requested_names = set(package_names)
+    unknown_names = sorted(requested_names - set(js_entries))
+    if unknown_names:
+        raise KeyError(unknown_names[0])
 
     graph = js_internal_dependency_names(entries)
     ordered_names: list[str] = []
@@ -339,13 +372,31 @@ def javascript_build_order(entries: list[dict], package_name: str) -> list[dict]
 
         visiting.add(name)
         for dependency_name in sorted(graph.get(name, set())):
-            visit(dependency_name)
+            if include_transitive_dependencies or dependency_name in requested_names:
+                visit(dependency_name)
         visiting.remove(name)
         visited.add(name)
         ordered_names.append(name)
 
-    visit(package_name)
+    for package_name in sorted(requested_names):
+        visit(package_name)
     return [js_entries[name] for name in ordered_names]
+
+
+def javascript_plan_package_names(plan_path: Path) -> list[str]:
+    payload = json.loads(plan_path.read_text())
+    if not isinstance(payload, list) or not payload:
+        raise ValueError("javascript publication plan must contain a non-empty array")
+
+    package_names: list[str] = []
+    for record in payload:
+        if not isinstance(record, dict) or not isinstance(record.get("name"), str):
+            raise ValueError("javascript publication plan records must contain package names")
+        package_names.append(record["name"])
+
+    if len(package_names) != len(set(package_names)):
+        raise ValueError("javascript publication plan contains duplicate package names")
+    return package_names
 
 
 def validate(entries: list[dict]) -> list[str]:
@@ -416,6 +467,7 @@ def build_record(entry: dict, manifest: dict) -> dict:
         record["has_build"] = has_js_script(manifest, "build")
         record["has_test"] = has_js_script(manifest, "test")
         record["bin_name"] = javascript_bin_name(manifest)
+        record["has_peer_dependencies"] = bool(manifest.get("peerDependencies"))
     else:
         record["import_name"] = python_import_name(manifest)
     return record
@@ -488,6 +540,9 @@ def main() -> int:
     parser.add_argument("--missing-version-bump", action="store_true")
     parser.add_argument("--include-dependents", action="store_true")
     parser.add_argument("--build-order-for")
+    javascript_order = parser.add_mutually_exclusive_group()
+    javascript_order.add_argument("--javascript-build-order-file", type=Path)
+    javascript_order.add_argument("--javascript-publish-order-file", type=Path)
     parser.add_argument("--validate", action="store_true")
     parser.add_argument("--count", action="store_true")
     parser.add_argument("--format", choices=["json", "github-matrix", "paths", "names"], default="json")
@@ -526,6 +581,39 @@ def main() -> int:
         selected = [build_record(entry, load_manifest(entry)) for entry in selected_entries]
         if args.count:
             print(len(selected))
+            return 0
+        if args.format == "github-matrix":
+            print(json.dumps(selected, separators=(",", ":")))
+            return 0
+        print(json.dumps(selected, indent=2))
+        return 0
+
+    if args.javascript_build_order_file or args.javascript_publish_order_file:
+        plan_path = args.javascript_build_order_file or args.javascript_publish_order_file
+        try:
+            package_names = javascript_plan_package_names(plan_path)
+            if args.javascript_build_order_file:
+                selected_entries = javascript_build_order_for_packages(entries, package_names)
+            else:
+                selected_entries = javascript_publish_order(entries, package_names)
+        except (json.JSONDecodeError, OSError, ValueError) as error:
+            print(str(error), file=sys.stderr)
+            return 1
+        except KeyError as error:
+            print(f"unknown javascript package: {error.args[0]}", file=sys.stderr)
+            return 1
+
+        selected = [build_record(entry, load_manifest(entry)) for entry in selected_entries]
+        if args.count:
+            print(len(selected))
+            return 0
+        if args.format == "paths":
+            for entry in selected:
+                print(entry["path"])
+            return 0
+        if args.format == "names":
+            for entry in selected:
+                print(entry["name"])
             return 0
         if args.format == "github-matrix":
             print(json.dumps(selected, separators=(",", ":")))

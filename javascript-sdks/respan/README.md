@@ -1,135 +1,160 @@
-# Respan SDK Tests - Real API Integration Focus
+# Respan TypeScript SDK
 
-This directory contains **real-world integration tests** that validate the SDK works with actual Respan API servers. We've removed heavy mocking in favor of tests that provide real confidence.
+**[respan.ai](https://respan.ai)** | **[Documentation](https://www.respan.ai/docs)** | **[npm](https://www.npmjs.com/package/@respan/respan)**
 
-## 🎯 **Testing Philosophy**
+`@respan/respan` is the unified TypeScript and JavaScript entry point for Respan tracing, lifecycle management, context propagation, and first-party instrumentation plugins. It automatically discovers eligible direct LLM SDK adapters while keeping frameworks, agents, wrappers, and observability bridges explicit to avoid duplicate spans.
 
-**Real API Integration > Mocked Unit Tests**
+## Installation
 
-For an API SDK, the most valuable tests are those that validate the SDK works with the actual API server, not simulated responses.
+Install the facade and your provider SDK. For OpenAI:
 
-## 📁 **Test Structure**
-
-### ✅ **Real API Integration Tests (Primary)**
-- `test_real_world_dataset_workflow.py` - **Your exact use case**: 2025-08-06 prod logs workflow
-- `test_respan_api_integration.py` - Comprehensive API integration tests
-- `test_dataset_api_real.py` - Dataset CRUD operations with real API
-- `test_evaluator_api_real.py` - Evaluator operations with real API
-
-### 🔧 **SDK Unit Tests (Secondary)**  
-- `test_sdk_unit.py` - Tests SDK logic only (no API calls)
-  - Client initialization
-  - URL building
-  - Parameter validation
-  - Method structure validation
-
-### 🛠️ **Utilities**
-- `conftest.py` - Test fixtures and configuration
-- `test_api_connectivity_check.py` - Check if API server is accessible
-- `test_runner.py` - Convenient test runner script
-
-## 🚀 **Running Tests**
-
-### **Real API Tests (Recommended)**
 ```bash
-# Your exact use case workflow
-python tests/test_real_world_dataset_workflow.py
-python -m pytest tests/test_real_world_dataset_workflow.py -v -s
-
-# All real API integration tests
-python -m pytest tests/test_respan_api_integration.py -v -s
-python -m pytest tests/test_dataset_api_real.py -v -s
-python -m pytest tests/test_evaluator_api_real.py -v -s
+npm install @respan/respan openai
 ```
 
-### **SDK Unit Tests**
+Replace `openai` with the provider SDK your application uses. A normal `@respan/respan` install includes the supported first-party instrumentation adapters as optional dependencies. Do not use `--omit=optional` when you want automatic discovery.
+
+## Automatic Onboarding
+
+Set your Respan credentials:
+
 ```bash
-# Test SDK logic without API calls
-python -m pytest tests/test_sdk_unit.py -v
+export RESPAN_API_KEY="your-api-key-here"
+# Optional; this is also the Respan gateway base URL used below.
+export RESPAN_BASE_URL="https://api.respan.ai/api"
 ```
 
-### **Check API Connectivity**
-```bash
-# Verify API server is accessible
-python tests/test_api_connectivity_check.py
+Construct and initialize `Respan` before the first provider call. TypeScript initialization is asynchronous and must be awaited:
+
+```typescript
+import OpenAI from "openai";
+import { Respan } from "@respan/respan";
+
+const respanBaseURL =
+  process.env.RESPAN_BASE_URL ?? "https://api.respan.ai/api";
+
+// Omit `instrumentations` to use curated direct-LLM automatic discovery.
+const respan = new Respan({
+  apiKey: process.env.RESPAN_API_KEY,
+  baseURL: respanBaseURL,
+});
+await respan.initialize();
+
+const client = new OpenAI({
+  apiKey: process.env.RESPAN_API_KEY,
+  baseURL: respanBaseURL,
+});
+
+const response = await client.chat.completions.create({
+  model: "gpt-4.1-nano",
+  messages: [{ role: "user", content: "Say hello in three languages." }],
+});
+console.log(response.choices[0].message.content);
+
+console.table(respan.getInstrumentationStatus());
+await respan.shutdown();
 ```
 
-### **Using Test Runner**
-```bash
-python tests/test_runner.py real        # Real API tests
-python tests/test_runner.py unit        # SDK unit tests  
-python tests/test_runner.py             # All tests
+This example routes inference through the Respan gateway. When calling a provider directly, configure that provider's credentials and endpoint normally; Respan still reads `RESPAN_API_KEY` for telemetry export.
+
+## Automatically Supported Providers
+
+The facade supplies these adapters. Install only the provider SDKs your application actually imports.
+
+| Provider | Application SDK |
+|----------|-----------------|
+| OpenAI | `openai` |
+| Azure OpenAI | `openai` |
+| Anthropic | `@anthropic-ai/sdk` |
+| Vertex AI | `@google-cloud/vertexai` |
+| OpenRouter | `@openrouter/sdk` |
+| AWS Bedrock | `@aws-sdk/client-bedrock-runtime` |
+| Cohere | `cohere-ai` |
+| Together AI | `together-ai` |
+| Writer | `writer-sdk` |
+
+Only registry entries classified as direct LLM integrations and enabled by default are activated. A missing provider SDK or adapter is reported as `missing` and does not stop initialization. Respan also disables overlapping generic instrumentation names to prevent duplicate spans.
+
+## Inspect Instrumentation Status
+
+Call the status API after initialization:
+
+```typescript
+for (const entry of respan.getInstrumentationStatus()) {
+  console.log(entry.id, entry.status, entry.reason);
+}
 ```
 
-## 🔧 **Environment Setup**
+Each automatic registry entry includes its ID, category, provider, provider SDK, instrumentation package, instrumentor class, status, and optional reason. Status is one of `enabled`, `disabled`, `missing`, or `failed`.
 
-Required environment variables in `.env`:
-```bash
-RESPAN_API_KEY=your_api_key_here
-RESPAN_BASE_URL=http://localhost:8000/api
+The status list describes automatic discovery. Explicit plugins are not currently added to this list.
+
+## Control Automatic Discovery
+
+Disable one automatic adapter by selector:
+
+```typescript
+const respan = new Respan({
+  disabledInstrumentations: ["openrouter"],
+});
+await respan.initialize();
 ```
 
-## 💡 **Real-World Test Case**
+Selectors are case-insensitive and can match a registry ID, provider, SDK package, instrumentation package, class name, or alias. Prefer a provider's registry ID. Use `azure-openai` to target Azure specifically; because OpenAI and Azure OpenAI both use the `openai` SDK package, the selector `openai` matches both. Use `OpenAIInstrumentor` when you need to disable only the non-Azure OpenAI adapter.
 
-The `test_real_world_dataset_workflow.py` implements your exact use case:
+Passing an empty explicit list disables all automatic discovery:
 
-1. **User Story**: Testing prod logs from past 2 days with success status (2025-08-06)
-2. **Workflow Steps**:
-   - Create dataset with success status filter
-   - Wait 5 seconds + verify dataset is ready
-   - List logs to verify they look correct  
-   - Add error logs to make dataset comprehensive
-   - Rename dataset to be more descriptive
-   - Find and use first LLM evaluator
-   - Run evaluation on dataset
-   - Check evaluation results
-   - Leave dataset for manual UI review (no auto-delete)
+```typescript
+const respan = new Respan({ instrumentations: [] });
+await respan.initialize();
+```
 
-## 🎯 **Benefits of This Approach**
+## Explicit Framework and Agent Integrations
 
-### **✅ What Real API Tests Catch:**
-- **Schema mismatches** - API returns different fields than expected
-- **Authentication issues** - 403 Forbidden, invalid API keys
-- **API changes** - Breaking changes in endpoints or responses  
-- **Real error responses** - Actual HTTP errors and status codes
-- **Data serialization** - Pydantic validation with real data
-- **Network issues** - Connection timeouts, server unavailable
-- **Permission problems** - API key doesn't have required permissions
+Frameworks, agents, wrappers, protocol/tooling integrations, observability bridges, and vector databases remain explicit to avoid duplicate provider and framework spans.
 
-### **❌ What Mocked Tests Miss:**
-- Schema drift between API and SDK models
-- Real authentication flows
-- Actual error response formats
-- Network-level issues
-- API versioning problems
-- Permission and authorization issues
+For example, OpenAI Agents uses an explicit plugin:
 
-## 🔍 **Current Test Results**
+```bash
+npm install @respan/respan @respan/instrumentation-openai-agents @openai/agents
+```
 
-### **SDK Unit Tests**: ✅ 16/16 passing
-- Client initialization ✅
-- URL building ✅  
-- Method structure validation ✅
-- Parameter handling ✅
+```typescript
+import { Respan } from "@respan/respan";
+import { OpenAIAgentsInstrumentor } from "@respan/instrumentation-openai-agents";
 
-### **Real API Tests**: 🔍 Revealing real issues
-- **Schema mismatch discovered**: API returns evaluators without `slug` field
-- **Authentication issue**: 403 Forbidden on evaluator endpoint
-- **These are REAL problems** that need fixing in either SDK or API
+const respan = new Respan({
+  instrumentations: [new OpenAIAgentsInstrumentor()],
+});
+await respan.initialize();
+```
 
-## 🎉 **Success Story**
+Supplying `instrumentations`, including an empty array, selects exclusive explicit mode and suppresses automatic discovery. TypeScript currently has no switch for combining explicit plugins with all automatic direct-SDK adapters.
 
-The real API tests immediately found actual issues:
-1. **Pydantic validation error** - API response doesn't match expected schema
-2. **Authentication/permission issue** - 403 Forbidden error
+## Lifecycle and Helpers
 
-These are **exactly the kinds of issues** that mocked tests would never catch, but are critical for SDK users!
+- `await respan.initialize()` starts telemetry and activates plugins. Call it before the first provider request.
+- `await respan.flush()` exports buffered spans without deactivating plugins.
+- `await respan.shutdown()` deactivates plugins and shuts down telemetry.
+- `getInstrumentationStatus()` returns automatic discovery results.
+- `withWorkflow`, `withTask`, `withAgent`, `withTool`, and `propagateAttributes` are re-exported from `@respan/tracing`.
 
-## 🚀 **Next Steps**
+## Examples
 
-1. **Fix schema issues** - Update Pydantic models to match actual API responses
-2. **Resolve authentication** - Ensure API key has correct permissions
-3. **Run full workflow test** - Validate your exact use case works end-to-end
-4. **Expand real API coverage** - Add more real-world scenarios
+- [OpenAI SDK examples](../examples/openai-sdk/)
+- [OpenAI Agents SDK example](../examples/openai-agents-sdk/)
+- [Claude Agent SDK examples](../examples/claude-agent-sdk/)
 
-This testing approach gives you **real confidence** that your SDK works with the actual Respan service! 🎯
+## Public API
+
+The package exports `Respan`, registry and status types, `OTELInstrumentor`, `OpenInferenceInstrumentor`, tracing helpers, the Respan client, the span buffer manager, and processor configuration types.
+
+## License
+
+Apache 2.0 — see the repository [LICENSE](../../LICENSE).
+
+## Support
+
+- Email: [team@respan.ai](mailto:team@respan.ai)
+- Documentation: [https://www.respan.ai/docs](https://www.respan.ai/docs)
+- Issues: [GitHub Issues](https://github.com/respanai/respan/issues)

@@ -12,6 +12,8 @@ from .respan_types import (
     EvaluationParams,
     RetryParams,
     Message,
+    LiteLLMProviderCompletionParams,
+    OpenRouterCompletionParams,
     Usage,
 )
 
@@ -40,6 +42,8 @@ __all__ = [
     "EvaluationParams",
     "RetryParams",
     "Message",
+    "LiteLLMProviderCompletionParams",
+    "OpenRouterCompletionParams",
     "Usage",
 
     # Filter types

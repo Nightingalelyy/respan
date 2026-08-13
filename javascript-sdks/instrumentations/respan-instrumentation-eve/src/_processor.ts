@@ -10,8 +10,8 @@
  * - onEnd():   Full attribute translation (model, messages, tokens, metadata, etc.)
  */
 
-import type { Context } from "@opentelemetry/api";
-import type { ReadableSpan, Span, SpanProcessor } from "@opentelemetry/sdk-trace-base";
+import type { Context, Span } from "@opentelemetry/api";
+import type { ReadableSpan, SpanProcessor } from "@opentelemetry/sdk-trace-base";
 import {
   ATTR_GEN_AI_AGENT_ID,
   ATTR_GEN_AI_AGENT_NAME,

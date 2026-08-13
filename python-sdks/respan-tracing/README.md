@@ -1,6 +1,6 @@
 # Building an LLM Workflow with Respan Tracing
 
-**[respan.ai](https://respan.ai)** | **[Documentation](https://docs.respan.ai)** | **[PyPI](https://pypi.org/project/respan-tracing/)**
+**[respan.ai](https://respan.ai)** | **[Documentation](https://www.respan.ai/docs)** | **[PyPI](https://pypi.org/project/respan-tracing/)**
 
 This tutorial demonstrates how to build and trace complex LLM workflows using Respan Tracing. We'll create an example that generates jokes, translates them to pirate language, and simulates audience reactions - all while capturing detailed telemetry of our LLM calls.
 
@@ -9,7 +9,7 @@ This tutorial demonstrates how to build and trace complex LLM workflows using Re
 - Python 3.11+
 - OpenAI API key
 - Anthropic API key
-- Respan API key, you can get your API key from the [API keys page](https://platform.respan.co/platform/api/api-keys)
+- Respan API key
 
 ## Installation
 ```bash
@@ -208,6 +208,89 @@ kai.add_processor(
 **When to use `is_batching_enabled=False`:** For exporters that write to local/in-process destinations (file, database, in-memory queue). Synchronous export guarantees spans are written before the calling function returns — critical for worker processes where greenlets/threads may exit before a background batch thread runs.
 
 See [Multi-Processor Examples](#multiple-processors) for complete examples.
+
+### ThreadPoolExecutor and Parallel Agent Steps
+
+OpenTelemetry context is thread-local. Plain `ThreadPoolExecutor` workers,
+raw `threading.Thread` targets, and `Future` callbacks can lose the active
+Respan span, processor routing, propagated attributes, and active `SpanBuffer`.
+Use the context propagation helpers when parallel work is launched from inside
+a traced workflow or agent.
+
+```python
+from respan_tracing import (
+    ContextPropagatingThreadPoolExecutor,
+    RespanTelemetry,
+    task,
+    workflow,
+)
+
+telemetry = RespanTelemetry(app_name="parallel-agent", api_key="respan-xxx")
+
+
+@task(name="score_candidate")
+def score_candidate(candidate: str) -> int:
+    return len(candidate)
+
+
+@workflow(name="rank_candidates", processors="production")
+def rank_candidates(candidates: list[str]) -> list[int]:
+    with ContextPropagatingThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(score_candidate, candidate) for candidate in candidates]
+        return [future.result() for future in futures]
+```
+
+`executor.map(...)` is also context-aware on
+`ContextPropagatingThreadPoolExecutor`.
+
+If you already own the executor lifecycle, use `submit_with_current_context`.
+For callbacks that create spans after a future completes, use
+`add_done_callback_with_current_context`.
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+from respan_tracing import add_done_callback_with_current_context, submit_with_current_context
+
+
+def on_done(future):
+    with get_client().start_span("post_process_result", kind="task"):
+        consume(future.result())
+
+
+with ThreadPoolExecutor(max_workers=4) as executor:
+    future = submit_with_current_context(executor, score_candidate, "agent-output")
+    add_done_callback_with_current_context(future, on_done)
+    result = future.result()
+```
+
+For async orchestration that hands blocking SDK calls to an executor, use
+`run_in_executor_with_current_context` or `to_thread_with_current_context`.
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+from respan_tracing import run_in_executor_with_current_context, task, workflow
+
+
+@task(name="blocking_retrieval")
+def blocking_retrieval(query: str) -> str:
+    return search_index(query)
+
+
+@workflow(name="async_agent", processors="production")
+async def async_agent(query: str) -> str:
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        return await run_in_executor_with_current_context(
+            executor,
+            blocking_retrieval,
+            query,
+        )
+```
+
+For raw threads, use `ContextPropagatingThread` instead of `threading.Thread`.
+
+For buffered spans, wait for submitted futures before leaving the
+`client.get_span_buffer(...)` block. The buffer is thread-safe and flushes a
+stable snapshot on exit.
 
 ### Common Configuration Patterns
 

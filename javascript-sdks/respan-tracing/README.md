@@ -1,6 +1,6 @@
 # Respan Tracing SDK
 
-**[respan.ai](https://respan.ai)** | **[Documentation](https://docs.respan.ai)**
+**[respan.ai](https://respan.ai)** | **[Documentation](https://www.respan.ai/docs)**
 
 A lightweight OpenTelemetry-based tracing SDK for Respan, built with minimal dependencies and optional instrumentation support.
 Inspired by [Openllmetry](https://github.com/traceloop/openllmetry-js)
@@ -267,6 +267,43 @@ interface DecoratorConfig {
 ```
 
 ## Advanced Features
+
+### Instrumentation span transformers
+
+Instrumentation packages can normalize spans before Respan filtering without
+patching OpenTelemetry provider internals:
+
+```typescript
+import { RespanLogType, RespanSpanAttributes } from "@respan/respan-sdk";
+import { registerSpanTransformer } from "@respan/tracing";
+
+const registration = registerSpanTransformer("@example/instrumentation", {
+  onStart(span) {
+    span.setAttribute(
+      RespanSpanAttributes.RESPAN_LOG_TYPE,
+      RespanLogType.TASK,
+    );
+  },
+  onEnd(span) {
+    // Synchronously add canonical attributes and remove raw vendor fields.
+  },
+  prepareForExport(span) {
+    return span; // May return an export-only ReadableSpan clone.
+  },
+  dispose() {
+    // Clear package-owned correlation state.
+  },
+});
+
+registration.unregister();
+```
+
+Initialize Respan before registering. Keys execute in lexical order and are
+reference-counted; the first transformer for a key remains authoritative until
+its last registration is removed. Unregistering excludes newly started spans,
+while spans already captured at `onStart` finish their `onEnd` and
+`prepareForExport` hooks before `dispose` runs. Hook failures are isolated so a
+single instrumentation cannot block the export pipeline.
 
 ### Span Management with getClient()
 
@@ -859,4 +896,3 @@ import { getClient } from '@respan/tracing';  // New in v1.1.0
 ## License
 
 Apache-2.0
-

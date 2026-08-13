@@ -29,6 +29,8 @@ import {
   SYSTEM_INSTRUCTION_SNAKE_KEY,
   SYSTEM_ROLE,
   TEXT_KEY,
+  THOUGHTS_TOKEN_COUNT_KEY,
+  THOUGHTS_TOKEN_COUNT_SNAKE_KEY,
   TOOL_CONFIG_KEY,
   TOOL_CONFIG_SNAKE_KEY,
   TOOL_ROLE,
@@ -352,11 +354,18 @@ export function extractUsage(responseOrChunks: unknown): Record<string, number> 
     CANDIDATES_TOKEN_COUNT_KEY,
     CANDIDATES_TOKEN_COUNT_SNAKE_KEY,
   );
+  const thoughtsTokens = getField(
+    usage,
+    THOUGHTS_TOKEN_COUNT_KEY,
+    THOUGHTS_TOKEN_COUNT_SNAKE_KEY,
+  );
   const totalTokens = getField(usage, TOTAL_TOKEN_COUNT_KEY, TOTAL_TOKEN_COUNT_SNAKE_KEY);
 
   if (typeof promptTokens === "number") result[PROMPT_TOKEN_COUNT_KEY] = promptTokens;
   if (typeof completionTokens === "number") {
-    result[CANDIDATES_TOKEN_COUNT_KEY] = completionTokens;
+    // Gemini reports thought tokens separately, but output usage includes them.
+    result[CANDIDATES_TOKEN_COUNT_KEY] =
+      completionTokens + (typeof thoughtsTokens === "number" ? thoughtsTokens : 0);
   }
   if (typeof totalTokens === "number") result[TOTAL_TOKEN_COUNT_KEY] = totalTokens;
   return result;

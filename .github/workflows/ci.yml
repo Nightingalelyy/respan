@@ -36,7 +36,9 @@ jobs:
           python-version: "3.11"
 
       - name: Validate release metadata
-        run: python3 scripts/release_inventory.py --validate
+        run: |
+          python3 scripts/release_inventory.py --validate
+          python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 
       - id: refs
         name: Resolve comparison refs
@@ -228,12 +230,37 @@ jobs:
           python - <<'PY'
           import importlib.metadata as md
           import importlib.util
+          import re
+
+          from respan import list_auto_instrumentation_specs
 
           # 1. All native instrumentors are bundled / discoverable.
           expected = {"openai", "anthropic", "aws-bedrock", "vertexai", "google-genai", "together", "ollama"}
           discovered = {ep.name for ep in md.entry_points(group="respan.instrumentations")}
           missing = expected - discovered
           assert not missing, f"native instrumentors not bundled: {sorted(missing)}"
+
+          # The effective auto registry must be the same native set declared by
+          # the wheel. This prevents bundled/default drift and keeps wrappers or
+          # frameworks out of zero-code auto mode.
+          enabled_specs = list_auto_instrumentation_specs(include_disabled=False)
+          enabled_entry_points = {spec.entry_point for spec in enabled_specs}
+          assert enabled_entry_points == expected, (
+              f"auto registry mismatch: {sorted(enabled_entry_points)}"
+          )
+          assert all(spec.category == "direct_llm" for spec in enabled_specs)
+
+          requirements = md.requires("respan-ai") or []
+          bundled_packages = {
+              re.match(r"^[A-Za-z0-9_.-]+", requirement).group(0)
+              for requirement in requirements
+              if requirement.startswith("respan-instrumentation-")
+          }
+          enabled_packages = {spec.instrumentation_package for spec in enabled_specs}
+          assert bundled_packages == enabled_packages, (
+              "wheel dependency mismatch: bundled=%s enabled=%s"
+              % (sorted(bundled_packages), sorted(enabled_packages))
+          )
 
           # 2. No provider SDK leaked in (they are optional, brought by the app).
           def _installed(module):

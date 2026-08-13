@@ -6,6 +6,9 @@ translates Eve's nested AI SDK 7 model and tool spans. The optional
 `withEveLineage` helper groups delegated sessions under their root session and
 records their immediate parent lineage.
 
+The instrumentor registers with Respan's public span-transformer lifecycle, so
+it works with OpenTelemetry 2.x tracers created before or after activation.
+
 The AI SDK translator is included in this package. It does not depend on
 `@respan/instrumentation-vercel`, and it does not register another
 `@ai-sdk/otel` integration. Eve owns that registration.

@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "respan-instrumentation-smolagents"
-version = "0.1.0"
+version = "0.1.1"
 description = "Respan instrumentation plugin for smolagents"
 authors = ["Respan <team@respan.ai>"]
 license = "Apache 2.0"

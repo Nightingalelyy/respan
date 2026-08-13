@@ -34,14 +34,16 @@ jobs:
     outputs:
       base_ref: ${{ steps.refs.outputs.base_ref }}
       head_ref: ${{ steps.refs.outputs.head_ref }}
-      javascript_matrix: ${{ steps.javascript_matrix.outputs.value }}
+      javascript_plan: ${{ steps.javascript_plan.outputs.value }}
       javascript_count: ${{ steps.javascript_count.outputs.value }}
+      javascript_versions: ${{ steps.javascript_versions.outputs.value }}
       python_matrix: ${{ steps.python_matrix.outputs.value }}
       python_count: ${{ steps.python_count.outputs.value }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.head_ref || github.sha }}
 
       - uses: actions/setup-python@v5
         with:
@@ -81,8 +83,8 @@ jobs:
           echo "base_ref=${BASE_REF}" >> "$GITHUB_OUTPUT"
           echo "head_ref=${HEAD_REF}" >> "$GITHUB_OUTPUT"
 
-      - id: javascript_matrix
-        name: Build JavaScript publish matrix
+      - id: javascript_plan
+        name: Build JavaScript publication plan
         env:
           BASE_REF: ${{ steps.refs.outputs.base_ref }}
           HEAD_REF: ${{ steps.refs.outputs.head_ref }}
@@ -96,6 +98,15 @@ jobs:
           HEAD_REF: ${{ steps.refs.outputs.head_ref }}
         run: |
           echo "value=$(python3 scripts/release_intents.py plan --ecosystem javascript --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --count)" >> "$GITHUB_OUTPUT"
+
+      - id: javascript_versions
+        name: Resolve JavaScript release versions
+        env:
+          BASE_REF: ${{ steps.refs.outputs.base_ref }}
+          HEAD_REF: ${{ steps.refs.outputs.head_ref }}
+        run: |
+          VERSIONS="$(python3 scripts/release_intents.py resolve-versions --ecosystem javascript --changed-from "${BASE_REF}" --changed-to "${HEAD_REF}" --prefer-registry)"
+          echo "value=${VERSIONS}" >> "$GITHUB_OUTPUT"
 
       - id: python_matrix
         name: Build Python publish matrix
@@ -122,10 +133,6 @@ jobs:
       id-token: write
     environment:
       name: npm
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.discover.outputs.javascript_matrix) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -136,80 +143,10 @@ jobs:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
-      - name: Install and build package
-        run: |
-          RELEASE_VERSION="$(python3 scripts/release_intents.py apply --package "${{ matrix.name }}" --bump "${{ matrix.bump }}" --prefer-registry)"
-          echo "RELEASE_VERSION=${RELEASE_VERSION}" >> "$GITHUB_ENV"
-          corepack enable
-          cd javascript-sdks
-          yarn install
-          if [ "${{ matrix.has_build }}" = "true" ]; then
-            python3 ../scripts/release_inventory.py --build-order-for "${{ matrix.name }}" --format paths | while IFS= read -r package_path; do
-              [ -n "${package_path}" ] || continue
-              if [ "${package_path}" = "javascript-sdks/respan-cli" ]; then
-                yarn workspace "@respan/cli" run build
-              else
-                ./node_modules/.bin/tsc -p "../${package_path}/tsconfig.json"
-              fi
-            done
-          fi
-
-      - name: Publish package
-        working-directory: ${{ matrix.path }}
-        run: npm publish --access public
-
-      - name: Registry smoke test
+      - name: Prepare coordinated JavaScript publication
         env:
-          PACKAGE_NAME: ${{ matrix.name }}
-          PACKAGE_VERSION: ${{ env.RELEASE_VERSION }}
-          BIN_NAME: ${{ matrix.bin_name }}
-          PACKAGE_PATH: ${{ matrix.path }}
-        run: |
-          tmpdir="$(mktemp -d)"
-          cd "${tmpdir}"
-          npm init -y >/dev/null 2>&1
-
-          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
-            if npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version >/tmp/npm-view.log 2>&1; then
-              break
-            fi
-            if [ "${attempt}" -eq 16 ]; then
-              cat /tmp/npm-view.log
-              exit 1
-            fi
-            sleep 15
-          done
-
-          for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            if npm install --prefer-online "${PACKAGE_NAME}@${PACKAGE_VERSION}" >/tmp/npm-install.log 2>&1; then
-              break
-            fi
-            if [ "${attempt}" -eq 10 ]; then
-              cat /tmp/npm-install.log
-              exit 1
-            fi
-            sleep 15
-          done
-
-          HAS_PEER_DEPENDENCIES="$(python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          manifest = json.loads(Path(os.environ["GITHUB_WORKSPACE"], os.environ["PACKAGE_PATH"], "package.json").read_text())
-          print("true" if manifest.get("peerDependencies") else "false")
-          PY
-          )"
-
-          if [ -n "${BIN_NAME}" ] && [ "${BIN_NAME}" != "null" ]; then
-            "./node_modules/.bin/${BIN_NAME}" --help >/dev/null
-          elif [ "${HAS_PEER_DEPENDENCIES}" = "true" ]; then
-            echo "Skipping empty-project import smoke for ${PACKAGE_NAME} because it declares peer dependencies."
-          else
-            node --input-type=module -e "await import(process.env.PACKAGE_NAME)"
-          fi
-
-      - name: Record published version
+          JAVASCRIPT_PLAN: ${{ needs.discover.outputs.javascript_plan }}
+          JAVASCRIPT_VERSIONS: ${{ needs.discover.outputs.javascript_versions }}
         run: |
           mkdir -p .release-sync
           python3 - <<'PY'
@@ -217,21 +154,116 @@ jobs:
           import os
           from pathlib import Path
 
-          payload = {
-              "name": os.environ["PACKAGE_NAME"],
-              "version": os.environ["PACKAGE_VERSION"],
-          }
-          Path(".release-sync/version.json").write_text(json.dumps(payload) + "\n")
+          plan = json.loads(os.environ["JAVASCRIPT_PLAN"])
+          Path(".release-sync/javascript-plan.json").write_text(
+              json.dumps(plan, indent=2) + "\n"
+          )
           PY
-        env:
-          PACKAGE_NAME: ${{ matrix.name }}
-          PACKAGE_VERSION: ${{ env.RELEASE_VERSION }}
 
-      - name: Upload published version artifact
+          python3 scripts/release_intents.py apply-resolved-versions \
+            --versions-json "${JAVASCRIPT_VERSIONS}" \
+            --plan-file .release-sync/javascript-plan.json
+          python3 scripts/release_inventory.py \
+            --javascript-build-order-file .release-sync/javascript-plan.json \
+            --format json > .release-sync/javascript-build-order.json
+          python3 scripts/release_inventory.py \
+            --javascript-publish-order-file .release-sync/javascript-plan.json \
+            --format json > .release-sync/javascript-publish-order.json
+
+          corepack enable
+          cd javascript-sdks
+          yarn install
+
+      - name: Build all planned JavaScript packages
+        run: |
+          cd javascript-sdks
+          while IFS= read -r package_name; do
+            [ -n "${package_name}" ] || continue
+            yarn workspace "${package_name}" run build
+          done < <(jq -r '.[] | select(.has_build == true) | .name' \
+            "${GITHUB_WORKSPACE}/.release-sync/javascript-build-order.json")
+
+      - name: Pack all planned JavaScript packages
+        run: |
+          while IFS='|' read -r package_path package_slug; do
+            [ -n "${package_path}" ] || continue
+            (
+              cd "${package_path}"
+              yarn pack --out "${RUNNER_TEMP}/${package_slug}.tgz"
+            )
+          done < <(jq -r '.[] | [.path, .slug] | join("|")' \
+            .release-sync/javascript-publish-order.json)
+
+      - name: Publish and smoke JavaScript packages in dependency order
+        run: |
+          while IFS='|' read -r package_name package_version package_slug bin_name has_peer_dependencies; do
+            [ -n "${package_name}" ] || continue
+            npm publish "${RUNNER_TEMP}/${package_slug}.tgz" --access public
+
+            smoke_dir="$(mktemp -d)"
+            (
+              cd "${smoke_dir}"
+              npm init -y >/dev/null 2>&1
+
+              for attempt in {1..16}; do
+                if npm view "${package_name}@${package_version}" version >npm-view.log 2>&1; then
+                  break
+                fi
+                if [ "${attempt}" -eq 16 ]; then
+                  cat npm-view.log
+                  exit 1
+                fi
+                sleep 15
+              done
+
+              for attempt in {1..10}; do
+                if npm install --prefer-online "${package_name}@${package_version}" >npm-install.log 2>&1; then
+                  break
+                fi
+                if [ "${attempt}" -eq 10 ]; then
+                  cat npm-install.log
+                  exit 1
+                fi
+                sleep 15
+              done
+
+              if [ -n "${bin_name}" ]; then
+                "./node_modules/.bin/${bin_name}" --help >/dev/null
+              elif [ "${has_peer_dependencies}" = "true" ]; then
+                echo "Skipping empty-project import smoke for ${package_name} because it declares peer dependencies."
+              else
+                PACKAGE_NAME="${package_name}" node --input-type=module \
+                  -e "await import(process.env.PACKAGE_NAME)"
+              fi
+            )
+          done < <(jq -r '.[] | [
+              .name,
+              .version,
+              .slug,
+              (.bin_name // ""),
+              (if .has_peer_dependencies then "true" else "false" end)
+            ] | join("|")' .release-sync/javascript-publish-order.json)
+
+      - name: Record all published JavaScript versions
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          records = json.loads(
+              Path(".release-sync/javascript-publish-order.json").read_text()
+          )
+          versions = {record["name"]: record["version"] for record in records}
+          Path(".release-sync/versions.json").write_text(
+              json.dumps(versions, indent=2, sort_keys=True) + "\n"
+          )
+          PY
+
+      - name: Upload published JavaScript versions artifact
         uses: actions/upload-artifact@v4
         with:
-          name: published-version-javascript-${{ matrix.slug }}
-          path: .release-sync/version.json
+          name: published-versions-javascript
+          path: .release-sync/versions.json
           if-no-files-found: error
 
   build-python:
@@ -393,26 +425,15 @@ jobs:
       - name: Download published version artifacts
         uses: actions/download-artifact@v8.0.1
         with:
-          pattern: published-version-*
+          pattern: published-version*
           path: .release-sync/artifacts
           merge-multiple: false
 
       - name: Build version mapping
         run: |
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          artifact_root = Path(".release-sync/artifacts")
-          versions = {}
-
-          for payload_path in sorted(artifact_root.glob("*/version.json")):
-              payload = json.loads(payload_path.read_text())
-              versions[payload["name"]] = payload["version"]
-
-          output_path = Path(".release-sync/versions.json")
-          output_path.write_text(json.dumps(versions, indent=2, sort_keys=True) + "\n")
-          PY
+          python3 scripts/release_intents.py merge-version-artifacts \
+            --artifact-root .release-sync/artifacts \
+            --output .release-sync/versions.json
 
       - name: Sync manifest versions
         run: |

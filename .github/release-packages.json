@@ -128,6 +128,12 @@
     },
     {
       "ecosystem": "javascript",
+      "name": "@respan/instrumentation-pydantic-ai",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-pydantic-ai",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
       "name": "@respan/instrumentation-superagent",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-superagent",
       "registry": "npm"
@@ -536,6 +542,12 @@
     },
     {
       "ecosystem": "python",
+      "name": "respan-instrumentation-pgvector",
+      "path": "python-sdks/instrumentations/respan-instrumentation-pgvector",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
       "name": "respan-instrumentation-llama-index",
       "path": "python-sdks/instrumentations/respan-instrumentation-llama-index",
       "registry": "pypi"
@@ -592,6 +604,24 @@
       "ecosystem": "python",
       "name": "respan-instrumentation-mirascope",
       "path": "python-sdks/instrumentations/respan-instrumentation-mirascope",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-agentops",
+      "path": "python-sdks/instrumentations/respan-instrumentation-agentops",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-burr",
+      "path": "python-sdks/instrumentations/respan-instrumentation-burr",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-restate",
+      "path": "python-sdks/instrumentations/respan-instrumentation-restate",
       "registry": "pypi"
     }
   ]

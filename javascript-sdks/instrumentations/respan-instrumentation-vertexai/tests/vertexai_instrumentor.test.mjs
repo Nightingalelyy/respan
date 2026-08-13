@@ -208,6 +208,49 @@ test("buildGenerateContentAttrs emits canonical chat fields without banned alias
   }
 });
 
+test("buildGenerateContentAttrs includes thinking tokens in output usage", () => {
+  const attrs = buildGenerateContentAttrs({
+    requestPayload: {
+      model: "gemini-2.5-flash",
+      contents: "Explain the result",
+    },
+    responseOrChunks: makeResponse("Reasoned answer", {
+      usage: {
+        promptTokenCount: 100,
+        candidatesTokenCount: 50,
+        thoughtsTokenCount: 800,
+        totalTokenCount: 950,
+      },
+    }),
+  });
+
+  assert.equal(attrs["gen_ai.usage.input_tokens"], 100);
+  assert.equal(attrs["gen_ai.usage.output_tokens"], 850);
+  assert.equal(attrs["gen_ai.usage.completion_tokens"], 850);
+  assert.equal(attrs[SpanAttributes.LLM_USAGE_TOTAL_TOKENS], 950);
+});
+
+test("buildGenerateContentAttrs supports snake_case thinking usage", () => {
+  const attrs = buildGenerateContentAttrs({
+    requestPayload: {
+      model: "gemini-2.5-flash",
+      contents: "Explain the result",
+    },
+    responseOrChunks: {
+      candidates: [],
+      usage_metadata: {
+        prompt_token_count: 100,
+        candidates_token_count: 50,
+        thoughts_token_count: 800,
+        total_token_count: 950,
+      },
+    },
+  });
+
+  assert.equal(attrs["gen_ai.usage.output_tokens"], 850);
+  assert.equal(attrs["gen_ai.usage.completion_tokens"], 850);
+});
+
 test("patches generate, stream, and chat methods and emits spans", async () => {
   resetTraceCapture();
   const sdkModule = createFakeVertexAIModule();
@@ -236,7 +279,7 @@ test("patches generate, stream, and chat methods and emits spans", async () => {
 
   assert.equal(capturedSpans.length, 4);
   assert.equal(capturedSpans[0].name, "vertexai.generate_content");
-  assert.equal(capturedSpans[0].instrumentationLibrary.name, "@respan/instrumentation-vertexai");
+  assert.equal(capturedSpans[0].instrumentationScope.name, "@respan/instrumentation-vertexai");
   assert.equal(capturedSpans[0].attributes["gen_ai.request.model"], "gemini-2.0-flash");
   assert.equal(capturedSpans[0].attributes["gen_ai.usage.input_tokens"], 5);
   assert.equal(capturedSpans[1].attributes["gen_ai.completion.0.content"], "stream done");

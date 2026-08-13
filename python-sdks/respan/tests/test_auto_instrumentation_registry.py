@@ -1,6 +1,8 @@
 import contextlib
 import importlib.util
+from pathlib import Path
 import sys
+import tomllib
 import types
 import unittest
 from unittest.mock import patch
@@ -99,6 +101,7 @@ def _spec(**overrides):
         "instrumentation_package": "respan-instrumentation-fake",
         "entry_point": "fake",
         "import_path": "missing_fake:FakeInstrumentor",
+        "enabled_by_default": True,
     }
     values.update(overrides)
     return AutoInstrumentationSpec(**values)
@@ -176,6 +179,24 @@ class TestAutoInstrumentationRegistry(unittest.TestCase):
         self.assertEqual(activations[0].status.status, "disabled")
         self.assertEqual(activations[0].status.reason, "manual only")
 
+    def test_auto_registry_rejects_non_direct_category_even_if_enabled(self):
+        entry_point = FakeEntryPoint(FakeInstrumentor)
+
+        with patch.object(
+            registry,
+            "_discover_entry_points",
+            return_value={"fake": entry_point},
+        ):
+            activations = activate_auto_instrumentations(
+                registry=(
+                    _spec(category="agent_framework"),
+                )
+            )
+
+        self.assertFalse(entry_point.loaded)
+        self.assertEqual(activations[0].status.status, "disabled")
+        self.assertIn("only direct LLM SDK", activations[0].status.reason)
+
     def test_auto_registry_reports_missing_package(self):
         with patch.object(registry, "_discover_entry_points", return_value={}):
             activations = activate_auto_instrumentations(registry=(_spec(),))
@@ -203,7 +224,7 @@ class TestAutoInstrumentationRegistry(unittest.TestCase):
         self.assertEqual(activations[0].status.status, "disabled")
         self.assertEqual(activations[0].status.reason, "already activated explicitly")
 
-    def test_only_verified_gateway_sdks_are_enabled_by_default(self):
+    def test_bundled_native_sdks_are_enabled_by_default(self):
         enabled_ids = [
             spec.id for spec in list_auto_instrumentation_specs(include_disabled=False)
         ]
@@ -213,12 +234,32 @@ class TestAutoInstrumentationRegistry(unittest.TestCase):
             [
                 "openai",
                 "anthropic",
+                "vertexai",
                 "google-genai",
+                "aws-bedrock",
                 "together",
-                "mistralai",
-                "litellm",
+                "ollama",
             ],
         )
+
+    def test_bundled_dependencies_match_effective_auto_defaults(self):
+        pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+        dependencies = pyproject["tool"]["poetry"]["dependencies"]
+        bundled = {
+            name for name in dependencies if name.startswith("respan-instrumentation-")
+        }
+        enabled = {
+            spec.instrumentation_package
+            for spec in list_auto_instrumentation_specs(include_disabled=False)
+        }
+
+        self.assertSetEqual(bundled, enabled)
+
+    def test_default_enabled_registry_entries_are_direct_llm_only(self):
+        for spec in list_auto_instrumentation_specs():
+            if spec.enabled_by_default:
+                self.assertEqual(spec.category, "direct_llm", spec.id)
 
     def test_openrouter_is_opt_in_but_keeps_url_marker_only_normalization(self):
         openrouter = next(
@@ -231,15 +272,13 @@ class TestAutoInstrumentationRegistry(unittest.TestCase):
             {"normalize_all_openai_spans": False},
         )
 
-    def test_non_gateway_native_sdks_are_not_enabled_by_default(self):
+    def test_unbundled_or_unverified_sdks_are_not_enabled_by_default(self):
         specs = {spec.id: spec for spec in list_auto_instrumentation_specs()}
 
         for spec_id in (
-            "vertexai",
-            "aws-bedrock",
             "cohere",
             "groq",
-            "ollama",
+            "mistralai",
             "aleph-alpha",
             "huggingface",
             "replicate",
@@ -257,7 +296,48 @@ class TestAutoInstrumentationRegistry(unittest.TestCase):
         self.assertFalse(specs["langchain"].enabled_by_default)
         self.assertFalse(specs["openai-agents"].enabled_by_default)
         self.assertFalse(specs["pydantic-ai"].enabled_by_default)
+        self.assertFalse(specs["litellm"].enabled_by_default)
         self.assertFalse(specs["mcp"].enabled_by_default)
+
+    def test_clean_committed_registry_additions_are_explicit_only(self):
+        specs = {spec.id: spec for spec in list_auto_instrumentation_specs()}
+        expected = {
+            "agentscope": (
+                "agent_framework",
+                "respan_instrumentation_agentscope:AgentScopeInstrumentor",
+            ),
+            "livekit": (
+                "agent_framework",
+                "respan_instrumentation_livekit:LiveKitInstrumentor",
+            ),
+            "microsoft-agent-framework": (
+                "agent_framework",
+                "respan_instrumentation_microsoft_agent_framework:"
+                "MicrosoftAgentFrameworkInstrumentor",
+            ),
+            "watson-orchestrate-adk": (
+                "agent_framework",
+                "respan_instrumentation_watson_orchestrate_adk:"
+                "WatsonOrchestrateADKInstrumentor",
+            ),
+            "semantic-kernel": (
+                "framework",
+                "respan_instrumentation_semantic_kernel:"
+                "SemanticKernelInstrumentor",
+            ),
+            "cursor-sdk": (
+                "protocol",
+                "respan_instrumentation_cursor_sdk:CursorSDKInstrumentor",
+            ),
+        }
+
+        for spec_id, (category, import_path) in expected.items():
+            with self.subTest(spec_id=spec_id):
+                self.assertIn(spec_id, specs)
+                self.assertEqual(specs[spec_id].category, category)
+                self.assertEqual(specs[spec_id].import_path, import_path)
+                self.assertFalse(specs[spec_id].enabled_by_default)
+                self.assertTrue(specs[spec_id].auto_disabled_reason)
 
     def test_respan_auto_mode_does_not_forward_broad_otel_auto(self):
         captured = {}

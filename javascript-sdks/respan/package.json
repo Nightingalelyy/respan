@@ -22,6 +22,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "test": "npm run build && node --test tests/*.test.mjs",
     "publish:package": "yarn npm publish",
     "release": "yarn build && yarn version patch && yarn publish:package"
   },
@@ -32,10 +33,14 @@
   },
   "optionalDependencies": {
     "@respan/instrumentation-anthropic": "^1.0.0",
+    "@respan/instrumentation-aws-bedrock": "^1.0.0",
     "@respan/instrumentation-azure-openai": "^1.0.0",
+    "@respan/instrumentation-cohere": "^0.1.0",
     "@respan/instrumentation-openai": "^1.0.0",
     "@respan/instrumentation-openrouter": "^0.1.0",
-    "@respan/instrumentation-vertexai": "^0.1.0"
+    "@respan/instrumentation-together-ai": "^0.1.0",
+    "@respan/instrumentation-vertexai": "^0.1.0",
+    "@respan/instrumentation-writer": "^0.1.0"
   },
   "devDependencies": {
     "@types/node": "^24.2.1",

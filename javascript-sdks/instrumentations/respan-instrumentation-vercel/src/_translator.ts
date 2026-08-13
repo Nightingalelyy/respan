@@ -2,7 +2,7 @@
  * Translate Vercel AI SDK spans → Traceloop/OpenLLMetry format.
  *
  * The Vercel AI SDK emits OTEL spans with its own attribute schema (ai.model.id,
- * ai.prompt.messages, ai.response.text, etc.). This SpanProcessor enriches those
+ * ai.prompt.messages, ai.response.text, etc.). This transformer enriches those
  * spans with the Traceloop/GenAI semantic conventions the Respan backend expects.
  *
  * Two-phase enrichment:
@@ -11,11 +11,13 @@
  */
 
 import type { Context } from "@opentelemetry/api";
-import type { ReadableSpan, Span, SpanProcessor } from "@opentelemetry/sdk-trace-base";
+import type { ReadableSpan, Span } from "@opentelemetry/sdk-trace-base";
+import type { RespanSpanTransformer } from "@respan/tracing";
 import {
   ATTR_GEN_AI_AGENT_ID,
   ATTR_GEN_AI_AGENT_NAME,
   ATTR_GEN_AI_TOOL_NAME,
+  GEN_AI_OPERATION_NAME_VALUE_EMBEDDINGS,
 } from "@opentelemetry/semantic-conventions/incubating";
 import { RespanLogType, RespanSpanAttributes } from "@respan/respan-sdk";
 import { SpanAttributes as TraceloopSpanAttributes } from "@traceloop/ai-semantic-conventions";
@@ -44,6 +46,7 @@ import {
   isModernVercelAISpanName,
   isVercelAISpan,
   isVercelAIScope,
+  modernOperationName,
   setMetadata,
   resolveLogType,
   safeJsonStr,
@@ -52,35 +55,24 @@ import {
 import { enrichMetadata, enrichModel, enrichPerformanceMetrics, enrichSystem, enrichTokens, stripRedundantAttrs } from "./_translator/span-enrichment.js";
 
 /**
- * SpanProcessor that translates Vercel AI SDK attributes to Traceloop/OpenLLMetry.
+ * Span transformer that translates Vercel AI SDK attributes to Traceloop/OpenLLMetry.
  *
  * Phase 1 (onStart): Sets RESPAN_LOG_TYPE so CompositeProcessor lets the span through.
  * Phase 2 (onEnd):   Full attribute enrichment — model, messages, tokens, metadata,
  *                     tools, performance metrics, environment, etc.
  */
-export class VercelAITranslator implements SpanProcessor {
-  private _ownerCount: number;
-  private readonly _inFlightSpans = new WeakSet<object>();
-  /** Open structural wrapper spans: spanId → its own parentSpanId. */
-  private readonly _openStructuralSpans = new Map<string, string | undefined>();
+export class VercelAITranslator implements RespanSpanTransformer {
+  /** Open structural wrappers, isolated by trace even if span IDs are reused. */
+  private readonly _openStructuralSpans = new Map<string, OpenStructuralSpan>();
 
-  constructor({ initiallyActive = true }: { initiallyActive?: boolean } = {}) {
-    this._ownerCount = initiallyActive ? 1 : 0;
-  }
-
-  acquire(): void {
-    this._ownerCount += 1;
-  }
-
-  release(): void {
-    this._ownerCount = Math.max(0, this._ownerCount - 1);
-  }
+  /**
+   * AI SDK 7 emits the embedding operation and its provider request with the
+   * same modern span name. Keep the open operation as a candidate; only turn
+   * it into a structural wrapper if a matching direct child actually starts.
+   */
+  private readonly _openEmbeddingCandidates = new Map<string, OpenEmbeddingCandidate>();
 
   onStart(span: Span, _parentContext: Context): void {
-    if (this._ownerCount === 0) {
-      return;
-    }
-
     const writableSpan = span as any;
     const name: string = writableSpan.name ?? "";
     const scopeName = instrumentationScopeName(writableSpan);
@@ -88,32 +80,57 @@ export class VercelAITranslator implements SpanProcessor {
       return;
     }
 
-    this._inFlightSpans.add(span as object);
+    const identity = spanIdentity(writableSpan);
+    const spanKey = correlationKey(identity.traceId, identity.spanId);
+    const parentKey = correlationKey(
+      identity.parentTraceId ?? identity.traceId,
+      identity.parentSpanId,
+    );
 
-    const spanId: string | undefined =
-      typeof writableSpan.spanContext === "function"
-        ? writableSpan.spanContext()?.spanId
-        : undefined;
-    const parentSpanId: string | undefined = writableSpan.parentSpanId;
+    // Modern AI SDK 7 gives an embedding wrapper and its direct provider span
+    // the same `embeddings <model>` name. Once the direct child proves that the
+    // open candidate is structural, mark only that parent for semantic drop.
+    // The child itself remains canonical (and may become structural later only
+    // if it, in turn, receives a matching direct child).
+    const attrs = writableSpan.attributes as Record<string, any> | undefined;
+    if (parentKey && isModernEmbeddingSpan(name, attrs)) {
+      const candidate = this._openEmbeddingCandidates.get(parentKey);
+      if (candidate && candidate.name === name) {
+        candidate.span.setAttribute(
+          RespanSpanAttributes.RESPAN_INTERNAL_DROP_SPAN,
+          true,
+        );
+        this._openStructuralSpans.set(parentKey, {
+          parentSpanId: candidate.parentSpanId,
+          parentTraceId: candidate.parentTraceId,
+        });
+      }
+    }
 
     // If the parent chain starts inside an open structural wrapper, stamp the
     // export-time parent (the wrapper's own parent) so the exporter can drop
     // the wrapper per-span, immune to export-batch boundaries. "" marks a
     // wrapper that was itself a root span — the child is promoted to root.
-    if (parentSpanId && this._openStructuralSpans.has(parentSpanId)) {
-      let exportParent: string | undefined = parentSpanId;
+    if (parentKey && this._openStructuralSpans.has(parentKey)) {
+      let exportParentKey: string | undefined = parentKey;
+      let exportParentSpanId: string | undefined = identity.parentSpanId;
       const seen = new Set<string>();
       while (
-        exportParent &&
-        this._openStructuralSpans.has(exportParent) &&
-        !seen.has(exportParent)
+        exportParentKey &&
+        this._openStructuralSpans.has(exportParentKey) &&
+        !seen.has(exportParentKey)
       ) {
-        seen.add(exportParent);
-        exportParent = this._openStructuralSpans.get(exportParent);
+        seen.add(exportParentKey);
+        const structural = this._openStructuralSpans.get(exportParentKey)!;
+        exportParentSpanId = structural.parentSpanId;
+        exportParentKey = correlationKey(
+          structural.parentTraceId ?? identity.traceId,
+          structural.parentSpanId,
+        );
       }
       writableSpan.setAttribute(
         RespanSpanAttributes.RESPAN_INTERNAL_EXPORT_PARENT,
-        exportParent ?? ""
+        exportParentSpanId ?? ""
       );
     }
 
@@ -122,9 +139,21 @@ export class VercelAITranslator implements SpanProcessor {
       // model/input/output. The semantic export style drops it (children are
       // reparented); the legacy style still exports it untouched.
       writableSpan.setAttribute(RespanSpanAttributes.RESPAN_INTERNAL_DROP_SPAN, true);
-      if (spanId) {
-        this._openStructuralSpans.set(spanId, parentSpanId);
+      if (spanKey) {
+        this._openStructuralSpans.set(spanKey, {
+          parentSpanId: identity.parentSpanId,
+          parentTraceId: identity.parentTraceId,
+        });
       }
+    }
+
+    if (spanKey && isModernEmbeddingSpan(name, attrs)) {
+      this._openEmbeddingCandidates.set(spanKey, {
+        name,
+        span: writableSpan,
+        parentSpanId: identity.parentSpanId,
+        parentTraceId: identity.parentTraceId,
+      });
     }
 
     const config = VERCEL_SPAN_CONFIG[name];
@@ -143,14 +172,11 @@ export class VercelAITranslator implements SpanProcessor {
   }
 
   onEnd(span: ReadableSpan): void {
-    const endedSpanId = span.spanContext?.().spanId;
-    if (endedSpanId) {
-      this._openStructuralSpans.delete(endedSpanId);
-    }
-
-    const startedWhileActive = this._inFlightSpans.delete(span as object);
-    if (this._ownerCount === 0 && !startedWhileActive) {
-      return;
+    const identity = spanIdentity(span);
+    const endedSpanKey = correlationKey(identity.traceId, identity.spanId);
+    if (endedSpanKey) {
+      this._openStructuralSpans.delete(endedSpanKey);
+      this._openEmbeddingCandidates.delete(endedSpanKey);
     }
 
     const attrs = (span as any).attributes as Record<string, any> | undefined;
@@ -200,6 +226,21 @@ export class VercelAITranslator implements SpanProcessor {
       String(entityName),
     );
     setDefault(attrs, TraceloopSpanAttributes.TRACELOOP_ENTITY_PATH, "");
+
+    // AI SDK 7 emits invoke_agent as a structural agent root. Agent spans carry
+    // common canonical I/O, but never chat/model/token fields themselves; the
+    // child chat spans own those LLM-specific attributes.
+    if (logType === RespanLogType.AGENT) {
+      const input = formatPromptInput(attrs);
+      if (input) {
+        setDefault(attrs, TraceloopSpanAttributes.TRACELOOP_ENTITY_INPUT, input);
+      }
+
+      const output = formatCompletionOutput(attrs);
+      if (output) {
+        setDefault(attrs, TraceloopSpanAttributes.TRACELOOP_ENTITY_OUTPUT, output);
+      }
+    }
 
     if (config) {
       // Do NOT set traceloop.span.kind for auto-emitted Vercel SDK spans.
@@ -322,15 +363,53 @@ export class VercelAITranslator implements SpanProcessor {
     stripRedundantAttrs(attrs, logType);
   }
 
-  forceFlush(): Promise<void> {
-    return Promise.resolve();
+  /** Clear structural correlation state after the registry drains this lease. */
+  dispose(): void {
+    this._openStructuralSpans.clear();
+    this._openEmbeddingCandidates.clear();
   }
 
-  shutdown(): Promise<void> {
-    this._ownerCount = 0;
-    this._openStructuralSpans.clear();
-    return Promise.resolve();
-  }
+}
+
+interface OpenStructuralSpan {
+  parentSpanId?: string;
+  parentTraceId?: string;
+}
+
+interface OpenEmbeddingCandidate extends OpenStructuralSpan {
+  name: string;
+  span: Span;
+}
+
+interface SpanIdentity {
+  traceId?: string;
+  spanId?: string;
+  parentTraceId?: string;
+  parentSpanId?: string;
+}
+
+function spanIdentity(span: any): SpanIdentity {
+  const context =
+    typeof span.spanContext === "function" ? span.spanContext() : undefined;
+  const parentContext = span.parentSpanContext;
+  const parentSpanId = span.parentSpanId ?? parentContext?.spanId;
+  return {
+    traceId: context?.traceId,
+    spanId: context?.spanId,
+    parentTraceId: parentContext?.traceId ?? (parentSpanId ? context?.traceId : undefined),
+    parentSpanId,
+  };
+}
+
+function correlationKey(traceId?: string, spanId?: string): string | undefined {
+  return spanId ? `${traceId ?? "<unknown-trace>"}:${spanId}` : undefined;
+}
+
+function isModernEmbeddingSpan(
+  name: string,
+  attrs: Record<string, any> | undefined,
+): boolean {
+  return modernOperationName(name, attrs ?? {}) === GEN_AI_OPERATION_NAME_VALUE_EMBEDDINGS;
 }
 
 /**

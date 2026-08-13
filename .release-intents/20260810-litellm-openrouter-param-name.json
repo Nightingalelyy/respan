@@ -1,0 +1,7 @@
+{
+  "summary": "Add a shared LiteLLM provider completion parameter contract",
+  "packages": {
+    "@respan/respan-sdk": "patch",
+    "respan-sdk": "patch"
+  }
+}
