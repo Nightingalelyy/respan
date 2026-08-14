@@ -17,6 +17,7 @@
     "@respan/instrumentation-langchain": "patch",
     "@respan/instrumentation-llama-index": "patch",
     "@respan/instrumentation-mastra": "patch",
+    "@respan/instrumentation-mcp": "patch",
     "@respan/instrumentation-openai": "patch",
     "@respan/instrumentation-openai-agents": "patch",
     "@respan/instrumentation-openinference": "patch",
