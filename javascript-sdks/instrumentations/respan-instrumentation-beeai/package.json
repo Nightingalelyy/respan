@@ -36,14 +36,13 @@
   },
   "peerDependencies": {
     "@arizeai/openinference-instrumentation-beeai": "^1.5.14",
-    "beeai-framework": ">=0.1.9 <0.2.0"
+    "beeai-framework": ">=0.1.9 <0.1.14"
   },
   "devDependencies": {
     "@arizeai/openinference-instrumentation-beeai": "^1.5.14",
     "@opentelemetry/sdk-trace-base": "^2.10.0",
     "@types/node": "^22.15.29",
-    "beeai-framework": "0.1.30",
-    "typescript": "^5.7.3",
-    "zod": "^3.25.76"
+    "beeai-framework": "0.1.13",
+    "typescript": "^5.7.3"
   }
 }
