@@ -12,6 +12,7 @@ from typing import Union
 from typing import get_args
 from typing import get_origin
 
+from opentelemetry import context as context_api
 from opentelemetry import trace
 from opentelemetry.semconv_ai import LLMRequestTypeValues
 from opentelemetry.semconv_ai import SpanAttributes
@@ -127,6 +128,7 @@ class _AgnoRunContext:
     trace_id: str
     root_span_id: str
     parent_span_id: str | None
+    workflow_name: str
 
 
 _CURRENT_RUN_CONTEXT: ContextVar[_AgnoRunContext | None] = ContextVar(
@@ -137,6 +139,7 @@ _CURRENT_RUN_CONTEXT: ContextVar[_AgnoRunContext | None] = ContextVar(
 
 def create_agno_run_context(
     *,
+    target: Any,
     target_kind: str,
     started_at_ns: int,
 ) -> _AgnoRunContext:
@@ -151,13 +154,20 @@ def create_agno_run_context(
             trace_id=current_context.trace_id,
             root_span_id=root_span_id,
             parent_span_id=current_context.root_span_id,
+            workflow_name=current_context.workflow_name,
         )
 
     parent_trace_id, parent_span_id = _current_parent_ids()
+    workflow_name = _active_workflow_name() or _target_name(
+        target=target,
+        output=None,
+        target_kind=target_kind,
+    )
     return _AgnoRunContext(
         trace_id=parent_trace_id or format_trace_id(ensure_trace_id(val=trace_seed)),
         root_span_id=root_span_id,
         parent_span_id=parent_span_id,
+        workflow_name=workflow_name,
     )
 
 
@@ -245,6 +255,24 @@ def _current_parent_ids() -> tuple[str | None, str | None]:
     return (
         format_trace_id(span_context.trace_id),
         format_span_id(span_context.span_id),
+    )
+
+
+def _active_workflow_name() -> str | None:
+    workflow_name = context_api.get_value(SpanAttributes.TRACELOOP_WORKFLOW_NAME)
+    if not workflow_name:
+        workflow_name = context_api.get_value(SpanAttributes.TRACELOOP_ENTITY_NAME)
+    return str(workflow_name) if workflow_name else None
+
+
+def _run_workflow_name(*, target: Any, output: Any, target_kind: str) -> str:
+    current_context = _CURRENT_RUN_CONTEXT.get()
+    if current_context is not None:
+        return current_context.workflow_name
+    return _active_workflow_name() or _target_name(
+        target=target,
+        output=output,
+        target_kind=target_kind,
     )
 
 
@@ -624,7 +652,11 @@ def _root_attributes(
         RESPAN_LOG_TYPE: log_type,
         SpanAttributes.TRACELOOP_ENTITY_NAME: entity_name,
         SpanAttributes.TRACELOOP_ENTITY_PATH: "",
-        SpanAttributes.TRACELOOP_WORKFLOW_NAME: entity_name,
+        SpanAttributes.TRACELOOP_WORKFLOW_NAME: _run_workflow_name(
+            target=target,
+            output=output,
+            target_kind=target_kind,
+        ),
         SpanAttributes.TRACELOOP_ENTITY_INPUT: _attribute_string(
             value=_input_payload(input_value=input_value, output=output),
         ),
@@ -656,6 +688,7 @@ def _root_attributes(
 
 def _chat_attributes(
     target: Any,
+    target_kind: str,
     input_value: Any,
     output: Any,
     events: list[Any],
@@ -682,6 +715,11 @@ def _chat_attributes(
         RESPAN_LOG_TYPE: LOG_TYPE_CHAT,
         SpanAttributes.TRACELOOP_ENTITY_NAME: entity_name,
         SpanAttributes.TRACELOOP_ENTITY_PATH: entity_name,
+        SpanAttributes.TRACELOOP_WORKFLOW_NAME: _run_workflow_name(
+            target=target,
+            output=output,
+            target_kind=target_kind,
+        ),
         SpanAttributes.TRACELOOP_ENTITY_INPUT: _json_string(
             value=prompt_messages,
         ),
@@ -752,6 +790,10 @@ def _chat_attributes(
         tool_executions=_extract_tool_executions(output=output),
     )
     if tool_calls:
+        completion_message[TOOL_CALLS_KEY] = tool_calls
+        attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _json_string(
+            value=completion_message,
+        )
         attributes[f"{AGNO_COMPLETION_PREFIX}0.{TOOL_CALLS_KEY}"] = _json_string(
             value=tool_calls,
         )
@@ -759,7 +801,13 @@ def _chat_attributes(
     return attributes
 
 
-def _tool_attributes(tool_execution: Any) -> dict[str, Any]:
+def _tool_attributes(
+    *,
+    target: Any,
+    target_kind: str,
+    output: Any,
+    tool_execution: Any,
+) -> dict[str, Any]:
     tool_name = (
         _object_value(value=tool_execution, key=TOOL_NAME_KEY) or DEFAULT_TOOL_NAME
     )
@@ -772,6 +820,11 @@ def _tool_attributes(tool_execution: Any) -> dict[str, Any]:
         RESPAN_LOG_TYPE: LOG_TYPE_TOOL,
         SpanAttributes.TRACELOOP_ENTITY_NAME: str(tool_name),
         SpanAttributes.TRACELOOP_ENTITY_PATH: f"{DEFAULT_TOOL_NAME}.{tool_name}",
+        SpanAttributes.TRACELOOP_WORKFLOW_NAME: _run_workflow_name(
+            target=target,
+            output=output,
+            target_kind=target_kind,
+        ),
         SpanAttributes.TRACELOOP_ENTITY_INPUT: _json_string(
             value={NAME_KEY: tool_name, ARGUMENTS_KEY: tool_arguments},
         ),
@@ -787,7 +840,13 @@ def _tool_attributes(tool_execution: Any) -> dict[str, Any]:
     return attributes
 
 
-def _event_attributes(event: Any) -> dict[str, Any]:
+def _event_attributes(
+    *,
+    target: Any,
+    target_kind: str,
+    output: Any,
+    event: Any,
+) -> dict[str, Any]:
     event_name = _object_value(value=event, key=EVENT_KEY)
     entity_name = str(event_name or DEFAULT_AGNO_EVENT_NAME)
     attributes: dict[str, Any] = {
@@ -795,6 +854,11 @@ def _event_attributes(event: Any) -> dict[str, Any]:
         RESPAN_LOG_TYPE: LOG_TYPE_WORKFLOW,
         SpanAttributes.TRACELOOP_ENTITY_NAME: entity_name,
         SpanAttributes.TRACELOOP_ENTITY_PATH: f"{DEFAULT_EVENT_NAME}.{entity_name}",
+        SpanAttributes.TRACELOOP_WORKFLOW_NAME: _run_workflow_name(
+            target=target,
+            output=output,
+            target_kind=target_kind,
+        ),
         SpanAttributes.TRACELOOP_ENTITY_INPUT: _json_string(
             value=_object_to_dict(value=event)
         ),
@@ -855,6 +919,7 @@ def emit_agno_run(
         end_time_ns=ended_at_ns,
         attributes=_chat_attributes(
             target=target,
+            target_kind=target_kind,
             input_value=input_value,
             output=selected_output,
             events=safe_events,
@@ -879,7 +944,12 @@ def emit_agno_run(
             parent_id=root_span_id,
             start_time_ns=started_at_ns,
             end_time_ns=ended_at_ns,
-            attributes=_tool_attributes(tool_execution=tool_execution),
+            attributes=_tool_attributes(
+                target=target,
+                target_kind=target_kind,
+                output=selected_output,
+                tool_execution=tool_execution,
+            ),
             status_code=tool_status_code,
         )
         inject_span(span=tool_span)
@@ -904,7 +974,12 @@ def emit_agno_run(
                 parent_id=root_span_id,
                 start_time_ns=started_at_ns,
                 end_time_ns=ended_at_ns,
-                attributes=_event_attributes(event=event),
+                attributes=_event_attributes(
+                    target=target,
+                    target_kind=target_kind,
+                    output=selected_output,
+                    event=event,
+                ),
             )
             inject_span(span=event_span)
 

@@ -46,6 +46,7 @@ from respan_instrumentation_aleph_alpha._translator import (
 from respan_sdk.constants.llm_logging import (
     LOG_TYPE_CHAT,
     LOG_TYPE_EMBEDDING,
+    LOG_TYPE_TASK,
     LOG_TYPE_TEXT,
 )
 from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
@@ -62,9 +63,7 @@ _EMBEDDING_OPERATIONS = {
     OPERATION_INSTRUCTABLE_EMBED,
 }
 
-_TEXT_OPERATIONS = {
-    OPERATION_COMPLETE,
-    OPERATION_COMPLETE_STREAM,
+_TASK_OPERATIONS = {
     OPERATION_EVALUATE,
     OPERATION_EXPLAIN,
 }
@@ -104,18 +103,22 @@ def _base_attrs(operation: str) -> dict[str, Any]:
     elif operation in _EMBEDDING_OPERATIONS:
         log_type = LOG_TYPE_EMBEDDING
         request_type = LLMRequestTypeValues.EMBEDDING.value
+    elif operation in _TASK_OPERATIONS:
+        log_type = LOG_TYPE_TASK
+        request_type = None
     else:
         log_type = LOG_TYPE_TEXT
         request_type = LLMRequestTypeValues.COMPLETION.value
 
     span_name = _span_name(operation=operation)
     attrs: dict[str, Any] = {
-        SpanAttributes.LLM_SYSTEM: ALEPH_ALPHA_SYSTEM_NAME,
-        SpanAttributes.LLM_REQUEST_TYPE: request_type,
         SpanAttributes.TRACELOOP_ENTITY_NAME: span_name,
         SpanAttributes.TRACELOOP_ENTITY_PATH: span_name,
         RESPAN_LOG_TYPE: log_type,
     }
+    if request_type is not None:
+        attrs[SpanAttributes.LLM_SYSTEM] = ALEPH_ALPHA_SYSTEM_NAME
+        attrs[SpanAttributes.LLM_REQUEST_TYPE] = request_type
     workflow_name = context_api.get_value(
         SpanAttributes.TRACELOOP_WORKFLOW_NAME
     ) or context_api.get_value(SpanAttributes.TRACELOOP_ENTITY_NAME)
@@ -191,7 +194,12 @@ def _set_chat_attrs(
         return
 
     content, role, tool_calls, finish_reason = chat_output(response_or_items)
-    attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = content
+    output_message: dict[str, Any] = {ROLE_KEY: role, CONTENT_KEY: content}
+    if tool_calls:
+        output_message["tool_calls"] = tool_calls
+    attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = (
+        safe_json(value=output_message) if tool_calls else content
+    )
     completion_prefix = f"{gen_ai_attributes.GEN_AI_COMPLETION}.0"
     attrs[f"{completion_prefix}.role"] = role
     attrs[f"{completion_prefix}.content"] = content
@@ -226,7 +234,7 @@ def _set_completion_attrs(
     _set_usage_attrs(attrs=attrs, response_or_items=response_or_items)
 
 
-def _set_text_model_attrs(
+def _set_task_attrs(
     attrs: dict[str, Any],
     *,
     payload: dict[str, Any],
@@ -238,7 +246,6 @@ def _set_text_model_attrs(
     attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = to_json_attr(input_value)
     if response is not None:
         attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safe_json(value=response)
-        _set_usage_attrs(attrs=attrs, response_or_items=response)
 
 
 def _set_embedding_attrs(
@@ -271,7 +278,8 @@ def build_aleph_alpha_attrs(
 ) -> dict[str, Any]:
     attrs = _base_attrs(operation=operation)
     payload = request_payload(request)
-    _set_model(attrs=attrs, model=model, response=response_or_items)
+    if operation not in _TASK_OPERATIONS:
+        _set_model(attrs=attrs, model=model, response=response_or_items)
     _set_request_attrs(attrs=attrs, payload=payload)
 
     if operation in (OPERATION_CHAT, OPERATION_CHAT_STREAM):
@@ -284,8 +292,8 @@ def build_aleph_alpha_attrs(
         )
     elif operation in _EMBEDDING_OPERATIONS:
         _set_embedding_attrs(attrs=attrs, payload=payload, response=response_or_items)
-    elif operation in _TEXT_OPERATIONS:
-        _set_text_model_attrs(attrs=attrs, payload=payload, response=response_or_items)
+    elif operation in _TASK_OPERATIONS:
+        _set_task_attrs(attrs=attrs, payload=payload, response=response_or_items)
     return attrs
 
 

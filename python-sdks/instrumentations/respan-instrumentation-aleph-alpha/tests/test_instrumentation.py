@@ -18,9 +18,16 @@ from respan_instrumentation_aleph_alpha._constants import (
     CLIENT_CLASS_NAME,
     METHOD_CHAT,
     METHOD_COMPLETE,
+    OPERATION_EVALUATE,
+    OPERATION_EXPLAIN,
 )
 from respan_instrumentation_aleph_alpha._otel_emitter import build_aleph_alpha_attrs
-from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT, LOG_TYPE_EMBEDDING, LOG_TYPE_TEXT
+from respan_sdk.constants.llm_logging import (
+    LOG_TYPE_CHAT,
+    LOG_TYPE_EMBEDDING,
+    LOG_TYPE_TASK,
+    LOG_TYPE_TEXT,
+)
 from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
 
 
@@ -212,6 +219,9 @@ def test_activate_patches_sync_completion_chat_and_embedding(
     assert json.loads(chat_attrs["gen_ai.completion.0.tool_calls"])[0]["function"][
         "name"
     ] == "lookup"
+    assert json.loads(chat_attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT])[
+        "tool_calls"
+    ][0]["function"]["name"] == "lookup"
     assert "tools" not in chat_attrs
     assert "tool_calls" not in chat_attrs
     assert "respan.span.tools" not in chat_attrs
@@ -307,6 +317,35 @@ def test_active_workflow_name_is_attached_to_injected_span() -> None:
         attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME]
         == "aleph_alpha_completion_workflow"
     )
+
+
+@pytest.mark.parametrize("operation", [OPERATION_EVALUATE, OPERATION_EXPLAIN])
+def test_analytical_operations_are_tasks_without_completion_usage(operation: str) -> None:
+    attrs = build_aleph_alpha_attrs(
+        operation=operation,
+        request=FakeRequest(
+            prompt=[{"type": "text", "data": "Score this"}],
+            completion_expected=" successfully.",
+        ),
+        model="pharia-1-chat",
+        response_or_items=Obj(
+            model_version="pharia-1-chat",
+            result={"log_probability": -1.25},
+            num_tokens_prompt_total=8,
+            num_tokens_generated=99,
+        ),
+    )
+
+    assert attrs[RESPAN_LOG_TYPE] == LOG_TYPE_TASK
+    assert json.loads(attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT])[
+        "result"
+    ] == {"log_probability": -1.25}
+    assert SpanAttributes.LLM_SYSTEM not in attrs
+    assert SpanAttributes.LLM_REQUEST_TYPE not in attrs
+    assert SpanAttributes.LLM_REQUEST_MODEL not in attrs
+    assert SpanAttributes.LLM_USAGE_PROMPT_TOKENS not in attrs
+    assert SpanAttributes.LLM_USAGE_COMPLETION_TOKENS not in attrs
+    assert "gen_ai.completion.0.content" not in attrs
 
 
 def test_error_path_emits_failed_span(

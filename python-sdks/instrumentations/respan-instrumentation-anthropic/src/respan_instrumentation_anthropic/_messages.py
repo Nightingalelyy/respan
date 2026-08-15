@@ -8,6 +8,7 @@ from threading import Lock
 import time
 from typing import Any
 
+from opentelemetry import context as context_api
 from opentelemetry import trace
 from opentelemetry.trace.status import StatusCode
 from opentelemetry.semconv_ai import (
@@ -440,8 +441,15 @@ def _format_tools(tools: Any) -> list[dict[str, Any]]:
     return normalized_tools
 
 
+def _active_workflow_name() -> str | None:
+    workflow_name = context_api.get_value(SpanAttributes.TRACELOOP_WORKFLOW_NAME)
+    if not workflow_name:
+        workflow_name = context_api.get_value(SpanAttributes.TRACELOOP_ENTITY_NAME)
+    return str(workflow_name) if workflow_name else None
+
+
 def _build_base_chat_attrs(span_name: str) -> dict[str, Any]:
-    return {
+    attrs = {
         GEN_AI_SYSTEM: ANTHROPIC_SYSTEM_NAME,
         LLM_REQUEST_TYPE: LLMRequestTypeValues.CHAT.value,
         SpanAttributes.TRACELOOP_ENTITY_NAME: span_name,
@@ -449,6 +457,10 @@ def _build_base_chat_attrs(span_name: str) -> dict[str, Any]:
         RESPAN_LOG_TYPE: LOG_TYPE_CHAT,
         SpanAttributes.TRACELOOP_SPAN_KIND: LLMRequestTypeValues.CHAT.value,
     }
+    workflow_name = _active_workflow_name()
+    if workflow_name:
+        attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] = workflow_name
+    return attrs
 
 
 def _apply_tool_call_attrs(attrs: dict[str, Any], tool_calls: list[dict[str, Any]]) -> None:
@@ -696,6 +708,9 @@ def _emit_tool_span(
         TOOLS_OVERRIDE: [tool_definition],
         SpanAttributes.TRACELOOP_SPAN_KIND: TraceloopSpanKindValues.TOOL.value,
     }
+    workflow_name = _active_workflow_name()
+    if workflow_name:
+        attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] = workflow_name
 
     _emit_span(
         attrs=attrs,

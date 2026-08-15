@@ -1,6 +1,7 @@
 import json
 from types import SimpleNamespace
 
+from opentelemetry import context as context_api
 from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
 
 from respan_instrumentation_anthropic import _instrumentation as instrumentation
@@ -106,6 +107,52 @@ def test_build_error_attrs_sets_chat_span_kind():
 
     assert attrs["respan.entity.log_type"] == "chat"
     assert attrs[SpanAttributes.TRACELOOP_SPAN_KIND] == LLMRequestTypeValues.CHAT.value
+
+
+def test_build_attrs_preserves_active_workflow_name():
+    token = context_api.attach(
+        context_api.set_value(
+            SpanAttributes.TRACELOOP_ENTITY_NAME,
+            "python_anthropic_workflow",
+        )
+    )
+    try:
+        attrs = message_helpers._build_error_attrs(
+            kwargs={"messages": [{"role": "user", "content": "hi"}]}
+        )
+    finally:
+        context_api.detach(token)
+
+    assert (
+        attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME]
+        == "python_anthropic_workflow"
+    )
+
+
+def test_emit_error_span_preserves_provider_status_and_falls_back(monkeypatch):
+    captured = []
+    monkeypatch.setattr(
+        instrumentation,
+        "_emit_span",
+        lambda **kwargs: captured.append(kwargs),
+    )
+
+    provider_error = RuntimeError("not found")
+    provider_error.status_code = 404
+    instrumentation._emit_error_span(
+        kwargs={"messages": [{"role": "user", "content": "hi"}]},
+        start_ns=123,
+        exc=provider_error,
+    )
+    instrumentation._emit_error_span(
+        kwargs={"messages": [{"role": "user", "content": "hi"}]},
+        start_ns=456,
+        exc=RuntimeError("local failure"),
+    )
+
+    assert captured[0]["status_code"] == 404
+    assert captured[0]["error_message"] == "not found"
+    assert captured[1]["status_code"] == 500
 
 
 def test_format_input_messages_preserves_tool_blocks():

@@ -1,0 +1,8 @@
+{
+  "summary": "Repair Agno workflow propagation, Aleph Alpha analytical spans, and Anthropic provider error status.",
+  "packages": {
+    "respan-instrumentation-agno": "patch",
+    "respan-instrumentation-aleph-alpha": "patch",
+    "respan-instrumentation-anthropic": "patch"
+  }
+}

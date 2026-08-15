@@ -84,11 +84,31 @@ def _emit_message_span_safely(
         logger.debug("Failed to build Anthropic span attrs", exc_info=True)
 
 
+def _provider_status_code(exc: Exception) -> int:
+    response = getattr(exc, "response", None)
+    candidates = (
+        getattr(exc, "status_code", None),
+        getattr(exc, "status", None),
+        getattr(response, "status_code", None),
+        getattr(response, "status", None),
+    )
+    for candidate in candidates:
+        value = getattr(candidate, "value", candidate)
+        try:
+            status_code = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 400 <= status_code <= 599:
+            return status_code
+    return 500
+
+
 def _emit_error_span(*, kwargs: dict[str, Any], start_ns: int, exc: Exception) -> None:
     _emit_span(
         attrs=_build_error_attrs(kwargs=kwargs),
         start_ns=start_ns,
         error_message=str(exc),
+        status_code=_provider_status_code(exc),
     )
 
 
