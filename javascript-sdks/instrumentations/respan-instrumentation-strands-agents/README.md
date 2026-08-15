@@ -67,3 +67,6 @@ await respan.flush();
   canonical `llm.request.functions` attributes when Strands emits them.
 - The instrumentor translates Strands agent, model, tool, loop, graph, swarm,
   and node spans without adding off-contract `respan.span.*` aliases.
+- When Strands returns structured output only through its internal
+  `strands_structured_output` tool, the instrumentor preserves that validated
+  object on the owning agent span as canonical agent output.

@@ -20,7 +20,10 @@ import {
   SUPERAGENT_INSTRUMENTATION_NAME,
   SUPPORTED_METHODS,
 } from "./_constants.js";
-import { buildSuperagentSpanAttributes } from "./_span_attributes.js";
+import {
+  buildSuperagentModelSpanAttributes,
+  buildSuperagentSpanAttributes,
+} from "./_span_attributes.js";
 
 type OriginalMethod = (
   this: SafetyClient,
@@ -73,7 +76,50 @@ function wrapMethod(methodName: string, original: OriginalMethod): OriginalMetho
       },
       async (span) => {
         try {
-          const result = await original.apply(this, args);
+          const result = await tracer.startActiveSpan(
+            `${operationName}.model`,
+            {
+              attributes: buildSuperagentModelSpanAttributes({
+                methodName,
+                args,
+                workflowName,
+              }),
+            },
+            async (modelSpan) => {
+              try {
+                const result = await original.apply(this, args);
+                setSpanAttributes(
+                  modelSpan,
+                  buildSuperagentModelSpanAttributes({
+                    methodName,
+                    args,
+                    result,
+                    workflowName,
+                  }),
+                );
+                modelSpan.setStatus({ code: SpanStatusCode.OK });
+                return result;
+              } catch (error) {
+                setSpanAttributes(
+                  modelSpan,
+                  buildSuperagentModelSpanAttributes({
+                    methodName,
+                    args,
+                    error,
+                    workflowName,
+                  }),
+                );
+                modelSpan.recordException(error as Error);
+                modelSpan.setStatus({
+                  code: SpanStatusCode.ERROR,
+                  message: error instanceof Error ? error.message : String(error),
+                });
+                throw error;
+              } finally {
+                modelSpan.end();
+              }
+            },
+          );
           setSpanAttributes(
             span,
             buildSuperagentSpanAttributes({

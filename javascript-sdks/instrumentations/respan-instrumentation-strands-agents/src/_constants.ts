@@ -13,6 +13,8 @@ export const STRANDS_OPERATION_EXECUTE_NODE = "execute_node";
 export const STRANDS_OPERATION_INVOKE_GRAPH = "invoke_graph";
 export const STRANDS_OPERATION_INVOKE_SWARM = "invoke_swarm";
 export const STRANDS_OPERATION_INVOKE_PREFIX = "invoke_";
+export const STRANDS_STRUCTURED_OUTPUT_TOOL_NAME =
+  "strands_structured_output";
 
 export const STRANDS_AGENT_TOOLS_ATTR = "gen_ai.agent.tools";
 export const STRANDS_TOOL_STATUS_ATTR = "gen_ai.tool.status";

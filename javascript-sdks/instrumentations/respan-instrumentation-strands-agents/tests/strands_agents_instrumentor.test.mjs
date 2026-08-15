@@ -6,6 +6,7 @@ import { RespanCompositeProcessor } from "../../../respan-tracing/dist/processor
 
 import {
   StrandsAgentsInstrumentor,
+  StrandsAgentsSpanProcessor,
   enrichStrandsAgentsSpan,
 } from "../dist/index.js";
 
@@ -24,16 +25,26 @@ const EVENT_USER_MESSAGE = "gen_ai.user.message";
 const EVENT_TOOL_MESSAGE = "gen_ai.tool.message";
 const EVENT_CHOICE = "gen_ai.choice";
 
-function makeSpan({ name, attributes = {}, events = [] }) {
+function makeSpan({
+  name,
+  attributes = {},
+  events = [],
+  traceId = "11111111111111111111111111111111",
+  spanId = "2222222222222222",
+  parentSpanId,
+}) {
   const attrs = { ...attributes };
   return {
     name,
     attributes: attrs,
     events,
+    parentSpanContext: parentSpanId
+      ? { traceId, spanId: parentSpanId, traceFlags: 1 }
+      : undefined,
     spanContext() {
       return {
-        traceId: "11111111111111111111111111111111",
-        spanId: "2222222222222222",
+        traceId,
+        spanId,
         traceFlags: 1,
       };
     },
@@ -225,6 +236,83 @@ test("enriches Strands graph and swarm spans as workflows", () => {
   assert.equal(graphSpan.attributes[WORKFLOW_NAME], "graph:graph-demo");
   assert.equal(graphSpan.attributes["gen_ai.operation.name"], undefined);
   assertNoOffContractAliases(graphSpan.attributes);
+});
+
+test("recovers tool-only structured output on its owning agent and clears it", async () => {
+  const processor = new StrandsAgentsSpanProcessor();
+  const traceId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const agentSpanId = "aaaaaaaaaaaaaaaa";
+  const cycleSpanId = "bbbbbbbbbbbbbbbb";
+  const structured = {
+    city: "Tokyo",
+    score: 92,
+    rationale: "Reliable transit, compact neighborhoods, and strong food options.",
+  };
+  const toolSpan = makeSpan({
+    name: "execute_tool strands_structured_output",
+    traceId,
+    spanId: "cccccccccccccccc",
+    parentSpanId: cycleSpanId,
+    attributes: {
+      "gen_ai.system": "strands-agents",
+      "gen_ai.operation.name": "execute_tool",
+      "gen_ai.tool.name": "strands_structured_output",
+      "gen_ai.tool.call.id": "structured-1",
+    },
+    events: [
+      event(EVENT_TOOL_MESSAGE, { content: JSON.stringify(structured) }),
+      event(EVENT_CHOICE, {
+        message: JSON.stringify([{ json: structured }]),
+      }),
+    ],
+  });
+  const cycleSpan = makeSpan({
+    name: "execute_event_loop_cycle",
+    traceId,
+    spanId: cycleSpanId,
+    parentSpanId: agentSpanId,
+    attributes: {
+      "gen_ai.system": "strands-agents",
+      "gen_ai.operation.name": "execute_event_loop_cycle",
+    },
+  });
+  const agentSpan = makeSpan({
+    name: "invoke_agent Structured",
+    traceId,
+    spanId: agentSpanId,
+    attributes: {
+      "gen_ai.system": "strands-agents",
+      "gen_ai.operation.name": "invoke_agent",
+      "gen_ai.agent.name": "Structured",
+    },
+    events: [event(EVENT_CHOICE, { message: "" })],
+  });
+
+  processor.onEnd(toolSpan);
+  processor.onEnd(cycleSpan);
+  processor.onEnd(agentSpan);
+
+  assert.deepEqual(JSON.parse(agentSpan.attributes[ENTITY_OUTPUT]), [
+    { role: "assistant", content: structured },
+  ]);
+
+  const reusedAgent = makeSpan({
+    name: "invoke_agent ReusedTrace",
+    traceId,
+    spanId: "dddddddddddddddd",
+    attributes: {
+      "gen_ai.system": "strands-agents",
+      "gen_ai.operation.name": "invoke_agent",
+      "gen_ai.agent.name": "ReusedTrace",
+    },
+    events: [event(EVENT_CHOICE, { message: "" })],
+  });
+  processor.onEnd(reusedAgent);
+  assert.deepEqual(JSON.parse(reusedAgent.attributes[ENTITY_OUTPUT]), [
+    { role: "assistant", content: "" },
+  ]);
+
+  await processor.shutdown();
 });
 
 test("multiple instrumentors retain the semconv opt-in until the final owner deactivates", async () => {

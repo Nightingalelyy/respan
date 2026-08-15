@@ -5395,6 +5395,7 @@ __metadata:
   resolution: "@respan/instrumentation-superagent@workspace:instrumentations/respan-instrumentation-superagent"
   dependencies:
     "@opentelemetry/api": "npm:^1.9.0"
+    "@opentelemetry/semantic-conventions": "npm:^1.43.0"
     "@respan/respan-sdk": "npm:^1.0.0"
     "@respan/tracing": "npm:^1.0.0"
     "@traceloop/ai-semantic-conventions": "npm:^0.13.0"
