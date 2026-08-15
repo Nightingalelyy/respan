@@ -17,7 +17,10 @@ import { buildReadableSpan, injectSpan } from "@respan/tracing";
 import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
 
 const INSTRUMENTATION_NAME = "@respan/instrumentation-openrouter";
-const INSTRUMENTATION_VERSION = "0.1.0";
+const packageRequire = createRequire(import.meta.url);
+const { version: INSTRUMENTATION_VERSION } = packageRequire("../package.json") as {
+  version: string;
+};
 const OPENROUTER_SYSTEM = "openrouter";
 const TRACE_METHOD = "ts_tracing";
 // OpenTelemetry/Traceloop JS packages used here do not export a cache-read token constant yet.
@@ -282,14 +285,14 @@ function buildChatSpan(
   attachResponseMetadata(attributes, responseRecord);
   if (error) attachErrorAttributes(attributes, error);
 
-  return buildReadableSpan({
+  return withInstrumentationScope(buildReadableSpan({
     name: "openrouter.chat",
     startTimeIso: startedAt.toISOString(),
     endTimeIso: new Date().toISOString(),
     attributes: prune(attributes),
     traceId: parent.traceId,
     parentId: parent.parentId,
-  });
+  }));
 }
 
 function buildEmbeddingSpan(
@@ -301,17 +304,14 @@ function buildEmbeddingSpan(
 ): ReadableSpan {
   const responseRecord = response as AnyRecord | undefined;
   const usage = responseRecord?.usage;
-  const summary = {
-    id: responseRecord?.id,
-    model: responseRecord?.model,
-    object: responseRecord?.object,
-    data_count: Array.isArray(responseRecord?.data) ? responseRecord.data.length : undefined,
-  };
+  const embeddings = Array.isArray(responseRecord?.data)
+    ? responseRecord.data.map((item: AnyRecord) => item?.embedding ?? item)
+    : undefined;
   const attributes: AnyRecord = {
     [ATTR_TRACELOOP_ENTITY_NAME]: "openrouter.embeddings",
     [ATTR_TRACELOOP_ENTITY_PATH]: "openrouter.embeddings.generate",
     [ATTR_TRACELOOP_ENTITY_INPUT]: safeStringify(request?.input ?? null),
-    [ATTR_TRACELOOP_ENTITY_OUTPUT]: safeStringify(prune(summary)),
+    [ATTR_TRACELOOP_ENTITY_OUTPUT]: safeStringify(embeddings ?? null),
     [ATTR_LLM_REQUEST_TYPE]: "embedding",
     [RespanSpanAttributes.RESPAN_LOG_METHOD]: TRACE_METHOD,
     [RespanSpanAttributes.RESPAN_LOG_TYPE]: RespanLogType.EMBEDDING,
@@ -322,14 +322,21 @@ function buildEmbeddingSpan(
   attachUsageAttributes(attributes, usage);
   if (error) attachErrorAttributes(attributes, error);
 
-  return buildReadableSpan({
+  return withInstrumentationScope(buildReadableSpan({
     name: "openrouter.embeddings",
     startTimeIso: startedAt.toISOString(),
     endTimeIso: new Date().toISOString(),
     attributes: prune(attributes),
     traceId: parent.traceId,
     parentId: parent.parentId,
-  });
+  }));
+}
+
+function withInstrumentationScope(span: ReadableSpan): ReadableSpan {
+  return {
+    ...span,
+    instrumentationScope,
+  };
 }
 
 function resolveChatRequest(request: AnyRecord = {}): AnyRecord {

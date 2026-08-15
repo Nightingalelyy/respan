@@ -1,0 +1,7 @@
+{
+  "summary": "Fix OpenTelemetry 2.x span identity, agent configuration, instrumentation provenance, and embedding output for the OpenAI Agents and OpenRouter instrumentations.",
+  "packages": {
+    "@respan/instrumentation-openai-agents": "patch",
+    "@respan/instrumentation-openrouter": "patch"
+  }
+}

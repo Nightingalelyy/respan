@@ -4,10 +4,12 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { trace } from "@opentelemetry/api";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sourcePath = resolve(root, "src/index.ts");
 const require = createRequire(import.meta.url);
+const { version: packageVersion } = require("../package.json");
 
 async function loadSdkPrototypes() {
   const [chatModule, embeddingsModule] = await Promise.all([
@@ -121,6 +123,77 @@ test("waits for patch work to settle before cleaning up a failed activation", as
   } finally {
     await instrumentor.deactivate();
     instrumentor.restorePatches();
+  }
+});
+
+test("chat and embedding spans use the OpenRouter package scope", async () => {
+  const mod = await import(pathToFileURL(resolve(root, "dist/index.js")));
+  const prototypes = await loadSdkPrototypes();
+  const originalSend = prototypes.chat.send;
+  const originalGenerate = prototypes.embeddings.generate;
+  const originalGetTracerProvider = trace.getTracerProvider.bind(trace);
+  const spans = [];
+  const instrumentor = new mod.OpenRouterInstrumentor();
+
+  prototypes.chat.send = async () => ({
+    model: "openai/gpt-test",
+    choices: [{ message: { role: "assistant", content: "hello" } }],
+    usage: { promptTokens: 2, completionTokens: 1, totalTokens: 3 },
+  });
+  prototypes.embeddings.generate = async () => ({
+    model: "openai/embed-test",
+    data: [{ embedding: [0.1, 0.2], index: 0 }],
+    usage: { promptTokens: 2, totalTokens: 2 },
+  });
+  Object.defineProperty(trace, "getTracerProvider", {
+    configurable: true,
+    writable: true,
+    value() {
+      return {
+        activeSpanProcessor: {
+          onEnd(span) {
+            spans.push(span);
+          },
+        },
+      };
+    },
+  });
+
+  try {
+    await instrumentor.activate();
+    await prototypes.chat.send({
+      chatRequest: {
+        model: "openai/gpt-test",
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+    await prototypes.embeddings.generate({
+      requestBody: {
+        model: "openai/embed-test",
+        input: ["hello"],
+      },
+    });
+
+    assert.equal(spans.length, 2);
+    for (const span of spans) {
+      assert.deepEqual(span.instrumentationScope, {
+        name: "@respan/instrumentation-openrouter",
+        version: packageVersion,
+      });
+    }
+    assert.deepEqual(
+      JSON.parse(spans[1].attributes["traceloop.entity.output"]),
+      [[0.1, 0.2]],
+    );
+  } finally {
+    await instrumentor.deactivate();
+    prototypes.chat.send = originalSend;
+    prototypes.embeddings.generate = originalGenerate;
+    Object.defineProperty(trace, "getTracerProvider", {
+      configurable: true,
+      writable: true,
+      value: originalGetTracerProvider,
+    });
   }
 });
 

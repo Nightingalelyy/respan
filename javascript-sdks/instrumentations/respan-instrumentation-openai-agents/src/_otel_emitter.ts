@@ -9,6 +9,8 @@
 import { trace, SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import { hrTime, hrTimeDuration } from "@opentelemetry/core";
 import { ReadableSpan } from "@opentelemetry/sdk-trace-base";
+import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import {
   ATTR_GEN_AI_USAGE_INPUT_TOKENS,
   ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
@@ -20,7 +22,10 @@ import {
 import { RespanLogType, RespanSpanAttributes } from "@respan/respan-sdk";
 import type { Span, Trace } from "@openai/agents";
 
-const PACKAGE_VERSION = "1.0.6";
+const packageRequire = createRequire(import.meta.url);
+const { version: PACKAGE_VERSION } = packageRequire("../package.json") as {
+  version: string;
+};
 const GEN_AI_USAGE_INPUT_TOKENS = ATTR_GEN_AI_USAGE_INPUT_TOKENS;
 const GEN_AI_USAGE_OUTPUT_TOKENS = ATTR_GEN_AI_USAGE_OUTPUT_TOKENS;
 const LLM_USAGE_CACHE_READ_INPUT_TOKENS = "llm.usage.cache_read_input_tokens";
@@ -28,6 +33,33 @@ const GEN_AI_COMPLETION_PREFIX = `${SpanAttributes.LLM_COMPLETIONS}.0`;
 const GEN_AI_COMPLETION_ROLE = `${GEN_AI_COMPLETION_PREFIX}.role`;
 const GEN_AI_COMPLETION_CONTENT = `${GEN_AI_COMPLETION_PREFIX}.content`;
 const GEN_AI_COMPLETION_TOOL_CALLS = `${GEN_AI_COMPLETION_PREFIX}.tool_calls`;
+
+interface SdkTraceContext {
+  groupId?: string;
+  metadata?: Record<string, unknown>;
+}
+
+const sdkTraceContexts = new Map<string, SdkTraceContext>();
+const RESPAN_METADATA_PREFIX = `${RespanSpanAttributes.RESPAN_METADATA}.`;
+
+export function registerSdkTrace(traceObj: Trace): void {
+  const metadata = toSerializableValue(traceObj.metadata);
+  sdkTraceContexts.set(traceObj.traceId, {
+    groupId: traceObj.groupId || undefined,
+    metadata:
+      metadata && typeof metadata === "object" && !Array.isArray(metadata)
+        ? metadata as Record<string, unknown>
+        : undefined,
+  });
+}
+
+export function clearSdkTrace(traceId: string): void {
+  sdkTraceContexts.delete(traceId);
+}
+
+export function clearSdkTraceContexts(): void {
+  sdkTraceContexts.clear();
+}
 
 function safeJson(obj: any): string {
   try {
@@ -37,6 +69,18 @@ function safeJson(obj: any): string {
   } catch {
     return String(obj);
   }
+}
+
+function setMetadataAttribute(
+  attrs: Record<string, any>,
+  name: string,
+  value: unknown,
+): void {
+  const serialized = toSerializableValue(value);
+  if (serialized === undefined) return;
+
+  attrs[`${RESPAN_METADATA_PREFIX}${name}`] =
+    typeof serialized === "object" ? safeJson(serialized) : serialized;
 }
 
 function toSerializableValue(value: any): any {
@@ -643,21 +687,19 @@ function formatChatCompletionOutput(rawResponse: any): string {
 }
 
 function hashStringToHexId(s: string, length: number): string {
-  let hash = 0;
-  for (let i = 0; i < s.length; i++) {
-    hash = ((hash << 5) - hash + s.charCodeAt(i)) | 0;
-  }
-  const hex = Math.abs(hash).toString(16).padStart(8, "0");
-  return (hex + hex + hex + hex).slice(0, length);
+  const hex = createHash("sha256").update(s, "utf8").digest("hex").slice(0, length);
+  return /^0+$/.test(hex)
+    ? createHash("sha256").update(`respan:${s}`, "utf8").digest("hex").slice(0, length)
+    : hex;
 }
 
 function ensureTraceId(id: string): string {
-  if (/^[0-9a-f]{32}$/i.test(id)) return id.toLowerCase();
+  if (/^[0-9a-f]{32}$/i.test(id) && !/^0+$/.test(id)) return id.toLowerCase();
   return hashStringToHexId(id, 32);
 }
 
 function ensureSpanId(id: string): string {
-  if (/^[0-9a-f]{16}$/i.test(id)) return id.toLowerCase();
+  if (/^[0-9a-f]{16}$/i.test(id) && !/^0+$/.test(id)) return id.toLowerCase();
   return hashStringToHexId(id, 16);
 }
 
@@ -716,6 +758,8 @@ function buildReadableSpan(opts: BuildSpanOptions): ReadableSpan {
       ? { code: SpanStatusCode.ERROR, message: opts.errorMessage ?? "" }
       : { code: SpanStatusCode.OK, message: "" };
 
+  applySdkTraceContext(opts.attributes, opts.traceId);
+
   return {
     name: opts.name,
     kind: SpanKind.INTERNAL,
@@ -746,6 +790,28 @@ function buildReadableSpan(opts: BuildSpanOptions): ReadableSpan {
     droppedEventsCount: 0,
     droppedLinksCount: 0,
   } satisfies ReadableSpan;
+}
+
+function applySdkTraceContext(attrs: Record<string, any>, traceId: string): void {
+  const traceContext = sdkTraceContexts.get(traceId);
+  if (!traceContext) return;
+
+  if (traceContext.groupId) {
+    attrs[RespanSpanAttributes.RESPAN_TRACE_GROUP_ID] = traceContext.groupId;
+  }
+  const traceMetadata = traceContext.metadata;
+  if (!traceMetadata) return;
+  for (const [name, value] of Object.entries(traceMetadata)) {
+    const key = `${RESPAN_METADATA_PREFIX}${name}`;
+    if (attrs[key] === undefined) {
+      setMetadataAttribute(attrs, name, value);
+    }
+  }
+
+  const customIdentifier = traceMetadata.custom_identifier;
+  if (typeof customIdentifier === "string" && customIdentifier) {
+    attrs[RespanSpanAttributes.RESPAN_SPAN_CUSTOM_ID] = customIdentifier;
+  }
 }
 
 function injectSpan(span: ReadableSpan): void {
@@ -924,6 +990,10 @@ function emitTrace(traceObj: Trace): void {
   if (Object.keys(metadata).length > 0) {
     attrs[RespanSpanAttributes.RESPAN_METADATA] = safeJson(metadata);
   }
+  const customIdentifier = metadata.custom_identifier;
+  if (typeof customIdentifier === "string" && customIdentifier) {
+    attrs[RespanSpanAttributes.RESPAN_SPAN_CUSTOM_ID] = customIdentifier;
+  }
 
   const span = buildReadableSpan({
     name: `${traceName}.workflow`,
@@ -942,6 +1012,18 @@ function emitAgent(item: Span<any>): void {
   const attrs = baseAttrs(name, name, RespanLogType.AGENT);
   attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] = name;
   attrs[RespanSpanAttributes.RESPAN_METADATA_AGENT_NAME] = name;
+  const agentConfiguration = {
+    tools: Array.isArray(data.tools) ? data.tools : undefined,
+    handoffs: Array.isArray(data.handoffs) ? data.handoffs : undefined,
+    output_type: typeof data.output_type === "string" ? data.output_type : undefined,
+  };
+  for (const [name, value] of Object.entries(agentConfiguration)) {
+    setMetadataAttribute(
+      attrs,
+      `openai_agents.agent_configuration.${name}`,
+      value,
+    );
+  }
 
   const span = buildReadableSpan({
     name: `${name}.agent`,
