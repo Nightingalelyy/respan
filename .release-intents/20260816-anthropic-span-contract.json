@@ -1,0 +1,6 @@
+{
+  "summary": "Fix Anthropic error status, propagated metadata, tool fields, and scope version",
+  "packages": {
+    "@respan/instrumentation-anthropic": "patch"
+  }
+}
