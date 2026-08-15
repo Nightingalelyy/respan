@@ -59,6 +59,11 @@ interface StartedEvent {
   event: FlueEvent;
 }
 
+interface PendingCompaction {
+  event: Extract<FlueEvent, { type: "compaction" }>;
+  start?: StartedEvent;
+}
+
 interface TurnState {
   start?: StartedEvent;
   request?: Extract<FlueEvent, { type: "turn_request" }>;
@@ -97,7 +102,9 @@ export class FlueInstrumentor {
   private readonly _workflowNames = new Map<string, string>();
   private readonly _runStarts = new Map<string, StartedEvent>();
   private readonly _agentStarts = new Map<string, StartedEvent>();
-  private readonly _operationStarts = new Map<string, StartedEvent>();
+  private readonly _operationStarts = new Map<string, Map<string, StartedEvent>>();
+  private readonly _exportedOperationSpanIds = new Map<string, Set<string>>();
+  private readonly _pendingCompactions = new Map<string, PendingCompaction[]>();
   private readonly _taskStarts = new Map<string, StartedEvent>();
   private readonly _toolStarts = new Map<string, ToolState>();
   private readonly _turns = new Map<string, TurnState>();
@@ -128,11 +135,14 @@ export class FlueInstrumentor {
     this._unsubscribe?.();
     this._unsubscribe = undefined;
     this._isActive = false;
+    this._flushAllPendingCompactions();
     this._traceIds.clear();
     this._workflowNames.clear();
     this._runStarts.clear();
     this._agentStarts.clear();
     this._operationStarts.clear();
+    this._exportedOperationSpanIds.clear();
+    this._pendingCompactions.clear();
     this._taskStarts.clear();
     this._toolStarts.clear();
     this._turns.clear();
@@ -163,7 +173,7 @@ export class FlueInstrumentor {
         this._emitAgentEnd(event);
         break;
       case "operation_start":
-        this._operationStarts.set(event.operationId, { event, timestamp: event.timestamp });
+        this._rememberOperationStart(event);
         break;
       case "operation":
         this._emitOperation(event);
@@ -195,7 +205,7 @@ export class FlueInstrumentor {
         this._compactionStarts.set(this._compactionKey(event), { event, timestamp: event.timestamp });
         break;
       case "compaction":
-        this._emitCompaction(event);
+        this._handleCompaction(event);
         break;
       case "log":
         this._emitLog(event);
@@ -245,6 +255,8 @@ export class FlueInstrumentor {
       workflowName: String(workflowName),
     });
     this._runStarts.delete(event.runId);
+    this._flushPendingCompactionsForTrace(event);
+    this._clearOperationState(this._traceKey(event));
   }
 
   private _emitAgentEnd(event: Extract<FlueEvent, { type: "agent_end" }>): void {
@@ -262,10 +274,14 @@ export class FlueInstrumentor {
       parentId: this._rootParentId(event),
     });
     this._agentStarts.delete(this._agentKey(event));
+    if (!event.runId) {
+      this._settleDirectAgentOperationState(event);
+    }
   }
 
   private _emitOperation(event: Extract<FlueEvent, { type: "operation" }>): void {
-    const start = this._operationStarts.get(event.operationId);
+    const traceKey = this._traceKey(event);
+    const start = this._operationStarts.get(traceKey)?.get(event.operationId);
     const logType = event.operationKind === "shell" ? RespanLogType.TOOL : RespanLogType.TASK;
     this._emitSpan({
       name: `flue.operation.${event.operationKind}`,
@@ -281,12 +297,27 @@ export class FlueInstrumentor {
       durationMs: event.durationMs,
       error: event.error,
       spanId: this._operationSpanId(event),
-      parentId: this._rootParentId(event),
+      parentId: this._rootOrAgentParentId(event),
       attributes: {
         [metadataKey("flue_operation_kind")]: event.operationKind,
       },
     });
-    this._operationStarts.delete(event.operationId);
+    this._rememberExportedOperationSpan(event);
+    this._flushPendingCompactionsForOperation(event);
+    const traceStarts = this._operationStarts.get(traceKey);
+    traceStarts?.delete(event.operationId);
+    if (traceStarts?.size === 0) {
+      this._operationStarts.delete(traceKey);
+    }
+    if (!event.runId && !this._agentStarts.has(this._agentKey(event))) {
+      this._forgetExportedOperationSpan(event);
+      if (
+        !this._operationStarts.has(traceKey) &&
+        !this._pendingCompactions.has(traceKey)
+      ) {
+        this._clearOperationState(traceKey);
+      }
+    }
   }
 
   private _emitTask(event: Extract<FlueEvent, { type: "task" }>): void {
@@ -393,8 +424,29 @@ export class FlueInstrumentor {
     this._turns.delete(event.turnId);
   }
 
-  private _emitCompaction(event: Extract<FlueEvent, { type: "compaction" }>): void {
+  private _handleCompaction(event: Extract<FlueEvent, { type: "compaction" }>): void {
     const start = this._compactionStarts.get(this._compactionKey(event));
+    this._compactionStarts.delete(this._compactionKey(event));
+    const pending = { event, start };
+
+    if (event.operationId) {
+      const operationSpanId = this._operationSpanId(event as FlueEvent & { operationId: string });
+      if (this._hasExportedOperationSpan(event, operationSpanId)) {
+        this._emitCompaction(pending, operationSpanId);
+        return;
+      }
+      this._queuePendingCompaction(pending);
+      return;
+    }
+
+    this._emitCompaction(pending, this._rootOrAgentParentId(event));
+  }
+
+  private _emitCompaction(
+    pending: PendingCompaction,
+    parentId: string | undefined,
+  ): void {
+    const { event, start } = pending;
     const startEvent = start?.event as Extract<FlueEvent, { type: "compaction_start" }> | undefined;
     const attributes: Record<string, unknown> = {
       [metadataKey("flue_compaction_messages_before")]: event.messagesBefore,
@@ -424,11 +476,10 @@ export class FlueInstrumentor {
       start,
       durationMs: event.durationMs,
       error: event.error,
-      parentId: this._operationOrRootParentId(event),
+      parentId,
       spanId: this._compactionSpanId(event),
       attributes,
     });
-    this._compactionStarts.delete(this._compactionKey(event));
   }
 
   private _emitLog(event: Extract<FlueEvent, { type: "log" }>): void {
@@ -607,7 +658,7 @@ export class FlueInstrumentor {
     return this._eventSpanId(event, `agent:${this._agentName(event)}`);
   }
 
-  private _operationSpanId(event: Extract<FlueEvent, { operationId: string }>): string {
+  private _operationSpanId(event: FlueEvent & { operationId: string }): string {
     return this._eventSpanId(event, `operation:${event.operationId}`);
   }
 
@@ -640,11 +691,149 @@ export class FlueInstrumentor {
 
   private _operationOrRootParentId(event: FlueEvent): string | undefined {
     if (event.operationId) {
-      return this._operationSpanId(event as Extract<FlueEvent, { operationId: string }>);
+      return this._operationSpanId(event as FlueEvent & { operationId: string });
     }
+    return this._rootOrAgentParentId(event);
+  }
+
+  private _rootOrAgentParentId(event: FlueEvent): string | undefined {
     return this._rootParentId(event) ?? (
       event.instanceId ? this._agentSpanId(event) : undefined
     );
+  }
+
+  private _rememberOperationStart(
+    event: Extract<FlueEvent, { type: "operation_start" }>,
+  ): void {
+    const traceKey = this._traceKey(event);
+    const starts = this._operationStarts.get(traceKey) ?? new Map<string, StartedEvent>();
+    starts.set(event.operationId, { event, timestamp: event.timestamp });
+    this._operationStarts.set(traceKey, starts);
+  }
+
+  private _rememberExportedOperationSpan(
+    event: Extract<FlueEvent, { type: "operation" }>,
+  ): void {
+    const traceKey = this._traceKey(event);
+    const spanIds = this._exportedOperationSpanIds.get(traceKey) ?? new Set<string>();
+    spanIds.add(this._operationSpanId(event));
+    this._exportedOperationSpanIds.set(traceKey, spanIds);
+  }
+
+  private _hasExportedOperationSpan(event: FlueEvent, spanId: string): boolean {
+    return Boolean(
+      this._exportedOperationSpanIds.get(this._traceKey(event))?.has(spanId),
+    );
+  }
+
+  private _forgetExportedOperationSpan(
+    event: Extract<FlueEvent, { type: "operation" }>,
+  ): void {
+    const traceKey = this._traceKey(event);
+    const spanIds = this._exportedOperationSpanIds.get(traceKey);
+    spanIds?.delete(this._operationSpanId(event));
+    if (spanIds?.size === 0) {
+      this._exportedOperationSpanIds.delete(traceKey);
+    }
+  }
+
+  private _queuePendingCompaction(pending: PendingCompaction): void {
+    const traceKey = this._traceKey(pending.event);
+    const pendingCompactions = this._pendingCompactions.get(traceKey) ?? [];
+    pendingCompactions.push(pending);
+    this._pendingCompactions.set(traceKey, pendingCompactions);
+  }
+
+  private _flushPendingCompactionsForOperation(
+    event: Extract<FlueEvent, { type: "operation" }>,
+  ): void {
+    const traceKey = this._traceKey(event);
+    const pendingCompactions = this._pendingCompactions.get(traceKey);
+    if (!pendingCompactions) {
+      return;
+    }
+
+    const remaining: PendingCompaction[] = [];
+    const operationSpanId = this._operationSpanId(event);
+    for (const pending of pendingCompactions) {
+      if (pending.event.operationId === event.operationId) {
+        this._emitCompaction(pending, operationSpanId);
+      } else {
+        remaining.push(pending);
+      }
+    }
+
+    if (remaining.length > 0) {
+      this._pendingCompactions.set(traceKey, remaining);
+    } else {
+      this._pendingCompactions.delete(traceKey);
+    }
+  }
+
+  private _flushPendingCompactionsForTrace(event: FlueEvent): void {
+    const traceKey = this._traceKey(event);
+    const pendingCompactions = this._pendingCompactions.get(traceKey);
+    this._pendingCompactions.delete(traceKey);
+    if (!pendingCompactions) {
+      return;
+    }
+
+    for (const pending of pendingCompactions) {
+      this._emitCompaction(pending, this._rootOrAgentParentId(pending.event));
+    }
+  }
+
+  private _settleDirectAgentOperationState(event: FlueEvent): void {
+    const traceKey = this._traceKey(event);
+    const starts = this._operationStarts.get(traceKey);
+    const pendingCompactions = this._pendingCompactions.get(traceKey) ?? [];
+    const remaining: PendingCompaction[] = [];
+
+    for (const pending of pendingCompactions) {
+      if (pending.event.operationId && starts?.has(pending.event.operationId)) {
+        remaining.push(pending);
+      } else {
+        this._emitCompaction(pending, this._rootOrAgentParentId(pending.event));
+      }
+    }
+
+    if (remaining.length > 0) {
+      this._pendingCompactions.set(traceKey, remaining);
+    } else {
+      this._pendingCompactions.delete(traceKey);
+    }
+
+    if (starts) {
+      const retainedOperationIds = new Set(
+        remaining.flatMap((pending) =>
+          pending.event.operationId ? [pending.event.operationId] : [],
+        ),
+      );
+      for (const operationId of starts.keys()) {
+        if (!retainedOperationIds.has(operationId)) {
+          starts.delete(operationId);
+        }
+      }
+      if (starts.size === 0) {
+        this._operationStarts.delete(traceKey);
+      }
+    }
+
+    this._exportedOperationSpanIds.delete(traceKey);
+  }
+
+  private _flushAllPendingCompactions(): void {
+    const pendingCompactions = Array.from(this._pendingCompactions.values()).flat();
+    this._pendingCompactions.clear();
+    for (const pending of pendingCompactions) {
+      this._emitCompaction(pending, undefined);
+    }
+  }
+
+  private _clearOperationState(traceKey: string): void {
+    this._operationStarts.delete(traceKey);
+    this._exportedOperationSpanIds.delete(traceKey);
+    this._pendingCompactions.delete(traceKey);
   }
 }
 

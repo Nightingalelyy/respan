@@ -627,13 +627,6 @@ test("BeeAIInstrumentor exports only complete BeeAI event rows", async () => {
         is_error: false,
       },
     ];
-    const normalizedAgentInput = {
-      iteration: 1,
-      messages: [
-        { role: "user", content: `Compute ${expression}` },
-        { role: "assistant", content: "", tool_calls: [normalizedToolCall] },
-      ],
-    };
     const basicUserMessage = {
       role: "user",
       content: [{ type: "text", text: "Explain tracing in one sentence." }],
@@ -729,7 +722,7 @@ test("BeeAIInstrumentor exports only complete BeeAI event rows", async () => {
       name: "tool.calculator.success-1",
       traceId: "otel-trace-1",
       spanId: "tool-span-1",
-      parentSpanId: "chat-span-1",
+      parentSpanId: "start-span-1",
       attributes: {
         target: "tool.calculator.success",
         traceId: "trace-1",
@@ -743,7 +736,7 @@ test("BeeAIInstrumentor exports only complete BeeAI event rows", async () => {
       name: "agent.toolCalling.success-1",
       traceId: "otel-trace-1",
       spanId: "agent-span-1",
-      parentSpanId: "chat-span-1",
+      parentSpanId: "framework-span",
       attributes: {
         target: "agent.toolCalling.success",
         traceId: "trace-1",
@@ -783,7 +776,7 @@ test("BeeAIInstrumentor exports only complete BeeAI event rows", async () => {
       name: "tool.dynamic.finalAnswer.success-1",
       traceId: "otel-trace-1",
       spanId: "final-answer-span-1",
-      parentSpanId: "chat-span-2",
+      parentSpanId: "agent-span-1",
       attributes: {
         target: "tool.dynamic.finalAnswer.success",
         traceId: "trace-1",
@@ -811,6 +804,12 @@ test("BeeAIInstrumentor exports only complete BeeAI event rows", async () => {
         traceId: "trace-1",
         source: "ToolCallingAgent",
         "beeai.version": "0.1.13",
+        "input.value": `Compute ${expression}`,
+        "output.value": JSON.stringify({ role: "assistant", text: "84" }),
+        history: JSON.stringify([
+          { role: "user", text: `Compute ${expression}` },
+          { role: "assistant", text: "84" },
+        ]),
       },
     });
     const workflowSpan = makeSpan({
@@ -856,15 +855,16 @@ test("BeeAIInstrumentor exports only complete BeeAI event rows", async () => {
       basicChatSpan,
       toolSpan,
       chatSpan,
-      agentSpan,
       chat2Span,
       finalAnswerSpan,
+      parentSpan,
     ]);
     assert.deepEqual(agentStartSpan.attributes["respan.processors"], []);
+    assert.deepEqual(agentSpan.attributes["respan.processors"], []);
     assert.deepEqual(emptyAgentSpan.attributes["respan.processors"], []);
     assert.equal(emptyAgentSpan.attributes.target, undefined);
     assert.deepEqual(finishSpan.attributes["respan.processors"], []);
-    assert.deepEqual(parentSpan.attributes["respan.processors"], []);
+    assert.equal(parentSpan.attributes["respan.processors"], undefined);
 
     assert.equal(basicChatSpan.attributes["respan.entity.log_type"], "chat");
     assert.equal(basicChatSpan.attributes["llm.request.type"], "chat");
@@ -891,7 +891,7 @@ test("BeeAIInstrumentor exports only complete BeeAI event rows", async () => {
       "Tracing shows each step and value in a run.",
     );
 
-    assert.equal(chatSpan.parentSpanId, "workflow-span");
+    assert.equal(chatSpan.parentSpanId, "framework-span");
     assert.equal(chatSpan.attributes["respan.entity.log_type"], "chat");
     assert.equal(chatSpan.attributes["llm.request.type"], "chat");
     assert.equal(chatSpan.attributes["gen_ai.system"], "openai");
@@ -913,20 +913,30 @@ test("BeeAIInstrumentor exports only complete BeeAI event rows", async () => {
       JSON.stringify([normalizedToolCall]),
     );
 
-    assert.equal(toolSpan.parentSpanId, "workflow-span");
+    assert.equal(toolSpan.parentSpanId, "framework-span");
     assert.equal(toolSpan.attributes["respan.entity.log_type"], "tool");
     assert.equal(toolSpan.attributes["traceloop.entity.input"], JSON.stringify({ expression }));
     assert.equal(toolSpan.attributes["traceloop.entity.output"], JSON.stringify({ result: 84 }));
 
-    assert.equal(agentSpan.parentSpanId, "workflow-span");
-    assert.equal(agentSpan.attributes["respan.entity.log_type"], "agent");
-    assert.equal(agentSpan.attributes["traceloop.entity.input"], JSON.stringify(normalizedAgentInput));
+    assert.equal(parentSpan.parentSpanId, "workflow-span");
+    assert.equal(parentSpan.attributes["respan.entity.log_type"], "agent");
+    assert.equal(parentSpan.attributes["traceloop.entity.name"], "ToolCallingAgent");
+    assert.deepEqual(
+      JSON.parse(parentSpan.attributes["traceloop.entity.input"]),
+      {
+        prompt: `Compute ${expression}`,
+        history: [
+          { role: "user", content: `Compute ${expression}` },
+          { role: "assistant", content: "84" },
+        ],
+      },
+    );
     assert.equal(
-      agentSpan.attributes["traceloop.entity.output"],
-      JSON.stringify({ result: "84", is_error: false }),
+      parentSpan.attributes["traceloop.entity.output"],
+      JSON.stringify({ role: "assistant", content: "84" }),
     );
 
-    assert.equal(chat2Span.parentSpanId, "workflow-span");
+    assert.equal(chat2Span.parentSpanId, "framework-span");
     assert.equal(chat2Span.attributes["respan.entity.log_type"], "chat");
     assert.equal(chat2Span.attributes["llm.request.type"], "chat");
     assert.equal(chat2Span.attributes["gen_ai.request.model"], "gpt-4o-mini");
@@ -956,7 +966,7 @@ test("BeeAIInstrumentor exports only complete BeeAI event rows", async () => {
       JSON.stringify([normalizedFinalToolCall]),
     );
 
-    assert.equal(finalAnswerSpan.parentSpanId, "workflow-span");
+    assert.equal(finalAnswerSpan.parentSpanId, "framework-span");
     assert.equal(finalAnswerSpan.attributes["respan.entity.log_type"], "tool");
     assert.equal(finalAnswerSpan.attributes["traceloop.entity.input"], JSON.stringify({ response: "84" }));
     assert.equal(finalAnswerSpan.attributes["traceloop.entity.output"], "84");
@@ -966,6 +976,9 @@ test("BeeAIInstrumentor exports only complete BeeAI event rows", async () => {
         "target",
         "data",
         "metadata",
+        "history",
+        "source",
+        "beeai.version",
         "traceId",
         "input.value",
         "output.value",

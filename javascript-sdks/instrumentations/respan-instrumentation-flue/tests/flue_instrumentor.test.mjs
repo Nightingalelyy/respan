@@ -41,6 +41,28 @@ function event(partial) {
   };
 }
 
+function assertConnectedTree(spans) {
+  const spansById = new Map(spans.map((span) => [span.spanContext().spanId, span]));
+  const roots = spans.filter((span) => !span.parentSpanContext);
+
+  assert.equal(roots.length, 1);
+  for (const span of spans) {
+    const visited = new Set();
+    let current = span;
+    while (current.parentSpanContext) {
+      assert.ok(!visited.has(current.spanContext().spanId), `${span.name} has a parent cycle`);
+      visited.add(current.spanContext().spanId);
+      const parent = spansById.get(current.parentSpanContext.spanId);
+      assert.ok(
+        parent,
+        `${span.name} has an unexported parent`,
+      );
+      current = parent;
+    }
+    assert.equal(current.spanContext().spanId, roots[0].spanContext().spanId);
+  }
+}
+
 test("exports Flue workflow, operation, model turn, and tool events as canonical spans", () => {
   captureState.spans = [];
   const instrumentor = new FlueInstrumentor();
@@ -298,8 +320,263 @@ test("exports direct agent logs and compaction with fallback workflow name", () 
   assert.equal(logSpan.attributes["traceloop.workflow.name"], "Flue Direct Agent.workflow");
   assert.equal(compactionSpan.attributes["respan.metadata.flue_compaction_reason"], "manual");
   assert.equal(agentSpan.attributes["traceloop.entity.name"], "agent-1");
+  assert.equal(compactionSpan.parentSpanContext?.spanId, agentSpan.spanContext().spanId);
+  assertConnectedTree(captureState.spans);
 });
 
+test("parents compaction to the workflow when its started operation never finishes", () => {
+  captureState.spans = [];
+  const instrumentor = new FlueInstrumentor();
+
+  instrumentor.handleEvent(event({
+    type: "run_start",
+    eventIndex: 1,
+    runId: "run-compaction-fallback",
+    workflowName: "Flue Compaction Fallback.workflow",
+  }));
+  instrumentor.handleEvent(event({
+    type: "operation_start",
+    eventIndex: 2,
+    runId: "run-compaction-fallback",
+    operationId: "missing-operation",
+    operationKind: "compact",
+  }));
+  instrumentor.handleEvent(event({
+    type: "compaction_start",
+    eventIndex: 3,
+    runId: "run-compaction-fallback",
+    operationId: "missing-operation",
+    reason: "manual",
+  }));
+  instrumentor.handleEvent(event({
+    type: "compaction",
+    eventIndex: 4,
+    runId: "run-compaction-fallback",
+    operationId: "missing-operation",
+    messagesBefore: 12,
+    messagesAfter: 4,
+    isError: false,
+  }));
+  instrumentor.handleEvent(event({
+    type: "run_end",
+    eventIndex: 5,
+    runId: "run-compaction-fallback",
+    result: { ok: true },
+    isError: false,
+  }));
+
+  assert.equal(captureState.spans.length, 2);
+  const compactionSpan = captureState.spans.find((span) => span.name === "flue.compaction");
+  const workflowSpan = captureState.spans.find(
+    (span) => span.attributes["respan.entity.log_type"] === "workflow",
+  );
+
+  assert.ok(compactionSpan);
+  assert.ok(workflowSpan);
+  assert.equal(compactionSpan.parentSpanContext?.spanId, workflowSpan.spanContext().spanId);
+  assertConnectedTree(captureState.spans);
+});
+
+test("parents compaction to a matching observed operation", () => {
+  captureState.spans = [];
+  const instrumentor = new FlueInstrumentor();
+
+  instrumentor.handleEvent(event({
+    type: "run_start",
+    eventIndex: 1,
+    runId: "run-operation-compaction",
+    workflowName: "Flue Operation Compaction.workflow",
+  }));
+  instrumentor.handleEvent(event({
+    type: "operation_start",
+    eventIndex: 2,
+    runId: "run-operation-compaction",
+    operationId: "compact-operation",
+    operationKind: "prompt",
+  }));
+  instrumentor.handleEvent(event({
+    type: "compaction_start",
+    eventIndex: 3,
+    runId: "run-operation-compaction",
+    operationId: "compact-operation",
+    reason: "automatic",
+  }));
+  instrumentor.handleEvent(event({
+    type: "compaction",
+    eventIndex: 4,
+    runId: "run-operation-compaction",
+    operationId: "compact-operation",
+    messagesBefore: 20,
+    messagesAfter: 5,
+    isError: false,
+  }));
+  instrumentor.handleEvent(event({
+    type: "operation",
+    eventIndex: 5,
+    runId: "run-operation-compaction",
+    operationId: "compact-operation",
+    operationKind: "prompt",
+    isError: false,
+    result: { compacted: true },
+  }));
+  instrumentor.handleEvent(event({
+    type: "run_end",
+    eventIndex: 6,
+    runId: "run-operation-compaction",
+    result: { ok: true },
+    isError: false,
+  }));
+
+  assert.equal(captureState.spans.length, 3);
+  const compactionSpan = captureState.spans.find((span) => span.name === "flue.compaction");
+  const operationSpan = captureState.spans.find(
+    (span) => span.name === "flue.operation.prompt",
+  );
+
+  assert.ok(compactionSpan);
+  assert.ok(operationSpan);
+  assert.equal(compactionSpan.parentSpanContext?.spanId, operationSpan.spanContext().spanId);
+  assertConnectedTree(captureState.spans);
+});
+
+test("clears direct-agent operation state before an operation id is reused", () => {
+  captureState.spans = [];
+  const instrumentor = new FlueInstrumentor();
+
+  instrumentor.handleEvent(event({
+    type: "agent_start",
+    eventIndex: 1,
+    timestamp: "2026-06-21T00:00:00.000Z",
+    instanceId: "reused-agent",
+  }));
+  instrumentor.handleEvent(event({
+    type: "operation_start",
+    eventIndex: 2,
+    timestamp: "2026-06-21T00:00:01.000Z",
+    instanceId: "reused-agent",
+    operationId: "reused-operation",
+    operationKind: "compact",
+  }));
+  instrumentor.handleEvent(event({
+    type: "compaction_start",
+    eventIndex: 3,
+    timestamp: "2026-06-21T00:00:02.000Z",
+    instanceId: "reused-agent",
+    operationId: "reused-operation",
+    reason: "automatic",
+  }));
+  instrumentor.handleEvent(event({
+    type: "compaction",
+    eventIndex: 4,
+    timestamp: "2026-06-21T00:00:03.000Z",
+    instanceId: "reused-agent",
+    operationId: "reused-operation",
+    messagesBefore: 10,
+    messagesAfter: 3,
+    isError: false,
+  }));
+  instrumentor.handleEvent(event({
+    type: "operation_start",
+    eventIndex: 5,
+    timestamp: "2026-06-21T00:00:03.500Z",
+    instanceId: "reused-agent",
+    operationId: "abandoned-operation",
+    operationKind: "prompt",
+  }));
+  instrumentor.handleEvent(event({
+    type: "agent_end",
+    eventIndex: 6,
+    timestamp: "2026-06-21T00:00:04.000Z",
+    instanceId: "reused-agent",
+    messages: [],
+  }));
+  instrumentor.handleEvent(event({
+    type: "operation",
+    eventIndex: 7,
+    timestamp: "2026-06-21T00:00:05.000Z",
+    instanceId: "reused-agent",
+    operationId: "reused-operation",
+    operationKind: "compact",
+    isError: false,
+    result: { compacted: true },
+  }));
+
+  const firstCompactionSpan = captureState.spans.find(
+    (span) => span.name === "flue.compaction",
+  );
+  const firstOperationSpan = captureState.spans.find(
+    (span) => span.name === "flue.operation.compact",
+  );
+  assert.ok(firstCompactionSpan);
+  assert.ok(firstOperationSpan);
+  assert.equal(
+    firstCompactionSpan.parentSpanContext?.spanId,
+    firstOperationSpan.spanContext().spanId,
+  );
+  assertConnectedTree(captureState.spans);
+
+  captureState.spans = [];
+  instrumentor.handleEvent(event({
+    type: "agent_start",
+    eventIndex: 8,
+    timestamp: "2026-06-21T00:10:00.000Z",
+    instanceId: "reused-agent",
+  }));
+  instrumentor.handleEvent(event({
+    type: "compaction_start",
+    eventIndex: 9,
+    timestamp: "2026-06-21T00:10:01.000Z",
+    instanceId: "reused-agent",
+    operationId: "reused-operation",
+    reason: "manual",
+  }));
+  instrumentor.handleEvent(event({
+    type: "compaction",
+    eventIndex: 10,
+    timestamp: "2026-06-21T00:10:02.000Z",
+    instanceId: "reused-agent",
+    operationId: "reused-operation",
+    messagesBefore: 8,
+    messagesAfter: 2,
+    isError: false,
+  }));
+  instrumentor.handleEvent(event({
+    type: "operation",
+    eventIndex: 11,
+    timestamp: "2026-06-21T00:10:02.500Z",
+    instanceId: "reused-agent",
+    operationId: "abandoned-operation",
+    operationKind: "prompt",
+    isError: false,
+    result: { reused: true },
+  }));
+  instrumentor.handleEvent(event({
+    type: "agent_end",
+    eventIndex: 12,
+    timestamp: "2026-06-21T00:10:03.000Z",
+    instanceId: "reused-agent",
+    messages: [],
+  }));
+
+  assert.equal(captureState.spans.length, 3);
+  const compactionSpan = captureState.spans.find((span) => span.name === "flue.compaction");
+  const operationSpan = captureState.spans.find((span) => span.name === "flue.operation.prompt");
+  const agentSpan = captureState.spans.find(
+    (span) => span.attributes["respan.entity.log_type"] === "agent",
+  );
+
+  assert.ok(compactionSpan);
+  assert.ok(operationSpan);
+  assert.ok(agentSpan);
+  assert.equal(compactionSpan.parentSpanContext?.spanId, agentSpan.spanContext().spanId);
+  assert.equal(operationSpan.parentSpanContext?.spanId, agentSpan.spanContext().spanId);
+  assert.equal(
+    operationSpan.startTime[0],
+    Math.floor(Date.parse("2026-06-21T00:10:02.500Z") / 1000),
+  );
+  assert.equal(operationSpan.startTime[1], 500_000_000);
+  assertConnectedTree(captureState.spans);
+});
 
 test("marks failed Flue events with error status and backend status attributes", () => {
   captureState.spans = [];

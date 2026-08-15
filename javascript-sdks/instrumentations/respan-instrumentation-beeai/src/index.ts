@@ -56,6 +56,7 @@ const BEEAI_TARGET = "target";
 const BEEAI_DATA = "data";
 const BEEAI_TRACE_ID = "traceId";
 const BEEAI_VERSION = "beeai.version";
+const BEEAI_HISTORY = "history";
 const OTEL_SCOPE_NAME = "otel.scope.name";
 const MAX_PENDING_CHAT_INPUTS = 20;
 const MAX_PENDING_CHAT_SPANS_PER_TRACE = 64;
@@ -84,6 +85,7 @@ interface PendingChatSpan {
 
 const droppedSpanParentsByTrace = new Map<string, Map<string, string | undefined>>();
 const workflowSpanIdsByTrace = new Map<string, string>();
+const toolCallingAgentWrapperSpanIdsByTrace = new Map<string, Set<string>>();
 const pendingChatInputsByTrace = new Map<string, unknown[]>();
 const pendingChatSpansByTrace = new Map<string, PendingChatSpan[]>();
 const traceStateTouchedAt = new Map<string, number>();
@@ -93,6 +95,7 @@ function clearTraceState(traceId: string, flushPending = true): void {
 
   droppedSpanParentsByTrace.delete(traceId);
   workflowSpanIdsByTrace.delete(traceId);
+  toolCallingAgentWrapperSpanIdsByTrace.delete(traceId);
   pendingChatInputsByTrace.delete(traceId);
   pendingChatSpansByTrace.delete(traceId);
   traceStateTouchedAt.delete(traceId);
@@ -300,6 +303,50 @@ function getOtelParentSpanId(span: ReadableSpan): string | undefined {
     : undefined;
 }
 
+function isBeeAIStructuralSpanName(name: string): boolean {
+  return /\.(?:start|finish)(?:-\d+)?$/.test(name);
+}
+
+function rememberToolCallingAgentWrapper(span: ReadableSpan): void {
+  if (!span.name.startsWith("agent.toolCalling.")) return;
+
+  const traceId = getOtelTraceId(span);
+  const wrapperSpanId = getOtelParentSpanId(span);
+  if (!traceId || !wrapperSpanId) return;
+
+  const wrapperSpanIds = toolCallingAgentWrapperSpanIdsByTrace.get(traceId) ?? new Set();
+  wrapperSpanIds.delete(wrapperSpanId);
+  wrapperSpanIds.add(wrapperSpanId);
+  while (wrapperSpanIds.size > MAX_DROPPED_SPAN_PARENTS_PER_TRACE) {
+    const oldestWrapperSpanId = wrapperSpanIds.values().next().value as string | undefined;
+    if (!oldestWrapperSpanId) break;
+    wrapperSpanIds.delete(oldestWrapperSpanId);
+  }
+  toolCallingAgentWrapperSpanIdsByTrace.set(traceId, wrapperSpanIds);
+  droppedSpanParentsByTrace.get(traceId)?.delete(wrapperSpanId);
+  touchTraceState(traceId);
+}
+
+function isToolCallingAgentWrapper(span: ReadableSpan): boolean {
+  const traceId = getOtelTraceId(span);
+  const spanId = getOtelSpanId(span);
+  return Boolean(
+    traceId &&
+    spanId &&
+    toolCallingAgentWrapperSpanIdsByTrace.get(traceId)?.has(spanId)
+  );
+}
+
+function isToolCallingAgentEventForRecoveredWrapper(span: ReadableSpan): boolean {
+  const traceId = getOtelTraceId(span);
+  const parentSpanId = getOtelParentSpanId(span);
+  return Boolean(
+    traceId &&
+    parentSpanId &&
+    toolCallingAgentWrapperSpanIdsByTrace.get(traceId)?.has(parentSpanId)
+  );
+}
+
 function rememberDroppedSpanParent(span: ReadableSpan): void {
   const traceId = getOtelTraceId(span);
   const spanId = getOtelSpanId(span);
@@ -358,7 +405,7 @@ function reparentFromDroppedSpans(span: ReadableSpan): void {
   const currentParentSpanId = getOtelParentSpanId(span);
   const traceId = getOtelTraceId(span);
   const workflowSpanId = traceId ? workflowSpanIdsByTrace.get(traceId) : undefined;
-  const resolvedParentSpanId = workflowSpanId ?? resolveExportParentSpanId(span);
+  const resolvedParentSpanId = resolveExportParentSpanId(span) ?? workflowSpanId;
   if (resolvedParentSpanId === currentParentSpanId) return;
 
   Object.defineProperty(span, "parentSpanId", {
@@ -873,6 +920,76 @@ function getOpenInferenceOutput(attrs: Record<string, any>): unknown {
   return parseJson(attrs[OPENINFERENCE_OUTPUT_VALUE]);
 }
 
+function normalizeToolCallingAgentOutput(output: unknown): unknown {
+  const record = asRecord(output);
+  if (!record || record.text === undefined || record.content !== undefined) {
+    return normalizeOutputValue(output);
+  }
+
+  return {
+    role: typeof record.role === "string" ? record.role : "assistant",
+    content: record.text,
+  };
+}
+
+function normalizeToolCallingAgentHistory(history: unknown): unknown[] | undefined {
+  const parsedHistory = parseJson(history);
+  if (!Array.isArray(parsedHistory)) return undefined;
+
+  const normalizedHistory = parsedHistory.flatMap((message) => {
+    const record = asRecord(message);
+    if (!record) return [];
+
+    const normalized: Record<string, unknown> = {};
+    if (typeof record.role === "string" && record.role.length > 0) {
+      normalized.role = record.role;
+    }
+
+    const content = firstDefined(record.content, record.text);
+    if (content !== undefined) {
+      normalized.content = content;
+    }
+
+    return isMeaningfulStructuredValue(normalized) ? [normalized] : [];
+  });
+  return normalizedHistory.length > 0 ? normalizedHistory : undefined;
+}
+
+function translateToolCallingAgentWrapper(
+  span: ReadableSpan,
+  attrs: Record<string, any>,
+): void {
+  setDefault(attrs, RespanSpanAttributes.RESPAN_LOG_TYPE, RespanLogType.AGENT);
+  setDefault(
+    attrs,
+    SpanAttributes.TRACELOOP_ENTITY_NAME,
+    typeof attrs.source === "string" && attrs.source.length > 0
+      ? attrs.source
+      : "ToolCallingAgent",
+  );
+  setDefault(attrs, SpanAttributes.TRACELOOP_ENTITY_PATH, span.name);
+
+  const prompt = normalizeMeaningfulInputValue(getOpenInferenceInput(attrs));
+  const history = normalizeToolCallingAgentHistory(attrs[BEEAI_HISTORY]);
+  const input = history
+    ? {
+        ...(prompt !== undefined ? { prompt } : {}),
+        history,
+      }
+    : prompt;
+  if (input !== undefined) {
+    attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJsonStr(input);
+  }
+
+  const output = normalizeToolCallingAgentOutput(getOpenInferenceOutput(attrs));
+  if (isMeaningfulStructuredValue(output)) {
+    attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJsonStr(output);
+  }
+
+  reparentFromDroppedSpans(span);
+  cleanupBeeAIRawAttributes(attrs);
+}
+
 function cacheBeeAIStartSpan(span: ReadableSpan): void {
   const attrs = (span as any).attributes as Record<string, any> | undefined;
   if (!attrs) return;
@@ -880,11 +997,22 @@ function cacheBeeAIStartSpan(span: ReadableSpan): void {
   rememberWorkflowSpan(span, attrs);
 
   if (span.name === "beeai-framework-main" || isBeeAIFrameworkParentSpan(span, attrs)) {
-    rememberDroppedSpanParent(span);
+    if (!isToolCallingAgentWrapper(span)) {
+      rememberDroppedSpanParent(span);
+    }
     return;
   }
 
   if (getInstrumentationScopeName(span) !== BEEAI_SCOPE_NAME) return;
+
+  // OITracer applies attributes after onStart, but the upstream event name and
+  // OTEL parent are already available. Record the ToolCallingAgent wrapper and
+  // structural parents here so children can be reparented before their parent
+  // event spans finish.
+  rememberToolCallingAgentWrapper(span);
+  if (isBeeAIStructuralSpanName(span.name)) {
+    rememberDroppedSpanParent(span);
+  }
 
   const target = attrs[BEEAI_TARGET];
   const data = asRecord(parseJson(attrs[BEEAI_DATA]));
@@ -921,6 +1049,7 @@ function cleanupBeeAIRawAttributes(attrs: Record<string, any>): void {
   delete attrs[OPENINFERENCE_METADATA];
   delete attrs[BEEAI_TRACE_ID];
   delete attrs[BEEAI_VERSION];
+  delete attrs[BEEAI_HISTORY];
   delete attrs.source;
   delete attrs[OPENINFERENCE_INPUT_VALUE];
   delete attrs[OPENINFERENCE_OUTPUT_VALUE];
@@ -1034,6 +1163,10 @@ function translateBeeAIEventSpan(span: ReadableSpan): void {
   cacheBeeAIStartSpan(span);
 
   if (isBeeAIFrameworkParentSpan(span, attrs)) {
+    if (isToolCallingAgentWrapper(span)) {
+      translateToolCallingAgentWrapper(span, attrs);
+      return;
+    }
     dropSpan(span, attrs);
     return;
   }
@@ -1100,7 +1233,10 @@ function translateBeeAIEventSpan(span: ReadableSpan): void {
   setInputOutputAttributes(span, attrs, logType, target, data, value);
   if (
     target === "agent.toolCalling.success" &&
-    !hasMeaningfulCanonicalEntityContent(attrs)
+    (
+      isToolCallingAgentEventForRecoveredWrapper(span) ||
+      !hasMeaningfulCanonicalEntityContent(attrs)
+    )
   ) {
     dropSpan(span, attrs);
     cleanupBeeAIRawAttributes(attrs);
@@ -1501,6 +1637,7 @@ export class BeeAIInstrumentor {
     pendingChatSpansByTrace.clear();
     droppedSpanParentsByTrace.clear();
     workflowSpanIdsByTrace.clear();
+    toolCallingAgentWrapperSpanIdsByTrace.clear();
     traceStateTouchedAt.clear();
     BeeAIInstrumentor._trackedBeeAISpans.clear();
     BeeAIInstrumentor._patchedProcessor = null;

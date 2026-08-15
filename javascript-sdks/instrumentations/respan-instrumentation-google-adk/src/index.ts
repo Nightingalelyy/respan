@@ -48,7 +48,33 @@ const OFF_CONTRACT_ALIASES = new Set([
 ]);
 
 type Attributes = Record<string, any>;
+type SpanSetAttribute = (key: string, value: unknown) => Span;
+type ProcessorOnStart = (span: Span, parentContext: Context) => void;
 type ProcessorOnEnd = (span: ReadableSpan) => void;
+
+interface GoogleADKResponseCapture {
+  readonly accumulator: GoogleADKResponseAccumulator;
+  readonly originalSetAttribute: SpanSetAttribute;
+  readonly wrappedSetAttribute: SpanSetAttribute;
+}
+
+interface GoogleADKResponseAccumulator {
+  // Keep only assembled state: ADK may write a growing cumulative response on
+  // every chunk, so retaining raw frames would grow quadratically.
+  response?: Attributes;
+  content?: GoogleADKContentAccumulator;
+}
+
+interface GoogleADKContentAccumulator {
+  readonly attributes: Attributes;
+  readonly parts: Attributes[];
+  readonly partIndexes: Map<string, number>;
+}
+
+const GOOGLE_ADK_RESPONSE_CAPTURES = new WeakMap<
+  object,
+  GoogleADKResponseCapture
+>();
 
 export class GoogleADKTranslator implements SpanProcessor {
   onStart(span: Span, _parentContext: Context): void {
@@ -57,6 +83,10 @@ export class GoogleADKTranslator implements SpanProcessor {
     const logType = resolveLogTypeFromName(spanName);
     if (logType === undefined) {
       return;
+    }
+
+    if (logType === RespanLogType.CHAT) {
+      installResponseCapture(writableSpan);
     }
 
     writableSpan.setAttribute(
@@ -74,7 +104,11 @@ export class GoogleADKTranslator implements SpanProcessor {
   }
 
   onEnd(span: ReadableSpan): void {
-    translateGoogleADKSpan(span);
+    try {
+      translateGoogleADKSpan(span);
+    } finally {
+      restoreResponseCapture(span);
+    }
   }
 
   forceFlush(): Promise<void> {
@@ -127,7 +161,7 @@ export function translateGoogleADKSpan(span: ReadableSpan): void {
   );
 
   if (logType === RespanLogType.CHAT) {
-    normalizeChatSpan(attrs);
+    normalizeChatSpan(attrs, getCapturedResponse(span));
   } else if (logType === RespanLogType.TOOL) {
     normalizeToolSpan(attrs, entityName);
   } else if (logType === RespanLogType.AGENT) {
@@ -137,6 +171,7 @@ export function translateGoogleADKSpan(span: ReadableSpan): void {
   }
 
   cleanupAttrs(attrs);
+  restoreResponseCapture(span);
 }
 
 export class GoogleADKInstrumentor {
@@ -145,6 +180,8 @@ export class GoogleADKInstrumentor {
   private static _translatorRegistered = false;
   private static _translatorHookRefCount = 0;
   private static _patchedProcessor: any = null;
+  private static _originalProcessorOnStart: ProcessorOnStart | null = null;
+  private static _wrappedProcessorOnStart: ProcessorOnStart | null = null;
   private static _originalProcessorOnEnd: ProcessorOnEnd | null = null;
   private static _wrappedProcessorOnEnd: ProcessorOnEnd | null = null;
 
@@ -230,18 +267,43 @@ export class GoogleADKInstrumentor {
 
     GoogleADKInstrumentor._restoreTranslatorHook();
 
+    const translator = new GoogleADKTranslator();
+    const originalProcessorOnStart =
+      typeof processor.onStart === "function"
+        ? (processor.onStart as ProcessorOnStart)
+        : null;
+    const wrappedProcessorOnStart: ProcessorOnStart | null =
+      originalProcessorOnStart
+        ? (span: Span, parentContext: Context) => {
+            try {
+              translator.onStart(span, parentContext);
+            } catch {
+              // Translation must never block span creation.
+            }
+            return originalProcessorOnStart.call(
+              processor,
+              span,
+              parentContext,
+            );
+          }
+        : null;
     const originalProcessorOnEnd = processor.onEnd as ProcessorOnEnd;
     const wrappedProcessorOnEnd = (span: ReadableSpan) => {
       try {
-        translateGoogleADKSpan(span);
+        translator.onEnd(span);
       } catch {
         // Translation must never block span export.
       }
       return originalProcessorOnEnd.call(processor, span);
     };
 
+    if (wrappedProcessorOnStart) {
+      processor.onStart = wrappedProcessorOnStart;
+    }
     processor.onEnd = wrappedProcessorOnEnd;
     GoogleADKInstrumentor._patchedProcessor = processor;
+    GoogleADKInstrumentor._originalProcessorOnStart = originalProcessorOnStart;
+    GoogleADKInstrumentor._wrappedProcessorOnStart = wrappedProcessorOnStart;
     GoogleADKInstrumentor._originalProcessorOnEnd = originalProcessorOnEnd;
     GoogleADKInstrumentor._wrappedProcessorOnEnd = wrappedProcessorOnEnd;
     return true;
@@ -249,8 +311,20 @@ export class GoogleADKInstrumentor {
 
   private static _restoreTranslatorHook(): void {
     const processor = GoogleADKInstrumentor._patchedProcessor;
+    const originalOnStart = GoogleADKInstrumentor._originalProcessorOnStart;
+    const wrappedOnStart = GoogleADKInstrumentor._wrappedProcessorOnStart;
     const originalOnEnd = GoogleADKInstrumentor._originalProcessorOnEnd;
     const wrappedOnEnd = GoogleADKInstrumentor._wrappedProcessorOnEnd;
+
+    if (processor && originalOnStart) {
+      if (!wrappedOnStart || processor.onStart === wrappedOnStart) {
+        processor.onStart = originalOnStart;
+      } else {
+        console.warn(
+          "[respan] GoogleADKInstrumentor: active span processor onStart was modified externally; original handler could not be restored.",
+        );
+      }
+    }
 
     if (processor && originalOnEnd) {
       if (!wrappedOnEnd || processor.onEnd === wrappedOnEnd) {
@@ -263,6 +337,8 @@ export class GoogleADKInstrumentor {
     }
 
     GoogleADKInstrumentor._patchedProcessor = null;
+    GoogleADKInstrumentor._originalProcessorOnStart = null;
+    GoogleADKInstrumentor._wrappedProcessorOnStart = null;
     GoogleADKInstrumentor._originalProcessorOnEnd = null;
     GoogleADKInstrumentor._wrappedProcessorOnEnd = null;
   }
@@ -348,7 +424,71 @@ function resolveEntityName(
   return span.name || "google_adk.task";
 }
 
-function normalizeChatSpan(attrs: Attributes): void {
+function installResponseCapture(span: Span): void {
+  const writableSpan = span as any;
+  if (
+    GOOGLE_ADK_RESPONSE_CAPTURES.has(writableSpan) ||
+    typeof writableSpan.setAttribute !== "function"
+  ) {
+    return;
+  }
+
+  const accumulator: GoogleADKResponseAccumulator = {};
+  const originalSetAttribute = writableSpan.setAttribute as SpanSetAttribute;
+  const wrappedSetAttribute: SpanSetAttribute = function (
+    this: Span,
+    key: string,
+    value: unknown,
+  ): Span {
+    if (key === ADK_LLM_RESPONSE) {
+      accumulateResponse(accumulator, value);
+    }
+    return originalSetAttribute.call(this, key, value);
+  };
+
+  try {
+    writableSpan.setAttribute = wrappedSetAttribute;
+    GOOGLE_ADK_RESPONSE_CAPTURES.set(writableSpan, {
+      accumulator,
+      originalSetAttribute,
+      wrappedSetAttribute,
+    });
+  } catch {
+    // Some third-party Span implementations may not allow method wrapping.
+    // Their final scalar response still follows the existing unary path.
+  }
+}
+
+function getCapturedResponse(span: ReadableSpan): Attributes | undefined {
+  const accumulator = GOOGLE_ADK_RESPONSE_CAPTURES.get(
+    span as object,
+  )?.accumulator;
+  return accumulator ? materializeResponse(accumulator) : undefined;
+}
+
+function restoreResponseCapture(span: ReadableSpan): void {
+  const writableSpan = span as any;
+  const capture = GOOGLE_ADK_RESPONSE_CAPTURES.get(writableSpan);
+  if (!capture) {
+    return;
+  }
+
+  try {
+    if (writableSpan.setAttribute === capture.wrappedSetAttribute) {
+      writableSpan.setAttribute = capture.originalSetAttribute;
+    }
+  } catch {
+    // The response data has already been normalized; an ended span with a
+    // non-writable method does not need further mutation.
+  } finally {
+    GOOGLE_ADK_RESPONSE_CAPTURES.delete(writableSpan);
+  }
+}
+
+function normalizeChatSpan(
+  attrs: Attributes,
+  capturedResponse?: Attributes,
+): void {
   attrs[ATTR_GEN_AI_SYSTEM] = "google";
   attrs[SpanAttributes.LLM_REQUEST_TYPE] = RespanLogType.CHAT;
 
@@ -382,7 +522,7 @@ function normalizeChatSpan(attrs: Attributes): void {
     }
   }
 
-  const response = parseJson(attrs[ADK_LLM_RESPONSE]);
+  const response = capturedResponse ?? parseJson(attrs[ADK_LLM_RESPONSE]);
   if (isRecord(response)) {
     addContentMessage(attrs, ATTR_GEN_AI_COMPLETION, 0, response.content);
 
@@ -431,6 +571,336 @@ function normalizeChatSpan(attrs: Attributes): void {
     if (finishReason !== undefined) {
       attrs[`${ATTR_GEN_AI_COMPLETION}.0.finish_reason`] =
         String(finishReason).toLowerCase();
+    }
+  }
+}
+
+function accumulateResponse(
+  accumulator: GoogleADKResponseAccumulator,
+  value: unknown,
+): void {
+  const response = parseJson(value);
+  if (!isRecord(response)) {
+    return;
+  }
+
+  accumulator.response ??= {};
+  for (const [key, responseValue] of Object.entries(response)) {
+    if (key !== "content") {
+      accumulator.response[key] = responseValue;
+    }
+  }
+
+  if (isRecord(response.content)) {
+    accumulator.content ??= {
+      attributes: {},
+      parts: [],
+      partIndexes: new Map<string, number>(),
+    };
+    accumulateResponseContent(
+      accumulator.content,
+      response.content,
+      response.partial === true,
+    );
+  }
+}
+
+function materializeResponse(
+  accumulator: GoogleADKResponseAccumulator,
+): Attributes | undefined {
+  if (!accumulator.response && !accumulator.content) {
+    return undefined;
+  }
+
+  const response = { ...(accumulator.response ?? {}) };
+  if (accumulator.content) {
+    response.content = {
+      ...accumulator.content.attributes,
+      ...(accumulator.content.parts.length > 0
+        ? { parts: accumulator.content.parts }
+        : {}),
+    };
+  }
+  return response;
+}
+
+function accumulateResponseContent(
+  accumulator: GoogleADKContentAccumulator,
+  content: Attributes,
+  isPartialResponse: boolean,
+): void {
+  for (const [key, contentValue] of Object.entries(content)) {
+    if (key !== "parts") {
+      accumulator.attributes[key] = contentValue;
+    }
+  }
+  if (!Array.isArray(content.parts)) {
+    return;
+  }
+
+  const functionCallSequences = new Map<string, number>();
+  for (const part of content.parts) {
+    if (!isRecord(part)) {
+      continue;
+    }
+
+    if (isRecord(part.functionCall)) {
+      const name = String(part.functionCall.name ?? "");
+      const sequence = functionCallSequences.get(name) ?? 0;
+      functionCallSequences.set(name, sequence + 1);
+      accumulateFunctionCallPart(accumulator, part, name, sequence);
+      continue;
+    }
+
+    if (typeof part.text === "string") {
+      accumulateTextPart(accumulator, part, isPartialResponse);
+      continue;
+    }
+
+    const identity = `part:${safeJson(part)}`;
+    if (!accumulator.partIndexes.has(identity)) {
+      accumulator.partIndexes.set(identity, accumulator.parts.length);
+      accumulator.parts.push({ ...part });
+    }
+  }
+}
+
+function accumulateTextPart(
+  accumulator: GoogleADKContentAccumulator,
+  part: Attributes,
+  isPartialResponse: boolean,
+): void {
+  const textShape = { ...part };
+  delete textShape.text;
+  const identity = `text:${safeJson(textShape)}`;
+  const existingIndex = accumulator.partIndexes.get(identity);
+  if (existingIndex === undefined) {
+    accumulator.partIndexes.set(identity, accumulator.parts.length);
+    accumulator.parts.push({ ...part });
+    return;
+  }
+
+  const existingPart = accumulator.parts[existingIndex];
+  existingPart.text = mergeStreamText(
+    String(existingPart.text ?? ""),
+    part.text,
+    !isPartialResponse,
+  );
+}
+
+function accumulateFunctionCallPart(
+  accumulator: GoogleADKContentAccumulator,
+  part: Attributes,
+  name: string,
+  sequence: number,
+): void {
+  const functionCall = part.functionCall as Attributes;
+  const sequenceIdentity = `functionCall:name:${name}:sequence:${sequence}`;
+  const idIdentity = functionCall.id === undefined
+    ? undefined
+    : `functionCall:id:${String(functionCall.id)}`;
+  const existingIndex = (
+    idIdentity === undefined
+      ? undefined
+      : accumulator.partIndexes.get(idIdentity)
+  ) ?? accumulator.partIndexes.get(sequenceIdentity);
+
+  if (existingIndex === undefined) {
+    const nextIndex = accumulator.parts.length;
+    accumulator.parts.push(mergeFunctionCallPart({}, part));
+    accumulator.partIndexes.set(sequenceIdentity, nextIndex);
+    if (idIdentity !== undefined) {
+      accumulator.partIndexes.set(idIdentity, nextIndex);
+    }
+    return;
+  }
+
+  accumulator.parts[existingIndex] = mergeFunctionCallPart(
+    accumulator.parts[existingIndex],
+    part,
+  );
+  accumulator.partIndexes.set(sequenceIdentity, existingIndex);
+  if (idIdentity !== undefined) {
+    accumulator.partIndexes.set(idIdentity, existingIndex);
+  }
+}
+
+function mergeStreamText(
+  current: string,
+  next: string,
+  deduplicateEqualValue = false,
+): string {
+  if (!current) {
+    return next;
+  }
+  if (!next) {
+    return current;
+  }
+
+  // Some ADK providers emit deltas while others emit a cumulative terminal
+  // response. Replacing a prefix-complete value keeps each chunk exactly once.
+  if (
+    next.startsWith(current) &&
+    (next.length > current.length || deduplicateEqualValue)
+  ) {
+    return next;
+  }
+  return current + next;
+}
+
+function mergeFunctionCallPart(
+  current: Attributes,
+  next: Attributes,
+): Attributes {
+  const currentCall = isRecord(current.functionCall)
+    ? current.functionCall
+    : {};
+  const nextCall = isRecord(next.functionCall) ? next.functionCall : {};
+  const hasCurrentArgs = isRecord(currentCall.args);
+  const args = hasCurrentArgs ? currentCall.args : {};
+
+  if (Array.isArray(nextCall.partialArgs)) {
+    for (const partialArg of nextCall.partialArgs) {
+      applyPartialArg(args, partialArg);
+    }
+  }
+  if (isRecord(nextCall.args)) {
+    mergeRecordInPlace(args, nextCall.args);
+  }
+
+  const functionCall = { ...currentCall, ...nextCall };
+  delete functionCall.partialArgs;
+  delete functionCall.willContinue;
+  if (
+    hasCurrentArgs ||
+    Array.isArray(nextCall.partialArgs) ||
+    isRecord(nextCall.args)
+  ) {
+    functionCall.args = args;
+  }
+
+  return {
+    ...current,
+    ...next,
+    functionCall,
+  };
+}
+
+function applyPartialArg(args: Attributes, value: unknown): void {
+  if (!isRecord(value) || typeof value.jsonPath !== "string") {
+    return;
+  }
+
+  const path = parseJsonPath(value.jsonPath);
+  const partialValue = partialArgValue(value);
+  if (!path || path.length === 0 || !partialValue.present) {
+    return;
+  }
+
+  let target: any = args;
+  for (let index = 0; index < path.length - 1; index += 1) {
+    const key = path[index];
+    const nextKey = path[index + 1];
+    const expectedContainer = typeof nextKey === "number" ? [] : {};
+    const existing = target[key];
+    if (
+      (Array.isArray(expectedContainer) && !Array.isArray(existing)) ||
+      (!Array.isArray(expectedContainer) && !isRecord(existing))
+    ) {
+      target[key] = expectedContainer;
+    }
+    target = target[key];
+  }
+
+  const key = path[path.length - 1];
+  const existing = target[key];
+  target[key] =
+    typeof existing === "string" && typeof partialValue.value === "string"
+      ? existing + partialValue.value
+      : partialValue.value;
+}
+
+function partialArgValue(value: Attributes): {
+  present: boolean;
+  value?: unknown;
+} {
+  for (const key of [
+    "stringValue",
+    "numberValue",
+    "boolValue",
+    "nullValue",
+  ]) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      return {
+        present: true,
+        value: key === "nullValue" ? null : value[key],
+      };
+    }
+  }
+  return { present: false };
+}
+
+function parseJsonPath(path: string): Array<string | number> | undefined {
+  if (!path.startsWith("$")) {
+    return undefined;
+  }
+
+  const segments: Array<string | number> = [];
+  let index = 1;
+  while (index < path.length) {
+    if (path[index] === ".") {
+      const start = index + 1;
+      index = start;
+      while (index < path.length && path[index] !== "." && path[index] !== "[") {
+        index += 1;
+      }
+      if (index === start) {
+        return undefined;
+      }
+      segments.push(path.slice(start, index));
+      continue;
+    }
+
+    if (path[index] === "[") {
+      const end = path.indexOf("]", index + 1);
+      if (end === -1) {
+        return undefined;
+      }
+      const selector = path.slice(index + 1, end).trim();
+      if (/^\d+$/.test(selector)) {
+        segments.push(Number(selector));
+      } else if (
+        (selector.startsWith('"') && selector.endsWith('"')) ||
+        (selector.startsWith("'") && selector.endsWith("'"))
+      ) {
+        const quote = selector[0];
+        const property = selector
+          .slice(1, -1)
+          .replace(new RegExp(`\\\\${quote}`, "g"), quote)
+          .replace(/\\\\\\\\/g, "\\");
+        segments.push(property);
+      } else {
+        return undefined;
+      }
+      index = end + 1;
+      continue;
+    }
+
+    return undefined;
+  }
+  return segments;
+}
+
+function mergeRecordInPlace(target: Attributes, source: Attributes): void {
+  for (const [key, value] of Object.entries(source)) {
+    if (isRecord(value) && isRecord(target[key])) {
+      mergeRecordInPlace(target[key], value);
+    } else if (isRecord(value)) {
+      target[key] = { ...value };
+    } else if (Array.isArray(value)) {
+      target[key] = [...value];
+    } else {
+      target[key] = value;
     }
   }
 }
