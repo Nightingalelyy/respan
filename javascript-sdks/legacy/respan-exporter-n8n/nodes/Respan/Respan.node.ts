@@ -5,13 +5,16 @@ import {
 	INodePropertyOptions,
 	INodeType,
 	INodeTypeDescription,
+	JsonObject,
 	NodeConnectionTypes,
+	NodeApiError,
 } from 'n8n-workflow';
 
 export class Respan implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'Respan',
 		name: 'respan',
+		subtitle: '={{$parameter["resource"]}}',
 		icon: { light: 'file:../../icons/respan.svg', dark: 'file:../../icons/respan.dark.svg' },
 		group: ['transform'],
 		version: 1,
@@ -482,14 +485,17 @@ export class Respan implements INodeType {
 					body,
 					json: true,
 				});
-				returnData.push({ json: responseData as INodeExecutionData['json'] });
+				returnData.push({
+					json: responseData as INodeExecutionData['json'],
+					pairedItem: { item: i },
+				});
 			} catch (error) {
 				if (this.continueOnFail()) {
 					const err = error as Error;
-					returnData.push({ json: { error: err.message } });
+					returnData.push({ json: { error: err.message }, pairedItem: { item: i } });
 					continue;
 				}
-				throw error;
+				throw new NodeApiError(this.getNode(), error as JsonObject);
 			}
 		}
 		return [returnData];

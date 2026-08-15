@@ -40,7 +40,7 @@
     }
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "^1.26.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@types/node": "^22.15.29",
     "typescript": "^5.7.3"
   }

@@ -2,10 +2,10 @@
   "private": true,
   "name": "basic",
   "dependencies": {
-    "@openai/agents": "^0.0.8",
+    "@openai/agents": "^0.8.1",
     "@types/node": "^24.0.3",
     "dotenv": "^16.5.0",
-    "zod": "~3.25.40"
+    "zod": "^4.1.8"
   },
   "scripts": {
     "build-check": "tsc --noEmit",
