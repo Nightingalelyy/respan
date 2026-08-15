@@ -26,6 +26,21 @@ export function safeJson(value: unknown): string {
   }
 }
 
+export function sanitizeErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message
+    .replace(
+      /\b(authorization\s*:\s*bearer\s+)([^\s,;]+)/gi,
+      "$1[REDACTED]",
+    )
+    .replace(
+      /\b((?:api[_ -]?key|token|secret)\s*[=:]\s*)([^\s,;]+)/gi,
+      "$1[REDACTED]",
+    )
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[REDACTED]")
+    .slice(0, 4096);
+}
+
 export function normalizeText(value: unknown): string {
   if (value === undefined || value === null) {
     return "";

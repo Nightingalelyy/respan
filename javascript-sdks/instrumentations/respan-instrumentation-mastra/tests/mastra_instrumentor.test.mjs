@@ -225,3 +225,69 @@ test("drops model chunk spans by default", async () => {
 
   assert.equal(captureState.spans.length, 0);
 });
+
+test("propagates a late agent failure to its buffered model span", async () => {
+  captureState.spans = [];
+  const instrumentor = new MastraInstrumentor();
+
+  await instrumentor.exportTracingEvent({
+    type: "span_ended",
+    exportedSpan: {
+      id: "failed-model",
+      traceId: "failed-trace",
+      parentSpanId: "failed-agent",
+      name: "model generation",
+      type: "model_generation",
+      startTime: new Date("2026-05-21T00:00:00.100Z"),
+      endTime: new Date("2026-05-21T00:00:00.800Z"),
+      attributes: {
+        model: "openai/gpt-4.1-nano",
+        provider: "openai",
+      },
+      input: [{ role: "user", content: "Fail safely" }],
+      metadata: { runId: "failed-run" },
+    },
+  });
+  assert.equal(captureState.spans.length, 0);
+
+  await instrumentor.exportTracingEvent({
+    type: "span_ended",
+    exportedSpan: {
+      id: "failed-agent",
+      traceId: "failed-trace",
+      name: "Mastra Failure Example.workflow",
+      type: "agent_run",
+      isRootSpan: true,
+      startTime: new Date("2026-05-21T00:00:00.000Z"),
+      endTime: new Date("2026-05-21T00:00:01.000Z"),
+      input: "Fail safely",
+      metadata: { runId: "failed-run" },
+      errorInfo: { message: "provider request failed api_key=sk-super-secret-token" },
+    },
+  });
+
+  assert.equal(captureState.spans.length, 2);
+  const agentSpan = captureState.spans.find(
+    (span) => span.attributes["respan.entity.log_type"] === "agent",
+  );
+  const modelSpan = captureState.spans.find(
+    (span) => span.attributes["respan.entity.log_type"] === "chat",
+  );
+  assert.ok(agentSpan);
+  assert.ok(modelSpan);
+  assert.equal(agentSpan.status.code, 2);
+  assert.equal(modelSpan.status.code, 2);
+  assert.equal(agentSpan.attributes.status_code, 500);
+  assert.equal(modelSpan.attributes.status_code, 500);
+  assert.equal(
+    agentSpan.attributes["error.message"],
+    "provider request failed api_key=[REDACTED]",
+  );
+  assert.equal(
+    modelSpan.attributes["error.message"],
+    "provider request failed api_key=[REDACTED]",
+  );
+  assert.equal(modelSpan.attributes["gen_ai.request.model"], "gpt-4.1-nano");
+  assert.equal(modelSpan.attributes["gen_ai.prompt.0.content"], "Fail safely");
+  assert.equal(modelSpan.parentSpanContext?.spanId, agentSpan.spanContext().spanId);
+});

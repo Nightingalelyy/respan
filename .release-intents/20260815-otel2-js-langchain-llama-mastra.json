@@ -1,0 +1,8 @@
+{
+  "summary": "Repair OpenTelemetry 2.x hierarchy, error, and workflow fields for LangChain, LlamaIndex, and Mastra",
+  "packages": {
+    "@respan/instrumentation-langchain": "patch",
+    "@respan/instrumentation-llama-index": "patch",
+    "@respan/instrumentation-mastra": "patch"
+  }
+}

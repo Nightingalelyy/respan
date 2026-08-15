@@ -76,11 +76,13 @@ export function getCallbackHandler(
   });
 }
 
-export function addRespanCallback(
-  config: LangChainCallbackConfig = {},
+export function addRespanCallback<
+  TConfig extends object = LangChainCallbackConfig,
+>(
+  config: TConfig = {} as TConfig,
   handler: RespanCallbackHandler = getCallbackHandler(),
-): LangChainCallbackConfig {
-  const nextConfig: LangChainCallbackConfig = { ...config };
+): TConfig {
+  const nextConfig = { ...config } as TConfig & LangChainCallbackConfig;
   nextConfig.callbacks = withRespanCallback(nextConfig.callbacks, handler);
   return nextConfig;
 }
@@ -140,7 +142,10 @@ export class RespanCallbackHandler {
   private readonly _runs = new Map<string, RunRecord>();
   private readonly _runTraceIds = new Map<string, string>();
   private readonly _runPaths = new Map<string, string>();
+  private readonly _runWorkflowNames = new Map<string, string>();
   private readonly _langflowTraceId = generateTraceId();
+  private _langflowWorkflowName?: string;
+  private _langflowRootSpanId?: string;
 
   constructor(options: RespanCallbackHandlerOptions = {}) {
     this.includeContent = options.includeContent ?? true;
@@ -152,8 +157,10 @@ export class RespanCallbackHandler {
   private _rememberRun(record: RunRecord): void {
     this._runTraceIds.set(record.runId, record.traceId);
     this._runPaths.set(record.runId, record.entityPath);
+    this._runWorkflowNames.set(record.runId, record.workflowName);
     trimMap(this._runTraceIds, this.maxCachedRuns);
     trimMap(this._runPaths, this.maxCachedRuns);
+    trimMap(this._runWorkflowNames, this.maxCachedRuns);
   }
 
   private _startRun({
@@ -199,24 +206,59 @@ export class RespanCallbackHandler {
       activeParent?.traceId ??
       fallbackTraceId;
 
-    const parentSpanId =
+    let parentSpanId =
       parentHex !== undefined
         ? deriveSpanId(parentHex)
         : activeParent?.spanId;
+    const isGroupedLangflowRoot =
+      !parentHex &&
+      !activeParent &&
+      framework === "langflow" &&
+      this.groupLangflowRootRuns;
+    if (isGroupedLangflowRoot && this._langflowRootSpanId) {
+      parentSpanId = this._langflowRootSpanId;
+    }
 
     const parentPath =
       (parentHex && this._runs.get(parentHex)?.entityPath) ??
       this._runPaths.get(parentHex ?? "");
     const entityPath = parentPath ? `${parentPath}.${name}` : name;
+    const parentWorkflowName =
+      (parentHex && this._runs.get(parentHex)?.workflowName) ??
+      this._runWorkflowNames.get(parentHex ?? "");
+    if (
+      !parentHex &&
+      !activeParent &&
+      framework === "langflow" &&
+      this.groupLangflowRootRuns &&
+      !this._langflowWorkflowName
+    ) {
+      const componentName = metadata?.langflow_component;
+      this._langflowWorkflowName =
+        typeof componentName === "string" && componentName.trim()
+          ? componentName.trim()
+          : name;
+    }
+    const workflowName =
+      parentWorkflowName ??
+      (framework === "langflow" && this.groupLangflowRootRuns
+        ? this._langflowWorkflowName
+        : undefined) ??
+      name;
 
+    const spanId = deriveSpanId(runHex);
+    if (isGroupedLangflowRoot && !this._langflowRootSpanId) {
+      this._langflowRootSpanId = spanId;
+    }
     this._runs.set(runHex, {
       runId: runHex,
       traceId,
-      spanId: deriveSpanId(runHex),
+      spanId,
       parentRunId: parentHex,
       parentSpanId,
       name,
       entityPath,
+      workflowName,
       logType,
       spanKind,
       startTime: hrTime(),
@@ -237,10 +279,17 @@ export class RespanCallbackHandler {
       [SpanAttributes.TRACELOOP_SPAN_KIND]: record.spanKind,
       [SpanAttributes.TRACELOOP_ENTITY_NAME]: record.name,
       [SpanAttributes.TRACELOOP_ENTITY_PATH]: record.entityPath,
+      [SpanAttributes.TRACELOOP_WORKFLOW_NAME]: record.workflowName,
+      [RespanSpanAttributes.RESPAN_TRACE_GROUP_ID]: record.workflowName,
       [LANGCHAIN_RUN_ID_ATTR]: record.runId,
       [LANGCHAIN_FRAMEWORK_ATTR]: record.framework,
     };
     setIfPresent(attrs, LANGCHAIN_PARENT_RUN_ID_ATTR, record.parentRunId);
+    setIfPresent(
+      attrs,
+      RespanSpanAttributes.RESPAN_SPAN_CUSTOM_ID,
+      record.metadata?.custom_identifier,
+    );
 
     if (this.includeMetadata) {
       setIfPresent(attrs, LANGCHAIN_TAGS_ATTR, safeJsonString(record.tags));
@@ -356,6 +405,10 @@ export class RespanCallbackHandler {
         (parentHex && this._runs.get(parentHex)?.entityPath) ??
         this._runPaths.get(parentHex ?? "");
       const entityPath = parentPath ? `${parentPath}.${name}` : name;
+      const workflowName =
+        (parentHex && this._runs.get(parentHex)?.workflowName) ??
+        this._runWorkflowNames.get(parentHex ?? "") ??
+        name;
       const record: RunRecord = {
         runId: runIdToHex(`${traceId}:${parentHex ?? ""}:${name}:${Date.now()}:${Math.random()}`),
         traceId,
@@ -364,6 +417,7 @@ export class RespanCallbackHandler {
         parentSpanId,
         name,
         entityPath,
+        workflowName,
         logType,
         spanKind,
         startTime: hrTime(),
@@ -407,16 +461,27 @@ export class RespanCallbackHandler {
     runName?: unknown,
   ): void {
     const isRoot = parentRunId === undefined || parentRunId === null;
+    const normalizedMetadata = normalizeMetadata(metadata);
+    const isCreateAgentRoot =
+      isRoot && normalizedMetadata?.ls_integration === "langchain_create_agent";
     this._startRun({
       runId,
       parentRunId,
       name: extractName(serialized, "chain", runName),
-      logType: isRoot ? RespanLogType.WORKFLOW : RespanLogType.TASK,
-      spanKind: isRoot ? TraceloopSpanKindValues.WORKFLOW : TraceloopSpanKindValues.TASK,
+      logType: isCreateAgentRoot
+        ? RespanLogType.AGENT
+        : isRoot
+          ? RespanLogType.WORKFLOW
+          : RespanLogType.TASK,
+      spanKind: isCreateAgentRoot
+        ? TraceloopSpanKindValues.AGENT
+        : isRoot
+          ? TraceloopSpanKindValues.WORKFLOW
+          : TraceloopSpanKindValues.TASK,
       inputValue: inputs,
       serialized,
       tags: normalizeTags(tags),
-      metadata: normalizeMetadata(metadata),
+      metadata: normalizedMetadata,
     });
   }
 

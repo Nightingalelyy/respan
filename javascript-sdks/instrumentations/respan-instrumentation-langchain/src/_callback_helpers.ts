@@ -28,7 +28,6 @@ export type HrTimeTuple = [number, number];
 export type FrameworkName = "langchain" | "langgraph" | "langflow";
 export interface LangChainCallbackConfig {
   callbacks?: unknown;
-  [key: string]: unknown;
 }
 
 export type SpanAttributesRecord = Record<string, unknown>;
@@ -58,6 +57,7 @@ export interface RunRecord {
   parentSpanId?: string;
   name: string;
   entityPath: string;
+  workflowName: string;
   logType: string;
   spanKind: string;
   startTime: HrTimeTuple;

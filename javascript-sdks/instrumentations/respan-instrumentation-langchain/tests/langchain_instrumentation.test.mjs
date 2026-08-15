@@ -115,6 +115,10 @@ test("chain root and child emit workflow and task spans with parent linkage", ()
   assert.equal(childSpan.spanContext().traceId, rootSpan.spanContext().traceId);
   assert.equal(childSpan.parentSpanContext?.spanId, rootSpan.spanContext().spanId);
   assert.equal(rootSpan.attributes["langchain.framework"], "langgraph");
+  assert.equal(rootSpan.attributes["traceloop.workflow.name"], "root_chain");
+  assert.equal(childSpan.attributes["traceloop.workflow.name"], "root_chain");
+  assert.equal(rootSpan.attributes["respan.trace.trace_group_identifier"], "root_chain");
+  assert.equal(childSpan.attributes["respan.trace.trace_group_identifier"], "root_chain");
 });
 
 test("explicit Langflow handler groups independent root runs into one trace", () => {
@@ -147,7 +151,53 @@ test("explicit Langflow handler groups independent root runs into one trace", ()
   assert.equal(captured.length, 2);
   assert.equal(captured[0].spanContext().traceId, captured[1].spanContext().traceId);
   assert.equal(captured[0].parentSpanContext?.spanId, undefined);
-  assert.equal(captured[1].parentSpanContext?.spanId, undefined);
+  assert.equal(
+    captured[1].parentSpanContext?.spanId,
+    captured[0].spanContext().spanId,
+  );
+  assert.equal(captured[0].attributes["traceloop.workflow.name"], "DemoComponent");
+  assert.equal(captured[1].attributes["traceloop.workflow.name"], "DemoComponent");
+});
+
+test("createAgent root emits one agent boundary and propagates its workflow name", () => {
+  resetProvider();
+  const handler = new RespanCallbackHandler();
+  const agentRunId = runId(41);
+  const childRunId = runId(42);
+
+  handler.handleChainStart(
+    { name: "LangGraph" },
+    { messages: [{ role: "user", content: "help" }] },
+    agentRunId,
+    undefined,
+    undefined,
+    {
+      ls_integration: "langchain_create_agent",
+      custom_identifier: "otel2-fix-marker",
+    },
+    undefined,
+    "support_agent",
+  );
+  handler.handleToolStart(
+    { name: "lookup" },
+    { query: "help" },
+    childRunId,
+    agentRunId,
+  );
+  handler.handleToolEnd({ result: "done" }, childRunId);
+  handler.handleChainEnd({ messages: [{ role: "assistant", content: "done" }] }, agentRunId);
+
+  const [toolSpan, agentSpan] = captured;
+  assert.equal(agentSpan.attributes["respan.entity.log_type"], "agent");
+  assert.equal(agentSpan.attributes["traceloop.span.kind"], "agent");
+  assert.equal(toolSpan.parentSpanContext?.spanId, agentSpan.spanContext().spanId);
+  assert.equal(toolSpan.attributes["traceloop.workflow.name"], "support_agent");
+  assert.equal(agentSpan.attributes["traceloop.workflow.name"], "support_agent");
+  assert.equal(agentSpan.attributes["respan.span_params.custom_identifier"], "otel2-fix-marker");
+  assert.equal(
+    captured.filter((span) => span.attributes["respan.entity.log_type"] === "agent").length,
+    1,
+  );
 });
 
 test("chat model output maps messages, usage, model, tool calls, and strips JSON fences", () => {
@@ -349,6 +399,12 @@ test("agent action, agent end, and custom event emit event spans", () => {
   assert.equal(eventSpan.name, "custom_step");
   assert.equal(eventSpan.attributes["respan.entity.log_type"], "task");
   assert.equal(chainSpan.attributes["respan.entity.log_type"], "workflow");
+  assert.deepEqual(
+    [toolSpan, agentSpan, eventSpan, chainSpan].map(
+      (span) => span.attributes["traceloop.workflow.name"],
+    ),
+    ["agent_chain", "agent_chain", "agent_chain", "agent_chain"],
+  );
 });
 
 test("pure helpers normalize messages, usage, serializable values, and tool definitions", () => {
