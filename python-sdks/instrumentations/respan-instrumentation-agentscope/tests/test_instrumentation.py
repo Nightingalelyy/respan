@@ -160,6 +160,11 @@ class FakeToolCallModel(FakeChatModelBase):
         return FakeChatResponse(content=[FakeToolCallBlock()])
 
 
+class FakeSecondChatModel(FakeChatModelBase):
+    async def __call__(self, messages, tools=None, tool_choice=None, **kwargs):
+        return FakeChatResponse(content=[FakeTextBlock("Second model.")])
+
+
 class FakeKeyErrorModel(FakeChatModelBase):
     async def __call__(self, messages, tools=None, tool_choice=None, **kwargs):
         return FakeKeyErrorProxy(
@@ -276,6 +281,38 @@ def test_activate_specific_instances_does_not_patch_classes(monkeypatch):
     instrumentor.deactivate()
 
     assert fake_modules.agent_class.reply is original_agent_reply
+
+
+def test_activate_patches_multiple_custom_model_classes_once():
+    first_model = FakeChatModelBase()
+    duplicate_class_model = FakeChatModelBase()
+    second_model = FakeSecondChatModel()
+    original_first_call = FakeChatModelBase.__call__
+    original_second_call = FakeSecondChatModel.__call__
+
+    instrumentor = AgentScopeInstrumentor(
+        agent=object(),
+        models=[first_model, duplicate_class_model, second_model],
+        instrument_tools=False,
+    )
+    instrumentor.activate()
+
+    assert FakeChatModelBase.__call__ is not original_first_call
+    assert FakeSecondChatModel.__call__ is not original_second_call
+    assert len(instrumentor._patches) == 2
+
+    instrumentor.deactivate()
+
+    assert FakeChatModelBase.__call__ is original_first_call
+    assert FakeSecondChatModel.__call__ is original_second_call
+
+
+def test_activate_rejects_model_and_models_together():
+    with pytest.raises(ValueError, match="either model or models"):
+        AgentScopeInstrumentor(
+            model=FakeChatModelBase(),
+            models=[FakeSecondChatModel()],
+        )
 
 
 def test_activate_skips_when_respan_tracing_is_disabled(monkeypatch, caplog):

@@ -1,8 +1,10 @@
+import asyncio
 import logging
 import sys
 from types import ModuleType, SimpleNamespace
 
 import pytest
+from opentelemetry.trace import SpanContext, TraceFlags
 
 from respan_instrumentation_agentspec import AgentSpecInstrumentor
 from respan_instrumentation_agentspec import _instrumentation
@@ -11,6 +13,15 @@ from respan_instrumentation_agentspec._instrumentation import (
     _TranslatedProcessorChain,
     _extract_langchain_usage,
     _patch_agentspec_langgraph_usage,
+)
+from respan_sdk.constants.span_attributes import (
+    RESPAN_CUSTOMER_PARAMS_ID,
+    RESPAN_LOG_TYPE,
+    RESPAN_METADATA,
+    RESPAN_SPAN_CUSTOM_ID,
+    RESPAN_SPAN_TOOLS,
+    RESPAN_THREADS_ID,
+    RESPAN_TRACE_GROUP_ID,
 )
 from respan_tracing.core.tracer import RespanTracer
 
@@ -205,6 +216,98 @@ def test_translated_processor_chain_does_not_shutdown_borrowed_processors():
     assert export_processor.did_shutdown is False
 
 
+def test_translated_processor_chain_preserves_full_trace_id_and_enriches_boundaries():
+    session_id = "12345678-1234-5678-9abc-def012345678"
+    expected_trace_id = int(session_id.replace("-", ""), 16)
+
+    class FakeSpan:
+        def __init__(self, *, span_id, parent, attributes):
+            self._context = SpanContext(
+                trace_id=1,
+                span_id=span_id,
+                is_remote=False,
+                trace_flags=TraceFlags(TraceFlags.SAMPLED),
+            )
+            self._parent = parent
+            self._attributes = {"session.id": session_id, **attributes}
+
+        @property
+        def parent(self):
+            return self._parent
+
+        def get_span_context(self):
+            return self._context
+
+    export_processor = FakeExportProcessor()
+    chain = _TranslatedProcessorChain(
+        translator=FakeTranslator(),
+        processors=(export_processor,),
+    )
+    root = FakeSpan(span_id=1, parent=None, attributes={RESPAN_LOG_TYPE: "workflow"})
+    root_parent = root.get_span_context()
+    agent = FakeSpan(
+        span_id=2,
+        parent=root_parent,
+        attributes={
+            RESPAN_LOG_TYPE: "agent",
+            "traceloop.entity.input": "{}",
+            "traceloop.entity.output": "{}",
+        },
+    )
+    chat = FakeSpan(
+        span_id=3,
+        parent=agent.get_span_context(),
+        attributes={
+            RESPAN_LOG_TYPE: "chat",
+            "gen_ai.prompt.0.role": "user",
+            "gen_ai.prompt.0.content": "hello",
+            "gen_ai.completion.0.role": "assistant",
+            "gen_ai.completion.0.content": "hi",
+            RESPAN_CUSTOMER_PARAMS_ID: "agentspec-user",
+            RESPAN_THREADS_ID: "agentspec-thread",
+            RESPAN_TRACE_GROUP_ID: "agentspec-group",
+            RESPAN_SPAN_CUSTOM_ID: "agentspec-custom",
+            f"{RESPAN_METADATA}.scenario": "propagated_attributes",
+            RESPAN_SPAN_TOOLS: "[]",
+            "tools": [],
+        },
+    )
+
+    for span in (root, agent, chat):
+        chain.on_start(span)
+
+    assert root.get_span_context().trace_id == expected_trace_id
+    assert agent.get_span_context().trace_id == expected_trace_id
+    assert agent.parent.trace_id == expected_trace_id
+    assert chat.get_span_context().trace_id == expected_trace_id
+    assert chat.parent.trace_id == expected_trace_id
+    assert expected_trace_id >> 64
+
+    chain.on_end(chat)
+    chain.on_end(agent)
+    chain.on_end(root)
+
+    assert chat._attributes["traceloop.entity.input"] == (
+        '[{"role":"user","content":"hello"}]'
+    )
+    assert chat._attributes["traceloop.entity.output"] == (
+        '{"role":"assistant","content":"hi"}'
+    )
+    for boundary in (agent, root):
+        assert boundary._attributes["traceloop.entity.input"].endswith("hello\"}]")
+        assert boundary._attributes["traceloop.entity.output"].endswith("hi\"}")
+    assert root._attributes[RESPAN_CUSTOMER_PARAMS_ID] == "agentspec-user"
+    assert root._attributes[RESPAN_THREADS_ID] == "agentspec-thread"
+    assert root._attributes[RESPAN_TRACE_GROUP_ID] == "agentspec-group"
+    assert root._attributes[RESPAN_SPAN_CUSTOM_ID] == "agentspec-custom"
+    assert root._attributes[f"{RESPAN_METADATA}.scenario"] == (
+        "propagated_attributes"
+    )
+    assert RESPAN_SPAN_TOOLS not in chat._attributes
+    assert "tools" not in chat._attributes
+    assert chain._trace_state == {}
+
+
 def test_extract_langchain_usage_from_message_usage_metadata():
     response = SimpleNamespace(
         generations=[
@@ -240,7 +343,9 @@ def test_extract_langchain_usage_from_llm_output_token_usage():
     assert _extract_langchain_usage(response) == (12, 5)
 
 
-def test_patch_agentspec_langgraph_usage_adds_tokens_to_response_event(monkeypatch):
+def test_patch_agentspec_langgraph_usage_adds_tokens_to_sync_and_async_events(
+    monkeypatch,
+):
     class FakeSpan:
         def __init__(self):
             self.events = []
@@ -262,14 +367,30 @@ def test_patch_agentspec_langgraph_usage_adds_tokens_to_response_event(monkeypat
         def _end_span(self, run_id_str, span):
             span.did_end = True
 
+        async def _add_event_async(self, run_id_str, span, event):
+            self._add_event(run_id_str, span, event)
+
+        async def _end_span_async(self, run_id_str, span):
+            self._end_span(run_id_str, span)
+
         def on_llm_end(self, response, *, run_id, parent_run_id=None, **kwargs):
             raise AssertionError("original handler should be replaced")
+
+        async def on_llm_end_async(
+            self,
+            response,
+            *,
+            run_id,
+            parent_run_id=None,
+            **kwargs,
+        ):
+            raise AssertionError("original async handler should be replaced")
 
     def extract_message_content_and_tool_calls(response):
         return "message-1", "hello", []
 
     fake_module = ModuleType("pyagentspec.adapters.langgraph.tracing")
-    fake_module.AgentSpecCallbackHandler = FakeCallbackHandler
+    fake_module.AgentSpecLlmCallbackHandler = FakeCallbackHandler
     fake_module.AgentSpecLlmGenerationSpan = FakeSpan
     fake_module.AgentSpecLlmGenerationResponse = FakeResponseEvent
     fake_module._extract_message_content_and_tool_calls = (
@@ -320,6 +441,21 @@ def test_patch_agentspec_langgraph_usage_adds_tokens_to_response_event(monkeypat
     assert span.did_end is True
     assert handler.agentspec_spans_registry == {}
     assert handler.messages_in_process == {}
+
+    async_handler = FakeCallbackHandler()
+    async_span = async_handler.agentspec_spans_registry["run-1"]
+    asyncio.run(
+        async_handler.on_llm_end_async(
+            response,
+            run_id="run-1",
+        )
+    )
+
+    async_event = async_span.events[0][1]
+    assert async_event.kwargs["input_tokens"] == 7
+    assert async_event.kwargs["output_tokens"] == 3
+    assert async_span.did_end is True
+    assert async_handler.agentspec_spans_registry == {}
 
 
 def test_activate_starts_agentspec_trace_with_translated_processor_chain(monkeypatch):

@@ -42,6 +42,17 @@ respan = Respan(
 respan.flush()
 ```
 
+For custom model classes defined outside AgentScope's public model modules,
+configure all instances on one instrumentor so Respan activates one lifecycle
+identity while patching every distinct custom model class:
+
+```python
+AgentScopeInstrumentor(models=[planner_model, reviewer_model, fallback_model])
+```
+
+Use `model=...` for a single custom model. Do not pass `model` and `models`
+together.
+
 ## What Is Captured
 
 - Agent `reply()` and `reply_stream()` calls as `agent` spans.
