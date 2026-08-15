@@ -5415,6 +5415,7 @@ __metadata:
   dependencies:
     "@opentelemetry/api": "npm:^1.9.0"
     "@opentelemetry/core": "npm:^2.10.0"
+    "@opentelemetry/otlp-transformer": "npm:^0.205.0"
     "@opentelemetry/sdk-trace-base": "npm:^2.10.0"
     "@opentelemetry/semantic-conventions": "npm:^1.43.0"
     "@respan/respan-sdk": "npm:^1.1.7"
