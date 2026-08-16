@@ -20,7 +20,6 @@ from respan_instrumentation_dspy._utils import (
     safe_json,
 )
 
-
 _OFF_CONTRACT_ALIAS_KEYS = (
     "tools",
     "tool_calls",
@@ -277,10 +276,7 @@ def test_tool_callback_emits_tool_span(monkeypatch):
         "name": "lookup_order",
         "arguments": {"order_id": "ord_123"},
     }
-    assert (
-        attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
-        == '{"status": "shipped"}'
-    )
+    assert attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] == '{"status": "shipped"}'
     assert SpanAttributes.TRACELOOP_SPAN_KIND not in attributes
     _assert_no_off_contract_aliases(attributes=attributes)
 
@@ -327,6 +323,7 @@ def test_react_module_callback_emits_agent_span(monkeypatch):
     assert attributes["respan.entity.log_type"] == "agent"
     assert attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "ReAct"
     assert SpanAttributes.TRACELOOP_SPAN_KIND not in attributes
+    assert not any(key.startswith(("gen_ai.", "llm.")) for key in attributes)
     _assert_no_off_contract_aliases(attributes=attributes)
 
 

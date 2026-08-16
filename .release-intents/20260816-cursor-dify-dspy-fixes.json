@@ -1,0 +1,8 @@
+{
+  "summary": "Fix Cursor cancellation roots, preserve Dify response models, and lock DSPy agent spans to the common contract",
+  "packages": {
+    "respan-instrumentation-cursor-sdk": "patch",
+    "respan-instrumentation-dify": "patch",
+    "respan-instrumentation-dspy": "patch"
+  }
+}
