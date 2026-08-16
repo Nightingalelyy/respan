@@ -714,7 +714,9 @@ def enrich_claude_agent_sdk_span(span: ReadableSpan) -> None:
             _extract_usage(attrs)
         )
 
-        _set_if_missing(attrs, RESPAN_LOG_TYPE, LOG_TYPE_AGENT)
+        # Upstream marks invoke_agent spans as chat because they also carry GenAI
+        # message attributes. The operation boundary is authoritative here.
+        attrs[RESPAN_LOG_TYPE] = LOG_TYPE_AGENT
         _set_if_missing(attrs, SpanAttributes.TRACELOOP_ENTITY_NAME, agent_name)
         _set_if_missing(attrs, SpanAttributes.TRACELOOP_ENTITY_PATH, agent_name)
         _set_if_missing(attrs, SpanAttributes.TRACELOOP_WORKFLOW_NAME, agent_name)
@@ -762,6 +764,7 @@ def enrich_claude_agent_sdk_span(span: ReadableSpan) -> None:
         key: value
         for key, value in attrs.items()
         if key not in CLAUDE_AGENT_SDK_STRIP_ATTRS
+        and not key.startswith("gen_ai.tool.")
     }
     _set_if_unset_span_status(span, span._attributes)
 
@@ -776,12 +779,18 @@ class ClaudeAgentSDKSpanProcessor(SpanProcessor):
         ] = {}
         self._pending_tool_calls_lock = threading.Lock()
 
-    def _store_pending_tool_call(self, span: ReadableSpan) -> None:
+    def _store_pending_tool_call(
+        self,
+        span: ReadableSpan,
+        source_attrs: Mapping[str, Any] | None = None,
+    ) -> None:
         parent_span_key = _get_parent_span_key(span)
         if parent_span_key is None:
             return
 
-        attrs = getattr(span, "_attributes", None)
+        attrs = source_attrs
+        if attrs is None:
+            attrs = getattr(span, "_attributes", None)
         if not isinstance(attrs, Mapping):
             return
 
@@ -821,6 +830,9 @@ class ClaudeAgentSDKSpanProcessor(SpanProcessor):
 
     def on_end(self, span: ReadableSpan) -> None:
         try:
+            original_attrs = getattr(span, "_attributes", None)
+            if isinstance(original_attrs, Mapping):
+                original_attrs = dict(original_attrs)
             enrich_claude_agent_sdk_span(span)
 
             attrs = getattr(span, "_attributes", None)
@@ -829,7 +841,19 @@ class ClaudeAgentSDKSpanProcessor(SpanProcessor):
                 return
 
             if attrs.get(RESPAN_LOG_TYPE) == LOG_TYPE_TOOL:
-                self._store_pending_tool_call(span)
+                # Correlate with the upstream call ID before helper attributes
+                # are stripped, while using the normalized canonical name and
+                # arguments from the exported tool span.
+                pending_attrs = dict(attrs)
+                if isinstance(original_attrs, Mapping):
+                    tool_call_id = original_attrs.get(
+                        CLAUDE_AGENT_SDK_TOOL_CALL_ID_ATTR
+                    )
+                    if tool_call_id:
+                        pending_attrs[CLAUDE_AGENT_SDK_TOOL_CALL_ID_ATTR] = (
+                            tool_call_id
+                        )
+                self._store_pending_tool_call(span, pending_attrs)
                 # Only agent spans merge queued tool calls into their final attrs.
                 # Drop any child calls queued against non-agent parents on span end.
                 self._consume_pending_tool_calls(span)

@@ -2,23 +2,86 @@
 
 from __future__ import annotations
 
+import ast
 from collections.abc import Mapping, Sequence
 import json
 from typing import Any
 
 from opentelemetry.semconv_ai import SpanAttributes
 
-from respan_sdk.utils.serialization import serialize_value
-
 from respan_instrumentation_crewai._constants import ASSISTANT_ROLE, USER_ROLE
+
+
+def _structured_value(value: Any, *, parse_tool_strings: bool = False) -> Any:
+    """Convert provider/Pydantic containers to JSON-native values."""
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    if isinstance(value, str):
+        if not parse_tool_strings:
+            return value
+        parsed = _parse_tool_string(value)
+        if parsed is value:
+            return value
+        return _structured_value(parsed, parse_tool_strings=True)
+    if isinstance(value, Mapping):
+        return {
+            str(key): _structured_value(item, parse_tool_strings=parse_tool_strings)
+            for key, item in value.items()
+        }
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        return [
+            _structured_value(item, parse_tool_strings=parse_tool_strings)
+            for item in value
+        ]
+
+    for method_name in ("model_dump", "dict"):
+        method = getattr(value, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            dumped = method()
+        except Exception:
+            continue
+        if isinstance(dumped, Mapping):
+            return _structured_value(
+                dumped,
+                parse_tool_strings=parse_tool_strings,
+            )
+
+    attributes = getattr(value, "__dict__", None)
+    if isinstance(attributes, Mapping):
+        return _structured_value(
+            {
+                key: item
+                for key, item in attributes.items()
+                if not str(key).startswith("_")
+            },
+            parse_tool_strings=parse_tool_strings,
+        )
+    return str(value)
+
+
+def _parse_tool_string(value: str) -> Any:
+    stripped = value.strip()
+    if len(stripped) < 2:
+        return value
+    is_container = (stripped[0], stripped[-1]) in {("{", "}"), ("[", "]")}
+    is_quoted = stripped[0] == stripped[-1] and stripped[0] in {"'", '"'}
+    if not is_container and not is_quoted:
+        return value
+    for parser in (json.loads, ast.literal_eval):
+        try:
+            return parser(stripped)
+        except (TypeError, ValueError, SyntaxError, json.JSONDecodeError):
+            continue
+    return value
 
 
 def json_attribute(value: Any) -> str:
     """Return an OTel-safe JSON string for a structured value."""
     try:
-        serialized = serialize_value(value=value)
         return json.dumps(
-            serialized,
+            _structured_value(value),
             default=str,
             ensure_ascii=False,
             separators=(",", ":"),
@@ -32,6 +95,60 @@ def attribute_text(value: Any) -> str:
     if isinstance(value, str):
         return value
     return json_attribute(value)
+
+
+def normalize_tool_definitions(value: Any) -> Any:
+    """Return tool schemas without Python repr or nested quote artifacts."""
+    return _structured_value(value, parse_tool_strings=True)
+
+
+def _tool_arguments(value: Any) -> str:
+    normalized = _structured_value(value, parse_tool_strings=True)
+    if isinstance(normalized, str):
+        return normalized
+    return json.dumps(
+        normalized,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _normalize_tool_call(value: Any) -> Any:
+    normalized = _structured_value(value, parse_tool_strings=True)
+    if not isinstance(normalized, Mapping):
+        return normalized
+
+    call = dict(normalized)
+    function = call.get("function")
+    if isinstance(function, Mapping):
+        normalized_function = dict(function)
+        if normalized_function.get("arguments") is not None:
+            normalized_function["arguments"] = _tool_arguments(
+                normalized_function["arguments"]
+            )
+        call["function"] = normalized_function
+    elif call.get("name") is not None:
+        normalized_function = {"name": call.pop("name")}
+        arguments = call.pop("arguments", call.pop("input", None))
+        if arguments is not None:
+            normalized_function["arguments"] = _tool_arguments(arguments)
+        call["function"] = normalized_function
+        call.setdefault("type", "function")
+
+    if call.get("id") is None and call.get("tool_use_id") is not None:
+        call["id"] = call.pop("tool_use_id")
+    return call
+
+
+def normalize_tool_calls(value: Any) -> list[Any]:
+    """Return OpenAI-shaped tool calls with JSON-string arguments."""
+    normalized = _structured_value(value, parse_tool_strings=True)
+    if isinstance(normalized, Sequence) and not isinstance(
+        normalized,
+        (str, bytes, bytearray),
+    ):
+        return [_normalize_tool_call(item) for item in normalized]
+    return [_normalize_tool_call(normalized)]
 
 
 def normalize_messages(
@@ -99,7 +216,10 @@ def _tool_call_completion_message(
     if isinstance(response, Sequence) and not isinstance(
         response, (str, bytes, bytearray)
     ):
-        return {"role": ASSISTANT_ROLE, "tool_calls": list(response)}
+        return {
+            "role": ASSISTANT_ROLE,
+            "tool_calls": normalize_tool_calls(response),
+        }
     if response_mapping is None:
         return None
 
@@ -107,11 +227,17 @@ def _tool_call_completion_message(
     if isinstance(nested_tool_calls, Sequence) and not isinstance(
         nested_tool_calls, (str, bytes, bytearray)
     ):
-        return {"role": ASSISTANT_ROLE, "tool_calls": list(nested_tool_calls)}
+        return {
+            "role": ASSISTANT_ROLE,
+            "tool_calls": normalize_tool_calls(nested_tool_calls),
+        }
 
     tool_call_keys = {"id", "function", "name", "arguments", "input", "tool_use_id"}
     if tool_call_keys.intersection(response_mapping):
-        return {"role": ASSISTANT_ROLE, "tool_calls": [dict(response_mapping)]}
+        return {
+            "role": ASSISTANT_ROLE,
+            "tool_calls": normalize_tool_calls(response_mapping),
+        }
     return None
 
 
@@ -174,7 +300,13 @@ def set_message_attributes(
         if content is not None:
             attributes[f"{message_prefix}.content"] = attribute_text(content)
         if tool_calls:
-            attributes[f"{message_prefix}.tool_calls"] = json_attribute(tool_calls)
+            attributes[f"{message_prefix}.tool_calls"] = json_attribute(
+                normalize_tool_calls(tool_calls)
+            )
+        for identity_field in ("tool_call_id", "name"):
+            identity = message.get(identity_field)
+            if identity is not None:
+                attributes[f"{message_prefix}.{identity_field}"] = str(identity)
 
 
 def first_int(mapping: Mapping[str, Any], *keys: str) -> int | None:

@@ -501,18 +501,21 @@ def test_exporter_accepts_full_v2_traces_endpoint_without_duplication():
     assert exporter._traces_url == "https://api.respan.ai/api/v2/traces"
 
 
-def test_prepare_spans_adds_claude_agent_final_chat_child_for_tool_turn():
-    """Claude Agent tool turns should emit a synthetic final child chat span."""
+def test_prepare_spans_splits_current_claude_agent_into_agent_and_chat():
+    """Current Claude Agent spans export an agent parent plus canonical chat child."""
 
     wrapper_span = _make_span(
-        name="ClaudeAgentSDK.query",
+        name="invoke_agent weather_agent",
         span_id=3002,
         attributes={
             "respan.entity.log_type": "agent",
             "gen_ai.system": "anthropic",
             "gen_ai.request.model": "claude-sonnet-4-5",
+            "llm.request.type": "chat",
             "traceloop.entity.input": "Use the weather tool.",
             "traceloop.entity.output": "Tokyo is sunny and 22C.",
+            "gen_ai.usage.input_tokens": 12,
+            "gen_ai.usage.output_tokens": 8,
             "gen_ai.completion.0.tool_calls": json.dumps([
                 {
                     "id": "call_1",
@@ -524,25 +527,38 @@ def test_prepare_spans_adds_claude_agent_final_chat_child_for_tool_turn():
                 }
             ]),
         },
-        scope_name="openinference.instrumentation.claude_agent_sdk",
+        scope_name="opentelemetry.instrumentation.claude_agent_sdk",
     )
     wrapper_context = wrapper_span.get_span_context.return_value
 
     prepared = _prepare_spans_for_export(spans=[wrapper_span])
 
     assert [s.name for s in prepared] == [
-        "ClaudeAgentSDK.query",
+        "invoke_agent weather_agent",
         "assistant_message",
     ]
+    parent_attrs = prepared[0].attributes
+    assert parent_attrs["respan.entity.log_type"] == "agent"
+    assert "gen_ai.request.model" not in parent_attrs
+    assert "llm.request.type" not in parent_attrs
+    assert "gen_ai.usage.input_tokens" not in parent_attrs
+    assert "gen_ai.usage.output_tokens" not in parent_attrs
+    assert "gen_ai.completion.0.tool_calls" not in parent_attrs
     synthetic_child = prepared[1]
     assert synthetic_child.parent.span_id == wrapper_context.span_id
     assert synthetic_child.attributes["respan.entity.log_type"] == "chat"
+    assert synthetic_child.attributes["llm.request.type"] == "chat"
+    assert synthetic_child.attributes["gen_ai.request.model"] == "claude-sonnet-4-5"
+    assert synthetic_child.attributes["gen_ai.usage.input_tokens"] == 12
+    assert synthetic_child.attributes["gen_ai.usage.output_tokens"] == 8
     assert synthetic_child.attributes["gen_ai.completion.0.role"] == "assistant"
     assert (
         synthetic_child.attributes["gen_ai.completion.0.content"]
         == "Tokyo is sunny and 22C."
     )
-    assert synthetic_child.attributes["gen_ai.completion.0.tool_calls"] == [
+    assert json.loads(
+        synthetic_child.attributes["gen_ai.completion.0.tool_calls"]
+    ) == [
         {
             "id": "call_1",
             "type": "function",
@@ -553,6 +569,58 @@ def test_prepare_spans_adds_claude_agent_final_chat_child_for_tool_turn():
         }
     ]
     assert synthetic_child.attributes["traceloop.entity.input"] == "Use the weather tool."
+
+
+def test_prepare_spans_splits_tool_only_current_claude_agent():
+    """A tool-only agent response still gets a canonical child chat span."""
+
+    tool_calls = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "lookup_weather",
+                "arguments": '{"city":"Tokyo"}',
+            },
+        }
+    ]
+    wrapper_span = _make_span(
+        name="invoke_agent weather_agent",
+        span_id=3003,
+        attributes={
+            "respan.entity.log_type": "agent",
+            "gen_ai.system": "anthropic",
+            "gen_ai.request.model": "claude-sonnet-4-5",
+            "llm.request.type": "chat",
+            "traceloop.entity.input": "Use the weather tool.",
+            "traceloop.entity.output": json.dumps(
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call_1",
+                            "name": "lookup_weather",
+                            "input": {"city": "Tokyo"},
+                        }
+                    ],
+                }
+            ),
+            "gen_ai.completion.0.tool_calls": json.dumps(tool_calls),
+        },
+        scope_name="opentelemetry.instrumentation.claude_agent_sdk",
+    )
+
+    prepared = _prepare_spans_for_export(spans=[wrapper_span])
+
+    assert len(prepared) == 2
+    assert prepared[0].attributes["respan.entity.log_type"] == "agent"
+    assert "llm.request.type" not in prepared[0].attributes
+    assert prepared[1].attributes["respan.entity.log_type"] == "chat"
+    assert prepared[1].attributes["gen_ai.completion.0.content"] == ""
+    assert json.loads(
+        prepared[1].attributes["gen_ai.completion.0.tool_calls"]
+    ) == tool_calls
 
 
 def test_prepare_spans_remaps_tool_call_helpers_and_strips_helper_attrs():

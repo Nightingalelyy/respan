@@ -167,7 +167,10 @@ class SyntheticSpan:
         return self._span_context
 
 
-_CLAUDE_AGENT_SCOPE_NAME = "openinference.instrumentation.claude_agent_sdk"
+_CLAUDE_AGENT_SCOPE_NAMES = frozenset({
+    "openinference.instrumentation.claude_agent_sdk",
+    "opentelemetry.instrumentation.claude_agent_sdk",
+})
 _CLAUDE_AGENT_RESPONSE_SPAN_NAMES = frozenset({
     "ClaudeAgentSDK.query",
     "ClaudeAgentSDK.ClaudeSDKClient.receive_response",
@@ -193,16 +196,20 @@ def _is_claude_agent_response_span(span: ReadableSpan) -> bool:
     """Return whether this span is a Claude Agent SDK response-turn parent."""
     scope = getattr(span, "instrumentation_scope", None)
     scope_name = getattr(scope, "name", None)
+    attrs = span.attributes or {}
     return (
-        scope_name == _CLAUDE_AGENT_SCOPE_NAME
-        and span.name in _CLAUDE_AGENT_RESPONSE_SPAN_NAMES
+        scope_name in _CLAUDE_AGENT_SCOPE_NAMES
+        and (
+            attrs.get(RESPAN_LOG_TYPE) == LOG_TYPE_AGENT
+            or span.name in _CLAUDE_AGENT_RESPONSE_SPAN_NAMES
+        )
     )
 
 
 def _build_claude_agent_final_chat_span(
     span: ReadableSpan,
 ) -> Optional[ReadableSpan]:
-    """Synthesize the missing final child chat span for Claude Agent tool turns."""
+    """Split Claude Agent SDK LLM data into a canonical child chat span."""
     if not _is_claude_agent_response_span(span):
         return None
 
@@ -210,12 +217,28 @@ def _build_claude_agent_final_chat_span(
     tool_calls = _parse_structured_json_attr(attrs.get(_COMPLETION_TOOL_CALLS_ATTR))
     if not isinstance(tool_calls, list) or not tool_calls:
         tool_calls = _parse_structured_json_attr(attrs.get(RESPAN_SPAN_TOOL_CALLS))
-    if not isinstance(tool_calls, list) or not tool_calls:
-        return None
 
     primary_completion_message = _select_primary_completion_from_attrs(attrs)
+    has_llm_payload = bool(tool_calls) or any(
+        key in attrs
+        for key in (
+            SpanAttributes.LLM_SYSTEM,
+            SpanAttributes.LLM_REQUEST_MODEL,
+            SpanAttributes.LLM_REQUEST_TYPE,
+        )
+    ) or any(
+        key.startswith("gen_ai.usage.") or key.startswith("llm.usage.")
+        for key in attrs
+    )
+    if primary_completion_message is None:
+        if not has_llm_payload:
+            return None
+        primary_completion_message = {"role": "assistant", "content": ""}
+
     completion_text = _extract_text_from_message(primary_completion_message)
-    if completion_text in {None, ""}:
+    if completion_text is None:
+        completion_text = ""
+    if not completion_text and not has_llm_payload:
         return None
 
     span_context = span.get_span_context()
@@ -228,12 +251,16 @@ def _build_claude_agent_final_chat_span(
         SpanAttributes.TRACELOOP_ENTITY_NAME: _ASSISTANT_MESSAGE_SPAN_NAME,
         f"{SpanAttributes.LLM_COMPLETIONS}.0.role": "assistant",
         f"{SpanAttributes.LLM_COMPLETIONS}.0.content": completion_text,
-        _COMPLETION_TOOL_CALLS_ATTR: tool_calls,
         SpanAttributes.TRACELOOP_ENTITY_OUTPUT: json.dumps(
             primary_completion_message,
             default=str,
         ),
     }
+    if isinstance(tool_calls, list) and tool_calls:
+        child_attributes[_COMPLETION_TOOL_CALLS_ATTR] = json.dumps(
+            tool_calls,
+            default=str,
+        )
 
     input_value = attrs.get(SpanAttributes.TRACELOOP_ENTITY_INPUT)
     if input_value is not None:
@@ -251,6 +278,17 @@ def _build_claude_agent_final_chat_span(
         key: value
         for key, value in attrs.items()
         if key.startswith(_GEN_AI_PROMPT_PREFIX)
+    })
+    child_attributes.update({
+        key: value
+        for key, value in attrs.items()
+        if key.startswith("gen_ai.usage.")
+        or key.startswith("llm.usage.")
+        or key.startswith("error.")
+        or key.startswith("exception.")
+        or key == SpanAttributes.LLM_REQUEST_FUNCTIONS
+        or (key.startswith("respan.") and key != RESPAN_LOG_TYPE)
+        or key == SpanAttributes.TRACELOOP_WORKFLOW_NAME
     })
 
     child_end_time = span.end_time
@@ -281,6 +319,31 @@ def _build_claude_agent_final_chat_span(
     )
 
 
+def _strip_claude_agent_llm_attributes(attrs: Mapping[str, Any]) -> Dict[str, Any]:
+    """Keep the exported agent parent on the common-span contract only."""
+    llm_prefixes = (
+        "gen_ai.prompt.",
+        "gen_ai.completion.",
+        "gen_ai.request.",
+        "gen_ai.response.",
+        "gen_ai.usage.",
+        "llm.request.",
+        "llm.response.",
+        "llm.usage.",
+    )
+    llm_exact = {
+        SpanAttributes.LLM_SYSTEM,
+        "prompt_cache_hit_tokens",
+        "prompt_cache_creation_tokens",
+    }
+    return {
+        key: value
+        for key, value in attrs.items()
+        if key not in llm_exact
+        and not any(key.startswith(prefix) for prefix in llm_prefixes)
+    }
+
+
 def _prepare_spans_for_export(spans: Sequence[ReadableSpan]) -> List[ReadableSpan]:
     prepared_spans: List[ReadableSpan] = []
 
@@ -299,9 +362,22 @@ def _prepare_spans_for_export(spans: Sequence[ReadableSpan]) -> List[ReadableSpa
             if overrides
             else span
         )
+        synthetic_child = _build_claude_agent_final_chat_span(prepared_span)
+        if (
+            synthetic_child is not None
+            and prepared_span.attributes.get(RESPAN_LOG_TYPE) == LOG_TYPE_AGENT
+        ):
+            prepared_span = ModifiedSpan(
+                original_span=prepared_span,
+                overrides={
+                    OTEL_SPAN_ATTRIBUTES_FIELD: _strip_claude_agent_llm_attributes(
+                        prepared_span.attributes or {}
+                    )
+                },
+            )
+
         prepared_spans.append(prepared_span)
 
-        synthetic_child = _build_claude_agent_final_chat_span(prepared_span)
         if synthetic_child is not None:
             prepared_spans.append(synthetic_child)
 

@@ -50,7 +50,12 @@ from respan_instrumentation_crewai._event_assembler import (
     SpanStartSpec,
 )
 from respan_instrumentation_crewai._event_listener import CrewAIEventListener
-from respan_instrumentation_crewai._serialization import completion_message
+from respan_instrumentation_crewai._serialization import (
+    completion_message,
+    normalize_tool_calls,
+    normalize_tool_definitions,
+    set_message_attributes,
+)
 from respan_sdk.constants import ERROR_MESSAGE_ATTR
 from respan_sdk.constants.llm_logging import (
     LOG_TYPE_AGENT,
@@ -304,7 +309,6 @@ def test_native_listener_exports_canonical_full_lifecycle(monkeypatch):
         assert chat_span.parent.span_id == agent_span.context.span_id
         assert tool_span.parent.span_id == agent_span.context.span_id
         assert len({span.context.trace_id for span in spans}) == 1
-
         for span in spans:
             attributes = span.attributes or {}
             assert (
@@ -491,6 +495,80 @@ def test_tool_call_completion_uses_canonical_indexed_tool_calls(monkeypatch):
         assert "respan.span.tool_calls" not in attributes
     finally:
         _finish_tracing(tracer_provider, instrumentor, original_token_hook)
+
+
+def test_tool_payloads_remove_repr_quoting_and_preserve_tool_result_identity():
+    tools = normalize_tool_definitions(
+        [
+            {
+                "type": "'function'",
+                "function": {
+                    "name": '"lookup"',
+                    "description": "Look up a topic",
+                    "parameters": (
+                        "{'type':'object','properties':"
+                        "{'topic':{'type':'string'}},'required':['topic']}"
+                    ),
+                },
+            }
+        ]
+    )
+    tool_calls = normalize_tool_calls(
+        [
+            {
+                "id": "'call-1'",
+                "type": "'function'",
+                "function": {
+                    "name": "'lookup'",
+                    "arguments": "{'topic':'reason'}",
+                },
+            }
+        ]
+    )
+
+    assert tools == [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": "Look up a topic",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"topic": {"type": "string"}},
+                    "required": ["topic"],
+                },
+            },
+        }
+    ]
+    assert tool_calls == [
+        {
+            "id": "call-1",
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "arguments": '{"topic":"reason"}',
+            },
+        }
+    ]
+
+    attributes = {}
+    set_message_attributes(
+        attributes,
+        prefix=SpanAttributes.LLM_PROMPTS,
+        messages=[
+            {
+                "role": "tool",
+                "name": "lookup",
+                "tool_call_id": "call-1",
+                "content": {"answer": "Because."},
+            }
+        ],
+    )
+    assert attributes[f"{SpanAttributes.LLM_PROMPTS}.0.name"] == "lookup"
+    assert attributes[f"{SpanAttributes.LLM_PROMPTS}.0.tool_call_id"] == "call-1"
+    assert json.loads(attributes[f"{SpanAttributes.LLM_PROMPTS}.0.content"]) == {
+        "answer": "Because."
+    }
 
 
 def test_serialized_pydantic_completion_preserves_structured_content(monkeypatch):
