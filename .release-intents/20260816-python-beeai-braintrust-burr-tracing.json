@@ -1,0 +1,8 @@
+{
+  "summary": "Repair BeeAI failure spans, Braintrust evaluation metadata, and Burr root errors",
+  "packages": {
+    "respan-instrumentation-beeai": "patch",
+    "respan-instrumentation-braintrust": "patch",
+    "respan-instrumentation-burr": "patch"
+  }
+}

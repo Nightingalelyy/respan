@@ -1,6 +1,7 @@
 import json
 import logging
 import sys
+from datetime import datetime, timezone
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -58,6 +59,8 @@ def _install_fake_modules(monkeypatch):
         "OpenInferenceInstrumentor",
         FakeOpenInferenceInstrumentor,
     )
+    monkeypatch.setattr(_instrumentation, "_patch_beeai_processors", lambda: None)
+    monkeypatch.setattr(_instrumentation, "_unpatch_beeai_processors", lambda: None)
 
     return SimpleNamespace(
         beeai_instrumentor_class=FakeBeeAIInstrumentor,
@@ -257,3 +260,138 @@ def test_activate_places_cleanup_after_openinference_translator(monkeypatch):
     instrumentor.deactivate()
 
     assert active_span_processor._span_processors == (translator, exporter)
+
+
+def test_beeai_error_patch_preserves_status_and_drops_duplicate_child() -> None:
+    from openinference.instrumentation.beeai._span import SpanWrapper
+    from openinference.semconv.trace import OpenInferenceSpanKindValues, SpanAttributes
+    from opentelemetry.trace import StatusCode
+
+    class ProviderError(RuntimeError):
+        status_code = 404
+
+    provider_error = ProviderError("requested model was not found")
+    error = RuntimeError("Chat Model error")
+    error.__cause__ = provider_error
+    span = SpanWrapper(name="ChatModel", kind=OpenInferenceSpanKindValues.LLM)
+    meta = SimpleNamespace(name="error", created_at=datetime.now(timezone.utc))
+
+    _instrumentation._patch_beeai_processors()
+    try:
+        child = span.child(
+            "error",
+            event=(SimpleNamespace(error=error), meta),
+        )
+    finally:
+        _instrumentation._unpatch_beeai_processors()
+
+    assert child is span
+    assert span.children == []
+    assert span.status == StatusCode.ERROR
+    assert span.attributes["status_code"] == 404
+    assert span.attributes["error.message"] == "Chat Model error"
+    assert SpanAttributes.OUTPUT_VALUE not in span.attributes
+    assert [event.name for event in span.events] == ["error"]
+
+
+def test_beeai_finish_error_cannot_be_reset_to_success() -> None:
+    import asyncio
+
+    from openinference.instrumentation.beeai._span import SpanWrapper
+    from openinference.instrumentation.beeai.processors.base import Processor
+    from openinference.semconv.trace import OpenInferenceSpanKindValues, SpanAttributes
+    from opentelemetry.trace import StatusCode
+
+    error = RuntimeError("deterministic failure")
+    processor = object.__new__(Processor)
+    processor.span = SpanWrapper(
+        name="ChatModel",
+        kind=OpenInferenceSpanKindValues.LLM,
+    )
+    event = SimpleNamespace(error=error, output={"partial": "ignored"})
+    meta = SimpleNamespace(created_at=datetime.now(timezone.utc))
+
+    _instrumentation._patch_beeai_processors()
+    try:
+        asyncio.run(processor.end(event, meta))
+    finally:
+        _instrumentation._unpatch_beeai_processors()
+
+    assert processor.span.status == StatusCode.ERROR
+    assert processor.span.attributes["status_code"] == 500
+    assert processor.span.attributes["error.message"] == "deterministic failure"
+    assert SpanAttributes.OUTPUT_VALUE not in processor.span.attributes
+
+
+def test_beeai_error_marks_active_parent_span(monkeypatch) -> None:
+    from openinference.instrumentation.beeai._span import SpanWrapper
+    from openinference.semconv.trace import OpenInferenceSpanKindValues
+    from opentelemetry.trace import StatusCode
+
+    class ActiveSpan:
+        def __init__(self) -> None:
+            self.attributes = {}
+            self.exceptions = []
+            self.status = SimpleNamespace(status_code=StatusCode.UNSET)
+
+        def is_recording(self) -> bool:
+            return True
+
+        def record_exception(self, error) -> None:
+            self.exceptions.append(error)
+
+        def set_status(self, status) -> None:
+            self.status = status
+
+        def set_attribute(self, key, value) -> None:
+            self.attributes[key] = value
+
+    class ProviderError(RuntimeError):
+        status_code = 404
+
+    active_span = ActiveSpan()
+    monkeypatch.setattr(_instrumentation.trace, "get_current_span", lambda: active_span)
+    wrapped_span = SpanWrapper(name="ChatModel", kind=OpenInferenceSpanKindValues.LLM)
+    error = RuntimeError("Chat Model error")
+    error.__cause__ = ProviderError("requested model was not found")
+
+    _instrumentation._patch_beeai_processors()
+    try:
+        wrapped_span.record_exception(error)
+    finally:
+        _instrumentation._unpatch_beeai_processors()
+
+    assert active_span.status.status_code == StatusCode.ERROR
+    assert active_span.attributes["status_code"] == 404
+    assert active_span.attributes["error.message"] == "Chat Model error"
+    assert active_span.exceptions == [error]
+
+
+def test_beeai_finish_preserves_direct_chat_text_content() -> None:
+    import asyncio
+
+    from openinference.instrumentation.beeai._span import SpanWrapper
+    from openinference.instrumentation.beeai.processors.base import Processor
+    from openinference.semconv.trace import OpenInferenceSpanKindValues, SpanAttributes
+
+    processor = object.__new__(Processor)
+    processor.span = SpanWrapper(
+        name="ChatModel",
+        kind=OpenInferenceSpanKindValues.LLM,
+    )
+    output = SimpleNamespace(get_text_content=lambda: "A complete assistant answer.")
+    event = SimpleNamespace(error=None, output=output)
+    meta = SimpleNamespace(created_at=datetime.now(timezone.utc))
+
+    _instrumentation._patch_beeai_processors()
+    try:
+        asyncio.run(processor.end(event, meta))
+    finally:
+        _instrumentation._unpatch_beeai_processors()
+
+    assert (
+        processor.span.attributes[
+            f"{SpanAttributes.LLM_OUTPUT_MESSAGES}.0.message.content"
+        ]
+        == "A complete assistant answer."
+    )

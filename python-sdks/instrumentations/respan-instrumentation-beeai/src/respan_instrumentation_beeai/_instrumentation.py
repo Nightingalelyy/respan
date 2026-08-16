@@ -3,11 +3,15 @@
 import importlib
 import json
 import logging
+from threading import Lock
 from typing import Any
 
+from openinference.semconv.trace import OpenInferenceSpanKindValues
+from openinference.semconv.trace import SpanAttributes as OISpanAttributes
 from opentelemetry import trace
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 from opentelemetry.semconv_ai import SpanAttributes as TLSpanAttributes
+from opentelemetry.trace import Status, StatusCode
 from respan_instrumentation_openinference import OpenInferenceInstrumentor
 from respan_sdk.constants.span_attributes import (
     RESPAN_SPAN_TOOL_CALLS,
@@ -19,6 +23,10 @@ logger = logging.getLogger(__name__)
 
 BEEAI_INSTRUMENTATION_NAME = "beeai"
 OPENINFERENCE_BEEAI_MODULE = "openinference.instrumentation.beeai"
+OPENINFERENCE_BEEAI_PROCESSOR_MODULE = (
+    "openinference.instrumentation.beeai.processors.base"
+)
+OPENINFERENCE_BEEAI_SPAN_MODULE = "openinference.instrumentation.beeai._span"
 _OFF_CONTRACT_ALIAS_KEYS = (
     RESPAN_SPAN_TOOLS,
     RESPAN_SPAN_TOOL_CALLS,
@@ -34,6 +42,178 @@ _GEN_AI_MESSAGE_PREFIXES = (
     f"{TLSpanAttributes.LLM_COMPLETIONS}.",
 )
 _TOOL_CALLS_SUFFIX = ".tool_calls"
+
+_BEEAI_PATCH_LOCK = Lock()
+_BEEAI_PATCH_REFCOUNT = 0
+_BEEAI_PATCHES: list[tuple[type, str, Any, Any]] = []
+
+
+def _exception_chain(error: BaseException) -> list[BaseException]:
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        next_error = getattr(current, "__cause__", None)
+        if not isinstance(next_error, BaseException):
+            next_error = getattr(current, "__context__", None)
+        if not isinstance(next_error, BaseException):
+            next_error = getattr(current, "_predecessor", None)
+        current = next_error if isinstance(next_error, BaseException) else None
+    return chain
+
+
+def _exception_status_code(error: BaseException) -> int:
+    for item in _exception_chain(error):
+        for value in (
+            getattr(item, "status_code", None),
+            getattr(getattr(item, "response", None), "status_code", None),
+            getattr(getattr(item, "response", None), "status", None),
+        ):
+            if isinstance(value, int) and value >= 400:
+                return value
+    return 500
+
+
+def _exception_message(error: BaseException) -> str:
+    explain = getattr(error, "explain", None)
+    if callable(explain):
+        try:
+            message = explain()
+        except Exception:
+            message = None
+        if isinstance(message, str) and message:
+            return message
+    return str(error) or type(error).__name__
+
+
+def _event_error(value: Any) -> BaseException | None:
+    if isinstance(value, BaseException):
+        return value
+    error = getattr(value, "error", None)
+    return error if isinstance(error, BaseException) else None
+
+
+def _record_active_parent_exception(error: BaseException) -> None:
+    active_span = trace.get_current_span()
+    is_recording = getattr(active_span, "is_recording", None)
+    if not callable(is_recording) or not is_recording():
+        return
+
+    message = _exception_message(error)
+    current_status = getattr(getattr(active_span, "status", None), "status_code", None)
+    if current_status != StatusCode.ERROR:
+        active_span.record_exception(error)
+    active_span.set_status(Status(StatusCode.ERROR, message))
+    active_span.set_attribute("status_code", _exception_status_code(error))
+    active_span.set_attribute("error.message", message)
+
+
+def _record_exception_wrapper(original: Any) -> Any:
+    def record_exception(span: Any, error: BaseException) -> None:
+        original(span, error)
+        _record_active_parent_exception(error)
+        attrs = getattr(span, "attributes", None)
+        if not isinstance(attrs, dict):
+            return
+        # Error text is diagnostic data, not an assistant completion. Keeping
+        # it in output causes platform token/cost estimation for failed calls.
+        attrs.pop(OISpanAttributes.OUTPUT_VALUE, None)
+        attrs.pop(OISpanAttributes.OUTPUT_MIME_TYPE, None)
+        attrs["status_code"] = _exception_status_code(error)
+        attrs["error.message"] = _exception_message(error)
+
+    return record_exception
+
+
+def _child_wrapper(original: Any) -> Any:
+    def child(
+        span: Any,
+        name: str | None = None,
+        event: tuple[Any, Any] | None = None,
+    ) -> Any:
+        error = _event_error(event[0]) if event is not None else None
+        if error is None:
+            return original(span, name=name, event=event)
+
+        meta = event[1]
+        span.add_event(
+            name or getattr(meta, "name", None) or "error",
+            {"error.message": _exception_message(error)},
+            getattr(meta, "created_at", None),
+        )
+        span.record_exception(error)
+        # Error events describe the owning operation; they are not another
+        # model invocation. Returning the owner also supports upstream callers
+        # that immediately call record_exception() on the child result.
+        return span
+
+    return child
+
+
+def _end_wrapper(original: Any) -> Any:
+    async def end(processor: Any, event: Any, meta: Any) -> None:
+        await original(processor, event, meta)
+        output = getattr(event, "output", None)
+        get_text_content = getattr(output, "get_text_content", None)
+        if (
+            getattr(processor.span, "kind", None) == OpenInferenceSpanKindValues.LLM
+            and callable(get_text_content)
+        ):
+            content = get_text_content()
+            if content:
+                processor.span.set_attribute(
+                    f"{OISpanAttributes.LLM_OUTPUT_MESSAGES}.0.message.content",
+                    content,
+                )
+        error = _event_error(event)
+        if error is not None:
+            # Upstream currently resets ERROR to OK when output is also set.
+            processor.span.record_exception(error)
+
+    return end
+
+
+def _patch_beeai_processors() -> None:
+    global _BEEAI_PATCH_REFCOUNT
+
+    with _BEEAI_PATCH_LOCK:
+        if _BEEAI_PATCH_REFCOUNT == 0:
+            processor_module = importlib.import_module(
+                OPENINFERENCE_BEEAI_PROCESSOR_MODULE
+            )
+            span_module = importlib.import_module(OPENINFERENCE_BEEAI_SPAN_MODULE)
+            patch_specs = (
+                (
+                    span_module.SpanWrapper,
+                    "record_exception",
+                    _record_exception_wrapper,
+                ),
+                (span_module.SpanWrapper, "child", _child_wrapper),
+                (processor_module.Processor, "end", _end_wrapper),
+            )
+            for owner, attribute, wrapper_factory in patch_specs:
+                original = getattr(owner, attribute)
+                patched = wrapper_factory(original)
+                setattr(owner, attribute, patched)
+                _BEEAI_PATCHES.append((owner, attribute, original, patched))
+        _BEEAI_PATCH_REFCOUNT += 1
+
+
+def _unpatch_beeai_processors() -> None:
+    global _BEEAI_PATCH_REFCOUNT
+
+    with _BEEAI_PATCH_LOCK:
+        if _BEEAI_PATCH_REFCOUNT == 0:
+            return
+        _BEEAI_PATCH_REFCOUNT -= 1
+        if _BEEAI_PATCH_REFCOUNT != 0:
+            return
+        for owner, attribute, original, patched in reversed(_BEEAI_PATCHES):
+            if getattr(owner, attribute) is patched:
+                setattr(owner, attribute, original)
+        _BEEAI_PATCHES.clear()
 
 
 def _load_openinference_beeai_class() -> type:
@@ -113,6 +293,7 @@ class BeeAIInstrumentor:
         self._instrumentor_kwargs = instrumentor_kwargs
         self._delegate = None
         self._cleanup_processor = None
+        self._processors_patched = False
         self._is_instrumented = False
 
     @staticmethod
@@ -143,6 +324,8 @@ class BeeAIInstrumentor:
             return
 
         try:
+            _patch_beeai_processors()
+            self._processors_patched = True
             self._delegate = OpenInferenceInstrumentor(
                 beeai_instrumentor_class,
                 **self._instrumentor_kwargs,
@@ -159,6 +342,9 @@ class BeeAIInstrumentor:
                     logger.exception("Failed to clean up BeeAI instrumentation")
             self._delegate = None
             self._cleanup_processor = None
+            if self._processors_patched:
+                _unpatch_beeai_processors()
+                self._processors_patched = False
             self._is_instrumented = False
             logger.exception("Failed to activate BeeAI instrumentation")
 
@@ -209,6 +395,9 @@ class BeeAIInstrumentor:
                 self._delegate.deactivate()
             except Exception:
                 logger.exception("Failed to deactivate BeeAI instrumentation")
+        if self._processors_patched:
+            _unpatch_beeai_processors()
+            self._processors_patched = False
         self._delegate = None
         self._is_instrumented = False
         logger.info("BeeAI instrumentation deactivated")
