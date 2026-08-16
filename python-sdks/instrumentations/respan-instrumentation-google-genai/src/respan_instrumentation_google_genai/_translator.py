@@ -197,7 +197,9 @@ def _normalize_parts(parts: Any) -> Any:
     return normalized_parts
 
 
-def _normalize_content(content: Any, *, default_role: str = USER_ROLE) -> dict[str, Any]:
+def _normalize_content(
+    content: Any, *, default_role: str = USER_ROLE
+) -> dict[str, Any]:
     if isinstance(content, str):
         return {ROLE_KEY: default_role, CONTENT_KEY: content}
     if _is_part_like(content) and not _is_content_like(content):
@@ -216,7 +218,10 @@ def normalize_input_messages(contents: Any, config: Any = None) -> list[dict[str
         messages.append(
             _normalize_content(system_instruction, default_role=SYSTEM_ROLE)
             if _is_content_like(system_instruction)
-            else {ROLE_KEY: SYSTEM_ROLE, CONTENT_KEY: _normalize_parts(system_instruction)}
+            else {
+                ROLE_KEY: SYSTEM_ROLE,
+                CONTENT_KEY: _normalize_parts(system_instruction),
+            }
         )
 
     if contents is None:
@@ -313,7 +318,11 @@ def extract_usage(response_or_chunks: Any) -> dict[str, int]:
 
 
 def _iter_response_contents(response_or_chunks: Any) -> Iterable[Any]:
-    chunks = response_or_chunks if isinstance(response_or_chunks, list) else [response_or_chunks]
+    chunks = (
+        response_or_chunks
+        if isinstance(response_or_chunks, list)
+        else [response_or_chunks]
+    )
     for response in chunks:
         if response is None:
             continue
@@ -425,14 +434,21 @@ def extract_tools(config: Any) -> list[dict[str, Any]]:
         for field_name in BUILTIN_TOOL_FIELDS:
             value = _field(tool, field_name)
             if value is not None:
-                normalized_tools.append({TYPE_KEY: field_name, field_name: _dump_value(value)})
+                normalized_tools.append(
+                    {TYPE_KEY: field_name, field_name: _dump_value(value)}
+                )
 
     return normalized_tools
 
 
-def request_kwargs_from_call(kwargs: dict[str, Any]) -> dict[str, Any]:
+def request_kwargs_from_call(
+    *,
+    args: tuple[Any, ...] = (),
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    positional = dict(zip((MODEL_KEY, CONTENTS_KEY, CONFIG_KEY), args))
     return {
-        MODEL_KEY: kwargs.get(MODEL_KEY),
-        CONTENTS_KEY: kwargs.get(CONTENTS_KEY),
-        CONFIG_KEY: kwargs.get(CONFIG_KEY),
+        MODEL_KEY: kwargs.get(MODEL_KEY, positional.get(MODEL_KEY)),
+        CONTENTS_KEY: kwargs.get(CONTENTS_KEY, positional.get(CONTENTS_KEY)),
+        CONFIG_KEY: kwargs.get(CONFIG_KEY, positional.get(CONFIG_KEY)),
     }

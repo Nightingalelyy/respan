@@ -1,0 +1,8 @@
+{
+  "summary": "Restore canonical Elasticsearch, Google ADK, and Google GenAI tracing semantics and repeatable example validation",
+  "packages": {
+    "respan-instrumentation-elasticsearch": "patch",
+    "respan-instrumentation-google-adk": "patch",
+    "respan-instrumentation-google-genai": "patch"
+  }
+}

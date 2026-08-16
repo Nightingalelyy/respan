@@ -19,15 +19,16 @@ from respan_instrumentation_google_genai._constants import (
     GOOGLE_GENAI_MODELS_MODULE,
     MODELS_CLASS_NAME,
 )
-from respan_instrumentation_google_genai._otel_emitter import build_generate_content_attrs
+from respan_instrumentation_google_genai._otel_emitter import (
+    build_generate_content_attrs,
+)
+from respan_instrumentation_google_genai._translator import request_kwargs_from_call
 from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT
 from respan_sdk.constants.span_attributes import (
     LLM_REQUEST_MODEL,
     LLM_USAGE_COMPLETION_TOKENS,
     LLM_USAGE_PROMPT_TOKENS,
     RESPAN_LOG_TYPE,
-    RESPAN_SPAN_TOOL_CALLS,
-    RESPAN_SPAN_TOOLS,
 )
 
 
@@ -83,7 +84,9 @@ def captured_spans(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
 @pytest.fixture()
 def fake_google_genai(monkeypatch: pytest.MonkeyPatch) -> tuple[type[Any], type[Any]]:
     class Models:
-        def generate_content(self, *, model: str, contents: Any, config: Any = None) -> Obj:
+        def generate_content(
+            self, *, model: str, contents: Any, config: Any = None
+        ) -> Obj:
             return make_response(text=f"{model}: {contents}", usage=make_usage())
 
         def generate_content_stream(
@@ -163,7 +166,13 @@ def test_activate_patches_sync_generate_content_and_emits_chat_span(
     assert attrs["gen_ai.completion.0.content"] == "gemini-2.5-flash: Say hello"
     assert attrs[LLM_USAGE_PROMPT_TOKENS] == 3
     assert attrs[LLM_USAGE_COMPLETION_TOKENS] == 4
-    assert json.loads(attrs[RESPAN_SPAN_TOOLS])[0]["function"]["name"] == "weather_tool"
+    assert (
+        json.loads(attrs[SpanAttributes.LLM_REQUEST_FUNCTIONS])[0]["function"]["name"]
+        == "weather_tool"
+    )
+    assert "tools" not in attrs
+    assert "respan.span.tools" not in attrs
+    assert SpanAttributes.TRACELOOP_SPAN_KIND not in attrs
 
     instrumentor.deactivate()
 
@@ -183,7 +192,9 @@ def test_thinking_tokens_are_included_in_output_usage() -> None:
 
     assert attrs[LLM_USAGE_PROMPT_TOKENS] == 100
     assert attrs[LLM_USAGE_COMPLETION_TOKENS] == 850
-    assert attrs["gen_ai.usage.total_tokens"] == 950
+    assert attrs[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] == 950
+    assert attrs["gen_ai.usage.input_tokens"] == 100
+    assert attrs["gen_ai.usage.output_tokens"] == 850
 
 
 def test_stream_emits_one_span_after_iterator_is_consumed(
@@ -207,6 +218,7 @@ def test_stream_emits_one_span_after_iterator_is_consumed(
     assert attrs["gen_ai.completion.0.content"] == "Hello world"
     assert attrs[LLM_USAGE_PROMPT_TOKENS] == 5
     assert attrs[LLM_USAGE_COMPLETION_TOKENS] == 6
+    assert attrs[SpanAttributes.LLM_IS_STREAMING] is True
 
     instrumentor.deactivate()
 
@@ -234,7 +246,12 @@ def test_async_methods_emit_spans(
         assert [chunk.text for chunk in chunks] == ["async ", "stream"]
         assert len(captured_spans) == 2
         assert captured_spans[0]._attributes[LLM_USAGE_PROMPT_TOKENS] == 7
-        assert captured_spans[1]._attributes["gen_ai.completion.0.content"] == "async stream"
+        assert (
+            captured_spans[1]._attributes["gen_ai.completion.0.content"]
+            == "async stream"
+        )
+        assert captured_spans[0]._attributes[SpanAttributes.LLM_IS_STREAMING] is False
+        assert captured_spans[1]._attributes[SpanAttributes.LLM_IS_STREAMING] is True
 
         instrumentor.deactivate()
 
@@ -261,8 +278,7 @@ def test_active_workflow_name_is_attached_to_injected_chat_span() -> None:
         context_api.detach(token)
 
     assert (
-        attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME]
-        == "google_genai_generate_content"
+        attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] == "google_genai_generate_content"
     )
 
 
@@ -285,7 +301,7 @@ def test_automatic_function_calling_history_promotes_tool_calls() -> None:
         response_or_chunks=response,
     )
 
-    tool_calls = json.loads(attrs[RESPAN_SPAN_TOOL_CALLS])
+    tool_calls = json.loads(attrs["gen_ai.completion.0.tool_calls"])
     assert tool_calls == [
         {
             "id": "call_1",
@@ -296,7 +312,9 @@ def test_automatic_function_calling_history_promotes_tool_calls() -> None:
             },
         }
     ]
-    assert attrs["gen_ai.completion.0.tool_calls"][0]["function"]["name"] == "get_weather"
+    assert tool_calls[0]["function"]["name"] == "get_weather"
+    assert "tool_calls" not in attrs
+    assert "respan.span.tool_calls" not in attrs
 
 
 def test_error_path_emits_failed_span(
@@ -320,9 +338,57 @@ def test_error_path_emits_failed_span(
     span = captured_spans[0]
     assert span.status.status_code.name == "ERROR"
     assert span._attributes["error.message"] == "boom"
+    assert json.loads(span._attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == {
+        "error": "boom",
+        "status_code": 500,
+    }
     assert span._attributes[LLM_REQUEST_MODEL] == "gemini-2.5-flash"
 
     instrumentor.deactivate()
+
+
+def test_error_path_preserves_provider_status_code(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_google_genai: tuple[type[Any], type[Any]],
+    captured_spans: list[Any],
+) -> None:
+    Models, _ = fake_google_genai
+
+    class APIError(RuntimeError):
+        def __init__(self) -> None:
+            super().__init__("model unavailable")
+            self.response = Obj(status_code=503)
+
+    def raise_error(self: Any, *args: Any, **kwargs: Any) -> Any:
+        raise APIError()
+
+    monkeypatch.setattr(Models, GENERATE_CONTENT_METHOD_NAME, raise_error)
+    instrumentor = GoogleGenAIInstrumentor()
+    instrumentor.activate()
+
+    with pytest.raises(APIError, match="model unavailable"):
+        Models().generate_content("gemini-3-flash-preview", "fail")
+
+    attrs = captured_spans[0]._attributes
+    assert attrs["status_code"] == 503
+    assert attrs[LLM_REQUEST_MODEL] == "gemini-3-flash-preview"
+    assert "fail" in attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT]
+    assert (
+        json.loads(attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT])["status_code"] == 503
+    )
+
+    instrumentor.deactivate()
+
+
+def test_request_kwargs_support_positional_sdk_arguments() -> None:
+    assert request_kwargs_from_call(
+        args=("gemini-3-flash-preview", "Hello", {"temperature": 0}),
+        kwargs={},
+    ) == {
+        "model": "gemini-3-flash-preview",
+        "contents": "Hello",
+        "config": {"temperature": 0},
+    }
 
 
 def test_deactivate_restores_original_methods(
@@ -343,4 +409,7 @@ def test_deactivate_restores_original_methods(
     assert getattr(Models, GENERATE_CONTENT_METHOD_NAME) is original_sync
     assert getattr(Models, GENERATE_CONTENT_STREAM_METHOD_NAME) is original_sync_stream
     assert getattr(AsyncModels, GENERATE_CONTENT_METHOD_NAME) is original_async
-    assert getattr(AsyncModels, GENERATE_CONTENT_STREAM_METHOD_NAME) is original_async_stream
+    assert (
+        getattr(AsyncModels, GENERATE_CONTENT_STREAM_METHOD_NAME)
+        is original_async_stream
+    )
