@@ -49,6 +49,12 @@ def _status_code_from_response(response: Any) -> int:
     return value if isinstance(value, int) else 200
 
 
+def _status_code_from_exception(error: BaseException) -> int:
+    response = getattr(error, "response", None)
+    status_code = _status_code_from_response(response)
+    return status_code if status_code >= 400 else 500
+
+
 class _InstrumentedEventStream:
     def __init__(
         self,
@@ -152,7 +158,7 @@ def _wrap_make_api_call(original: Any) -> Any:
                 api_params=api_params,
                 start_ns=start_ns,
                 error_message=str(exc),
-                status_code=500,
+                status_code=_status_code_from_exception(exc),
             )
             raise
 

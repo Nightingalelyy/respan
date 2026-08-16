@@ -102,6 +102,10 @@ def build_arize_span_attributes(
     }
 
     status_code = _status_code_from_result(result)
+    if error is not None:
+        status_code = 500
+        attrs["error.message"] = str(error)
+    attrs["status_code"] = status_code
     if status_code != 200:
         attrs[ARIZE_METADATA_STATUS_CODE] = status_code
 

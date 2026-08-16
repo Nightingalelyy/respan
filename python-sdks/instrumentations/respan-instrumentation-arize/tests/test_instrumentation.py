@@ -4,8 +4,10 @@ import asyncio
 import logging
 import sys
 from types import ModuleType
+from typing import Any
 
 import pytest
+from opentelemetry.trace import StatusCode
 
 from respan_instrumentation_arize import ArizeInstrumentor
 from respan_instrumentation_arize import _instrumentation
@@ -190,6 +192,33 @@ def test_error_methods_emit_error_span(monkeypatch) -> None:
     assert emitted[0]["resource"] == "error_resource"
     assert emitted[0]["method_name"] == "explode"
     assert isinstance(emitted[0]["error"], RuntimeError)
+
+
+def test_error_span_exposes_backend_visible_status_and_message(monkeypatch) -> None:
+    from respan_instrumentation_arize._span_emitter import emit_arize_span
+
+    spans: list[Any] = []
+    monkeypatch.setattr(
+        "respan_instrumentation_arize._span_emitter.inject_span",
+        lambda span: spans.append(span) or True,
+    )
+
+    emitted = emit_arize_span(
+        resource="datasets",
+        method_name="get",
+        args=(),
+        kwargs={"dataset": "missing"},
+        result=None,
+        start_time_ns=1,
+        end_time_ns=2,
+        error=RuntimeError("dataset unavailable"),
+    )
+
+    assert emitted is True
+    assert len(spans) == 1
+    assert spans[0]._attributes["status_code"] == 500
+    assert spans[0]._attributes["error.message"] == "dataset unavailable"
+    assert spans[0].status.status_code is StatusCode.ERROR
 
 
 def test_activate_skips_when_respan_tracing_is_disabled(monkeypatch, caplog) -> None:

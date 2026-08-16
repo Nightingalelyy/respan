@@ -1,95 +1,216 @@
-"""Normalize native AutoGen OTel spans before Respan export."""
+"""Remove AutoGen runtime noise and repair AutoGen OpenInference payloads."""
 
 from __future__ import annotations
 
+import json
+import re
+from threading import Lock
 from typing import Any
 
+from openinference.semconv.trace import (
+    MessageAttributes,
+    OpenInferenceSpanKindValues,
+    SpanAttributes as OISpanAttributes,
+)
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
-from opentelemetry.semconv._incubating.attributes.gen_ai_attributes import (
-    GEN_AI_AGENT_NAME,
-    GEN_AI_OPERATION_NAME,
-    GEN_AI_SYSTEM,
-    GEN_AI_TOOL_NAME,
-)
-from opentelemetry.semconv_ai import SpanAttributes
+from opentelemetry.semconv_ai import SpanAttributes as TLSpanAttributes
 
-from respan_sdk.constants.llm_logging import LOG_TYPE_AGENT, LOG_TYPE_TOOL
-from respan_sdk.constants.span_attributes import (
-    RESPAN_LOG_TYPE,
-)
 
 AUTOGEN_CORE_SCOPE_NAME = "autogen-core"
+AUTOGEN_RUNTIME_SCOPE_PREFIX = "autogen "
+AUTOGEN_OPENINFERENCE_SCOPE_NAME = (
+    "openinference.instrumentation.autogen_agentchat"
+)
 AUTOGEN_OPERATION_INVOKE_AGENT = "invoke_agent"
 AUTOGEN_OPERATION_EXECUTE_TOOL = "execute_tool"
 
-_AUTOGEN_OPERATION_LOG_TYPES = {
-    AUTOGEN_OPERATION_INVOKE_AGENT: LOG_TYPE_AGENT,
-    AUTOGEN_OPERATION_EXECUTE_TOOL: LOG_TYPE_TOOL,
-}
+_OI_INPUT_MESSAGE_PREFIX = "llm.input_messages."
+_FUNCTION_RESULT_RE = re.compile(
+    r"^llm\.input_messages\.(\d+)\.(?:message\.)?function\.(\d+)$"
+)
+_OI_FIRST_OUTPUT_CONTENT = (
+    f"{OISpanAttributes.LLM_OUTPUT_MESSAGES}.0."
+    f"{MessageAttributes.MESSAGE_CONTENT}"
+)
 
 
-def _get_mutable_attributes(span: ReadableSpan) -> dict[str, Any] | None:
-    # An ended span's ``_attributes`` is a ``BoundedAttributes`` that is frozen
-    # (``_immutable``) on opentelemetry-sdk once the span has ended, so writing
-    # to it in place raises ``TypeError``. Return a mutable copy; the caller
-    # reassigns ``span._attributes`` after normalizing.
-    attrs = getattr(span, "_attributes", None)
-    if attrs is None:
-        return None
-    return dict(attrs)
-
-
-def _get_scope_name(span: ReadableSpan) -> str | None:
+def _get_scope_name(span: Any) -> str | None:
     scope = getattr(span, "instrumentation_scope", None)
     return getattr(scope, "name", None)
 
 
-def _get_entity_name(attrs: dict[str, Any], span_name: str) -> str:
-    return (
-        attrs.get(GEN_AI_AGENT_NAME)
-        or attrs.get(GEN_AI_TOOL_NAME)
-        or span_name
+def _is_native_scope(scope_name: str | None) -> bool:
+    return scope_name == AUTOGEN_CORE_SCOPE_NAME or bool(
+        scope_name and scope_name.startswith(AUTOGEN_RUNTIME_SCOPE_PREFIX)
     )
 
 
-class AutoGenNativeSpanProcessor(SpanProcessor):
-    """Map AutoGen's native GenAI spans to non-LLM Respan log types.
+def _get_span_id(span: Any) -> int | None:
+    get_context = getattr(span, "get_span_context", None)
+    context = get_context() if callable(get_context) else getattr(span, "context", None)
+    span_id = getattr(context, "span_id", None)
+    return span_id if isinstance(span_id, int) and span_id else None
 
-    AutoGen AgentChat emits native spans from the ``autogen-core`` scope with
-    ``gen_ai.system=autogen`` for agent and tool operations. Respan's generic
-    GenAI exporter treats GenAI system spans without a request type as chat
-    spans, so this processor marks native agent/tool spans explicitly and
-    removes the LLM-only marker before export.
+
+def _get_parent(span: Any) -> Any:
+    return getattr(span, "parent", None)
+
+
+def _parse_result(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return dict(value)
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    return dict(parsed) if isinstance(parsed, dict) else None
+
+
+def _normalize_function_result_messages(attrs: dict[str, Any]) -> None:
+    """Promote AutoGen's vendor-only function result fields to messages.
+
+    OpenInference AutoGen 0.1.11 stores a function-result input as
+    ``message.function.N`` while emitting only ``role=function``. The generic
+    translator does not understand that vendor extension, so Respan receives
+    an empty history entry. Preserve the complete result as canonical indexed
+    message fields before the generic translator removes the raw OI keys.
     """
 
-    def on_start(self, span, parent_context=None) -> None:
+    results_by_message: dict[int, list[tuple[int, dict[str, Any]]]] = {}
+    raw_result_keys: list[str] = []
+    for key, value in attrs.items():
+        match = _FUNCTION_RESULT_RE.match(key)
+        if match is None:
+            continue
+        result = _parse_result(value)
+        if result is None:
+            continue
+        message_index = int(match.group(1))
+        result_index = int(match.group(2))
+        results_by_message.setdefault(message_index, []).append(
+            (result_index, result)
+        )
+        raw_result_keys.append(key)
+
+    for message_index, indexed_results in results_by_message.items():
+        results = [result for _, result in sorted(indexed_results)]
+        prefix = f"{_OI_INPUT_MESSAGE_PREFIX}{message_index}.message"
+        attrs[f"{prefix}.role"] = "tool"
+        attrs.pop(f"{prefix}.message.role", None)
+        attrs[f"{prefix}.content"] = json.dumps(
+            results[0] if len(results) == 1 else results,
+            default=str,
+            separators=(",", ":"),
+        )
+
+        if len(results) == 1:
+            result = results[0]
+            call_id = result.get("call_id")
+            name = result.get("name")
+            canonical_prefix = f"gen_ai.prompt.{message_index}"
+            if call_id not in (None, ""):
+                attrs[f"{canonical_prefix}.tool_call_id"] = str(call_id)
+            if name not in (None, ""):
+                attrs[f"{canonical_prefix}.name"] = str(name)
+
+    for key in raw_result_keys:
+        attrs.pop(key, None)
+
+
+def _agent_output_from_llm_attrs(attrs: dict[str, Any]) -> str | None:
+    content = attrs.get(_OI_FIRST_OUTPUT_CONTENT)
+    if content not in (None, ""):
+        return json.dumps(
+            {"content": content, "role": "assistant"},
+            default=str,
+            separators=(",", ":"),
+        )
+
+    output = attrs.get(OISpanAttributes.OUTPUT_VALUE)
+    if output in (None, ""):
         return None
+    if isinstance(output, str):
+        return output
+    return json.dumps(output, default=str, separators=(",", ":"))
+
+
+class AutoGenNativeSpanProcessor(SpanProcessor):
+    """Keep only the meaningful OpenInference AutoGen operation tree.
+
+    AutoGen Core emits internal runtime spans for agent creation, message bus
+    publish/process/ack operations, native agent invocations, and native tool
+    execution. OpenInference AgentChat already emits content-complete logical
+    agent, LLM, and tool spans for the same work. Native spans are therefore
+    made unprocessable, and any meaningful child is reparented to the nearest
+    non-native ancestor before its ``ReadableSpan`` is created.
+    """
+
+    def __init__(self) -> None:
+        self._native_export_parents: dict[int, Any] = {}
+        self._agent_outputs: dict[int, str] = {}
+        self._lock = Lock()
+
+    def on_start(self, span: Any, parent_context: Any = None) -> None:
+        parent = _get_parent(span)
+        parent_id = getattr(parent, "span_id", None)
+
+        with self._lock:
+            if parent_id in self._native_export_parents:
+                export_parent = self._native_export_parents[parent_id]
+                span._parent = export_parent
+            else:
+                export_parent = parent
+
+            if _is_native_scope(_get_scope_name(span)):
+                span_id = _get_span_id(span)
+                if span_id is not None:
+                    self._native_export_parents[span_id] = export_parent
 
     def on_end(self, span: ReadableSpan) -> None:
-        if _get_scope_name(span) != AUTOGEN_CORE_SCOPE_NAME:
+        scope_name = _get_scope_name(span)
+        if scope_name == AUTOGEN_OPENINFERENCE_SCOPE_NAME:
+            attrs = dict(getattr(span, "_attributes", None) or {})
+            span_kind = attrs.get(OISpanAttributes.OPENINFERENCE_SPAN_KIND)
+
+            if span_kind == OpenInferenceSpanKindValues.LLM.value:
+                agent_id = getattr(_get_parent(span), "span_id", None)
+                output = _agent_output_from_llm_attrs(attrs)
+                if isinstance(agent_id, int) and agent_id and output is not None:
+                    with self._lock:
+                        self._agent_outputs[agent_id] = output
+            elif span_kind == OpenInferenceSpanKindValues.AGENT.value:
+                span_id = _get_span_id(span)
+                if span_id is not None:
+                    with self._lock:
+                        output = self._agent_outputs.pop(span_id, None)
+                    if output is not None:
+                        attrs.setdefault(
+                            TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT,
+                            output,
+                        )
+
+            _normalize_function_result_messages(attrs)
+            span._attributes = attrs
             return
 
-        attrs = _get_mutable_attributes(span)
-        if attrs is None:
+        if not _is_native_scope(scope_name):
             return
 
-        log_type = _AUTOGEN_OPERATION_LOG_TYPES.get(attrs.get(GEN_AI_OPERATION_NAME))
-        if log_type is None:
-            return
+        span_id = _get_span_id(span)
+        if span_id is not None:
+            with self._lock:
+                self._native_export_parents.pop(span_id, None)
 
-        attrs[RESPAN_LOG_TYPE] = log_type
-        attrs.setdefault(
-            SpanAttributes.TRACELOOP_ENTITY_NAME,
-            _get_entity_name(attrs, span.name),
-        )
-        attrs.pop(GEN_AI_SYSTEM, None)
-        attrs.pop(SpanAttributes.LLM_REQUEST_TYPE, None)
-        # Reassign the normalized copy; the original frozen BoundedAttributes
-        # cannot be mutated in place after the span has ended.
-        span._attributes = attrs
+        # The downstream Respan filter rejects an attribute-free runtime span.
+        # Reassigning also works for ended spans whose BoundedAttributes froze.
+        span._attributes = {}
 
     def shutdown(self) -> None:
-        return None
+        with self._lock:
+            self._native_export_parents.clear()
+            self._agent_outputs.clear()
 
     def force_flush(self, timeout_millis: int = 30000) -> bool:
         return True

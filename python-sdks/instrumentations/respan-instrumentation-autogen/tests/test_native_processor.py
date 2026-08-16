@@ -1,103 +1,260 @@
+import json
 from types import SimpleNamespace
 
-from opentelemetry.semconv._incubating.attributes.gen_ai_attributes import (
-    GEN_AI_AGENT_NAME,
-    GEN_AI_OPERATION_NAME,
-    GEN_AI_SYSTEM,
-    GEN_AI_TOOL_NAME,
+from opentelemetry.attributes import BoundedAttributes
+from opentelemetry.trace import SpanContext, TraceFlags
+from opentelemetry.semconv_ai import SpanAttributes as TLSpanAttributes
+from openinference.semconv.trace import (
+    MessageAttributes,
+    OpenInferenceSpanKindValues,
+    SpanAttributes as OISpanAttributes,
 )
-from opentelemetry.semconv_ai import SpanAttributes
 
 from respan_instrumentation_autogen._native_processor import (
     AUTOGEN_CORE_SCOPE_NAME,
-    AUTOGEN_OPERATION_EXECUTE_TOOL,
-    AUTOGEN_OPERATION_INVOKE_AGENT,
+    AUTOGEN_OPENINFERENCE_SCOPE_NAME,
     AutoGenNativeSpanProcessor,
 )
-from respan_sdk.constants.llm_logging import LOG_TYPE_AGENT, LOG_TYPE_TOOL
-from respan_sdk.constants.span_attributes import (
-    RESPAN_LOG_TYPE,
-)
+from respan_instrumentation_openinference._translator import OpenInferenceTranslator
 
 
-def _make_span(attrs: dict, *, scope_name: str = AUTOGEN_CORE_SCOPE_NAME):
+def _context(span_id: int) -> SpanContext:
+    return SpanContext(
+        trace_id=1,
+        span_id=span_id,
+        is_remote=False,
+        trace_flags=TraceFlags(TraceFlags.SAMPLED),
+    )
+
+
+def _make_span(
+    attrs: dict,
+    *,
+    scope_name: str,
+    span_id: int = 2,
+    parent: SpanContext | None = None,
+):
+    context = _context(span_id)
     return SimpleNamespace(
         name="test-span",
         _attributes=dict(attrs),
+        _parent=parent,
+        parent=parent,
         instrumentation_scope=SimpleNamespace(name=scope_name),
+        context=context,
+        get_span_context=lambda: context,
     )
 
 
-def test_processor_maps_native_invoke_agent_to_agent_log_type():
-    span = _make_span({
-        GEN_AI_OPERATION_NAME: AUTOGEN_OPERATION_INVOKE_AGENT,
-        GEN_AI_SYSTEM: "autogen",
-        GEN_AI_AGENT_NAME: "planner",
-    })
-
-    AutoGenNativeSpanProcessor().on_end(span)
-
-    assert span._attributes[RESPAN_LOG_TYPE] == LOG_TYPE_AGENT
-    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "planner"
-    assert GEN_AI_SYSTEM not in span._attributes
-    assert SpanAttributes.LLM_REQUEST_TYPE not in span._attributes
-
-
-def test_processor_maps_native_execute_tool_to_tool_log_type():
-    span = _make_span({
-        GEN_AI_OPERATION_NAME: AUTOGEN_OPERATION_EXECUTE_TOOL,
-        GEN_AI_SYSTEM: "autogen",
-        GEN_AI_TOOL_NAME: "estimate_latency",
-        SpanAttributes.LLM_REQUEST_TYPE: "chat",
-    })
-
-    AutoGenNativeSpanProcessor().on_end(span)
-
-    assert span._attributes[RESPAN_LOG_TYPE] == LOG_TYPE_TOOL
-    assert (
-        span._attributes[SpanAttributes.TRACELOOP_ENTITY_NAME]
-        == "estimate_latency"
-    )
-    assert GEN_AI_SYSTEM not in span._attributes
-    assert SpanAttributes.LLM_REQUEST_TYPE not in span._attributes
-
-
-def test_processor_handles_immutable_ended_span_attributes():
-    """Regression: a real *ended* span exposes ``_attributes`` as a frozen
-    ``BoundedAttributes``. Mutating it in place raises ``TypeError`` (which
-    previously propagated out of the user's ``agent.run()``). The processor
-    must copy + reassign instead."""
-    from opentelemetry.attributes import BoundedAttributes
-
-    frozen = BoundedAttributes(
-        attributes={
-            GEN_AI_OPERATION_NAME: AUTOGEN_OPERATION_INVOKE_AGENT,
-            GEN_AI_SYSTEM: "autogen",
-            GEN_AI_AGENT_NAME: "planner",
-        },
-        immutable=True,
-    )
-    span = SimpleNamespace(
-        name="test-span",
-        _attributes=frozen,
-        instrumentation_scope=SimpleNamespace(name=AUTOGEN_CORE_SCOPE_NAME),
-    )
-
-    # Must not raise TypeError.
-    AutoGenNativeSpanProcessor().on_end(span)
-
-    assert span._attributes[RESPAN_LOG_TYPE] == LOG_TYPE_AGENT
-    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "planner"
-    assert GEN_AI_SYSTEM not in span._attributes
-
-
-def test_processor_ignores_non_autogen_core_scope():
+def test_native_runtime_span_is_removed_from_export() -> None:
     span = _make_span(
         {
-            GEN_AI_OPERATION_NAME: AUTOGEN_OPERATION_INVOKE_AGENT,
-            GEN_AI_SYSTEM: "autogen",
+            "gen_ai.operation.name": "create_agent",
+            "gen_ai.system": "autogen",
+            "traceloop.entity.path": "workflow.agent",
+            "llm.request.type": "chat",
+            "respan.entity.log_type": "chat",
         },
-        scope_name="openinference.instrumentation.autogen_agentchat",
+        scope_name=AUTOGEN_CORE_SCOPE_NAME,
+    )
+
+    AutoGenNativeSpanProcessor().on_end(span)
+
+    assert span._attributes == {}
+
+
+def test_named_autogen_runtime_scope_is_removed_from_export() -> None:
+    span = _make_span(
+        {"messaging.operation": "publish"},
+        scope_name="autogen SingleThreadedAgentRuntime",
+    )
+
+    AutoGenNativeSpanProcessor().on_end(span)
+
+    assert span._attributes == {}
+
+
+def test_native_runtime_span_handles_frozen_attributes() -> None:
+    span = _make_span({}, scope_name=AUTOGEN_CORE_SCOPE_NAME)
+    span._attributes = BoundedAttributes(
+        attributes={"gen_ai.operation.name": "publish"},
+        immutable=True,
+    )
+
+    AutoGenNativeSpanProcessor().on_end(span)
+
+    assert span._attributes == {}
+
+
+def test_meaningful_child_is_reparented_around_native_runtime_span() -> None:
+    processor = AutoGenNativeSpanProcessor()
+    workflow = _context(10)
+    native = _make_span(
+        {"gen_ai.operation.name": "invoke_agent"},
+        scope_name=AUTOGEN_CORE_SCOPE_NAME,
+        span_id=20,
+        parent=workflow,
+    )
+    processor.on_start(native)
+
+    child = _make_span(
+        {"openinference.span.kind": "AGENT"},
+        scope_name=AUTOGEN_OPENINFERENCE_SCOPE_NAME,
+        span_id=30,
+        parent=native.context,
+    )
+    processor.on_start(child)
+
+    assert child._parent is workflow
+
+    processor.on_end(native)
+    assert processor._native_export_parents == {}
+
+
+def test_nested_native_runtime_spans_share_nearest_export_parent() -> None:
+    processor = AutoGenNativeSpanProcessor()
+    workflow = _context(10)
+    outer = _make_span(
+        {},
+        scope_name=AUTOGEN_CORE_SCOPE_NAME,
+        span_id=20,
+        parent=workflow,
+    )
+    processor.on_start(outer)
+    inner = _make_span(
+        {},
+        scope_name=AUTOGEN_CORE_SCOPE_NAME,
+        span_id=21,
+        parent=outer.context,
+    )
+    processor.on_start(inner)
+
+    child = _make_span(
+        {},
+        scope_name=AUTOGEN_OPENINFERENCE_SCOPE_NAME,
+        span_id=30,
+        parent=inner.context,
+    )
+    processor.on_start(child)
+
+    assert child._parent is workflow
+
+
+def test_function_result_history_is_preserved_canonically() -> None:
+    span = _make_span(
+        {
+            "openinference.span.kind": "LLM",
+            "llm.input_messages.2.message.role": "function",
+            "llm.input_messages.2.function.0": json.dumps(
+                {
+                    "name": "estimate_latency",
+                    "content": "tracing-api: about 155 ms",
+                    "call_id": "call-1",
+                    "is_error": False,
+                }
+            ),
+        },
+        scope_name=AUTOGEN_OPENINFERENCE_SCOPE_NAME,
+    )
+
+    AutoGenNativeSpanProcessor().on_end(span)
+
+    assert span._attributes["llm.input_messages.2.message.role"] == "tool"
+    assert "llm.input_messages.2.function.0" not in span._attributes
+    assert json.loads(span._attributes["llm.input_messages.2.message.content"]) == {
+        "name": "estimate_latency",
+        "content": "tracing-api: about 155 ms",
+        "call_id": "call-1",
+        "is_error": False,
+    }
+    assert span._attributes["gen_ai.prompt.2.tool_call_id"] == "call-1"
+    assert span._attributes["gen_ai.prompt.2.name"] == "estimate_latency"
+
+    OpenInferenceTranslator().on_end(span)
+    assert span._attributes["gen_ai.prompt.2.role"] == "tool"
+    assert span._attributes["gen_ai.prompt.2.tool_call_id"] == "call-1"
+    assert span._attributes["gen_ai.prompt.2.name"] == "estimate_latency"
+    assert json.loads(span._attributes["gen_ai.prompt.2.content"])["content"] == (
+        "tracing-api: about 155 ms"
+    )
+
+
+def test_final_llm_output_is_promoted_to_owning_agent() -> None:
+    processor = AutoGenNativeSpanProcessor()
+    workflow = _context(10)
+    agent = _make_span(
+        {OISpanAttributes.OPENINFERENCE_SPAN_KIND: "AGENT"},
+        scope_name=AUTOGEN_OPENINFERENCE_SCOPE_NAME,
+        span_id=20,
+        parent=workflow,
+    )
+    llm = _make_span(
+        {
+            OISpanAttributes.OPENINFERENCE_SPAN_KIND: (
+                OpenInferenceSpanKindValues.LLM.value
+            ),
+            (
+                f"{OISpanAttributes.LLM_OUTPUT_MESSAGES}.0."
+                f"{MessageAttributes.MESSAGE_CONTENT}"
+            ): "final answer",
+        },
+        scope_name=AUTOGEN_OPENINFERENCE_SCOPE_NAME,
+        span_id=30,
+        parent=agent.context,
+    )
+
+    processor.on_end(llm)
+    processor.on_end(agent)
+
+    assert json.loads(
+        agent._attributes[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT]
+    ) == {"content": "final answer", "role": "assistant"}
+    assert processor._agent_outputs == {}
+
+
+def test_latest_llm_output_wins_for_tool_reflection_agent() -> None:
+    processor = AutoGenNativeSpanProcessor()
+    agent = _make_span(
+        {OISpanAttributes.OPENINFERENCE_SPAN_KIND: "AGENT"},
+        scope_name=AUTOGEN_OPENINFERENCE_SCOPE_NAME,
+        span_id=20,
+        parent=_context(10),
+    )
+    tool_request = _make_span(
+        {
+            OISpanAttributes.OPENINFERENCE_SPAN_KIND: "LLM",
+            OISpanAttributes.OUTPUT_VALUE: "tool request",
+        },
+        scope_name=AUTOGEN_OPENINFERENCE_SCOPE_NAME,
+        span_id=30,
+        parent=agent.context,
+    )
+    final_llm = _make_span(
+        {
+            OISpanAttributes.OPENINFERENCE_SPAN_KIND: "LLM",
+            (
+                f"{OISpanAttributes.LLM_OUTPUT_MESSAGES}.0."
+                f"{MessageAttributes.MESSAGE_CONTENT}"
+            ): "reflected answer",
+        },
+        scope_name=AUTOGEN_OPENINFERENCE_SCOPE_NAME,
+        span_id=31,
+        parent=agent.context,
+    )
+
+    processor.on_end(tool_request)
+    processor.on_end(final_llm)
+    processor.on_end(agent)
+
+    assert json.loads(
+        agent._attributes[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT]
+    )["content"] == "reflected answer"
+
+
+def test_processor_ignores_unrelated_scope() -> None:
+    span = _make_span(
+        {"gen_ai.operation.name": "invoke_agent"},
+        scope_name="other-instrumentation",
     )
     original_attrs = dict(span._attributes)
 

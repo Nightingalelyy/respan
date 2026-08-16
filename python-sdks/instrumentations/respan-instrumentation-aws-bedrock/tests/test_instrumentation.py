@@ -6,6 +6,7 @@ from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 from opentelemetry import context as context_api
 from opentelemetry.semconv._incubating.attributes import (
     gen_ai_attributes as GenAIAttributes,
@@ -231,6 +232,7 @@ def test_converse_promotes_tools_and_tool_calls_without_aliases(
                                 "json": {
                                     "type": "object",
                                     "properties": {"city": {"type": "string"}},
+                                    "required": ["city"],
                                 }
                             },
                         }
@@ -244,6 +246,11 @@ def test_converse_promotes_tools_and_tool_calls_without_aliases(
     tools = json.loads(attrs[TLSpanAttributes.LLM_REQUEST_FUNCTIONS])
     tool_calls = json.loads(attrs[f"{TLSpanAttributes.LLM_COMPLETIONS}.0.tool_calls"])
     assert tools[0]["function"]["name"] == "get_weather"
+    assert tools[0]["function"]["parameters"] == {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+    }
     assert tool_calls[0]["function"]["name"] == "get_weather"
     assert tool_calls[0]["function"]["arguments"] == '{"city": "Tokyo"}'
     assert not OFF_CONTRACT_ALIASES.intersection(attrs)
@@ -318,3 +325,68 @@ def test_active_workflow_name_is_attached_to_chat_span() -> None:
         context_api.detach(token)
 
     assert attrs[TLSpanAttributes.TRACELOOP_WORKFLOW_NAME] == "aws_bedrock_invoke_model"
+
+
+def test_client_error_preserves_http_status_for_backend(
+    fake_botocore: type[Any],
+    captured_spans: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_with_not_found(
+        self: Any,
+        operation_name: str,
+        api_params: dict[str, Any],
+    ) -> Any:
+        raise ClientError(
+            {
+                "Error": {"Code": "ResourceNotFoundException", "Message": "missing"},
+                "ResponseMetadata": {"HTTPStatusCode": 404},
+            },
+            operation_name,
+        )
+
+    monkeypatch.setattr(fake_botocore, "_make_api_call", fail_with_not_found)
+    instrumentor = AWSBedrockInstrumentor()
+    instrumentor.activate()
+
+    with pytest.raises(ClientError):
+        fake_botocore()._make_api_call(
+            "Converse",
+            {"modelId": "missing-model", "messages": []},
+        )
+
+    assert len(captured_spans) == 1
+    attrs = captured_spans[0]._attributes
+    assert attrs["status_code"] == 404
+    assert "ResourceNotFoundException" in attrs["error.message"]
+    assert captured_spans[0].status.status_code.name == "ERROR"
+
+    instrumentor.deactivate()
+
+
+def test_unknown_exception_uses_backend_visible_500(
+    fake_botocore: type[Any],
+    captured_spans: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(
+        self: Any,
+        operation_name: str,
+        api_params: dict[str, Any],
+    ) -> Any:
+        raise RuntimeError("transport failed")
+
+    monkeypatch.setattr(fake_botocore, "_make_api_call", fail)
+    instrumentor = AWSBedrockInstrumentor()
+    instrumentor.activate()
+
+    with pytest.raises(RuntimeError, match="transport failed"):
+        fake_botocore()._make_api_call(
+            "InvokeModel",
+            {"modelId": "model", "body": "{}"},
+        )
+
+    assert captured_spans[0]._attributes["status_code"] == 500
+    assert captured_spans[0]._attributes["error.message"] == "transport failed"
+
+    instrumentor.deactivate()
