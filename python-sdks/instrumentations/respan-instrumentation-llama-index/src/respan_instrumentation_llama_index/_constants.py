@@ -12,7 +12,6 @@ LLAMA_INDEX_ROOT_MODULE = "llama_index_instrumentation"
 LLAMA_INDEX_CHAT_SPAN_NAME = "llama_index.chat"
 LLAMA_INDEX_COMPLETION_SPAN_NAME = "llama_index.completion"
 LLAMA_INDEX_EMBEDDING_SPAN_NAME = "llama_index.embedding"
-LLAMA_INDEX_TOOL_SPAN_PREFIX = "llama_index.tool."
 LLAMA_INDEX_DEFAULT_TOOL_NAME = "llama_index_tool"
 
 LLAMA_INDEX_RUN_ID_TAG = "llamaindex.run_id"

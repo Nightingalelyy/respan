@@ -6,19 +6,22 @@ import functools
 import importlib
 import logging
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from opentelemetry import trace
+from opentelemetry.semconv_ai import SpanAttributes
+from respan_tracing.core.tracer import RespanTracer
 
 from respan_instrumentation_livekit._constants import (
     LIVEKIT_INSTRUMENTATION_NAME,
+    LIVEKIT_RESPAN_PROVIDER_NAME_ATTR,
     LIVEKIT_RESPAN_TOOL_DEFINITIONS_ATTR,
 )
 from respan_instrumentation_livekit._otel_emitter import emit_livekit_tool_span
 from respan_instrumentation_livekit._processor import LiveKitSpanProcessor
 from respan_instrumentation_livekit._serialization import get_value, safe_json
 from respan_instrumentation_livekit._translator import normalize_livekit_tools
-from respan_tracing.core.tracer import RespanTracer
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,34 @@ _PATCHED_UTILS_MODULE: Any = None
 _PATCHED_LLM_MODULE: Any = None
 _PATCHED_LLM_STREAM_CLASS: Any = None
 _ACTIVE_INSTANCES = 0
+
+_MODEL_PROVIDER_PREFIXES = (
+    ("claude", "anthropic"),
+    ("gemini", "google"),
+    ("gpt-", "openai"),
+    ("o1", "openai"),
+    ("o3", "openai"),
+    ("o4", "openai"),
+)
+
+
+def _provider_name_from_llm(llm: Any) -> str | None:
+    module_parts = type(llm).__module__.lower().split(".")
+    try:
+        plugin_index = module_parts.index("plugins")
+        plugin_name = module_parts[plugin_index + 1]
+    except (ValueError, IndexError):
+        plugin_name = ""
+    if plugin_name:
+        return "openai" if plugin_name in {"azure", "azure_openai"} else plugin_name
+
+    model = str(get_value(llm, "model") or "").lower()
+    for prefix, provider_name in _MODEL_PROVIDER_PREFIXES:
+        if model.startswith(prefix):
+            return provider_name
+
+    provider = get_value(llm, "provider")
+    return str(provider).lower() if provider else None
 
 
 def _active_span_processors() -> tuple[Any, tuple[Any, ...] | None]:
@@ -74,7 +105,7 @@ def _patch_execute_function_call(utils_module: Any, llm_module: Any) -> None:
     if _ORIGINAL_UTILS_EXECUTE_FUNCTION_CALL is not None:
         return
 
-    original = getattr(utils_module, "execute_function_call")
+    original = utils_module.execute_function_call
     exported_original = getattr(llm_module, "execute_function_call", None)
 
     @functools.wraps(original)
@@ -93,9 +124,8 @@ def _patch_execute_function_call(utils_module: Any, llm_module: Any) -> None:
             or get_value(tool_call, "arguments")
             or {}
         )
-        call_id = (
-            get_value(get_value(result, "fnc_call"), "call_id")
-            or get_value(tool_call, "call_id")
+        call_id = get_value(get_value(result, "fnc_call"), "call_id") or get_value(
+            tool_call, "call_id"
         )
         raw_exception = get_value(result, "raw_exception")
         fnc_call_out = get_value(result, "fnc_call_out")
@@ -117,9 +147,9 @@ def _patch_execute_function_call(utils_module: Any, llm_module: Any) -> None:
     _ORIGINAL_EXPORTED_EXECUTE_FUNCTION_CALL = exported_original
     _PATCHED_UTILS_MODULE = utils_module
     _PATCHED_LLM_MODULE = llm_module
-    setattr(utils_module, "execute_function_call", wrapped_execute_function_call)
+    utils_module.execute_function_call = wrapped_execute_function_call
     if exported_original is not None:
-        setattr(llm_module, "execute_function_call", wrapped_execute_function_call)
+        llm_module.execute_function_call = wrapped_execute_function_call
 
 
 def _restore_execute_function_call() -> None:
@@ -129,16 +159,12 @@ def _restore_execute_function_call() -> None:
     global _PATCHED_LLM_MODULE
 
     if _PATCHED_UTILS_MODULE is not None and _ORIGINAL_UTILS_EXECUTE_FUNCTION_CALL:
-        setattr(
-            _PATCHED_UTILS_MODULE,
-            "execute_function_call",
-            _ORIGINAL_UTILS_EXECUTE_FUNCTION_CALL,
+        _PATCHED_UTILS_MODULE.execute_function_call = (
+            _ORIGINAL_UTILS_EXECUTE_FUNCTION_CALL
         )
     if _PATCHED_LLM_MODULE is not None and _ORIGINAL_EXPORTED_EXECUTE_FUNCTION_CALL:
-        setattr(
-            _PATCHED_LLM_MODULE,
-            "execute_function_call",
-            _ORIGINAL_EXPORTED_EXECUTE_FUNCTION_CALL,
+        _PATCHED_LLM_MODULE.execute_function_call = (
+            _ORIGINAL_EXPORTED_EXECUTE_FUNCTION_CALL
         )
 
     _ORIGINAL_UTILS_EXECUTE_FUNCTION_CALL = None
@@ -154,11 +180,21 @@ def _patch_llm_stream_main_task(llm_stream_class: Any) -> None:
     if _ORIGINAL_LLM_STREAM_MAIN_TASK is not None:
         return
 
-    original = getattr(llm_stream_class, "_main_task")
+    original = llm_stream_class._main_task
 
     @functools.wraps(original)
     async def wrapped_main_task(self: Any, *args: Any, **kwargs: Any) -> Any:
         current_span = trace.get_current_span()
+        try:
+            current_span.set_attribute(SpanAttributes.LLM_IS_STREAMING, True)
+            provider_name = _provider_name_from_llm(getattr(self, "_llm", None))
+            if provider_name:
+                current_span.set_attribute(
+                    LIVEKIT_RESPAN_PROVIDER_NAME_ATTR,
+                    provider_name,
+                )
+        except Exception:
+            logger.debug("Failed to classify LiveKit LLM stream", exc_info=True)
         tool_definitions = normalize_livekit_tools(getattr(self, "_tools", None))
         if tool_definitions:
             try:
@@ -172,7 +208,7 @@ def _patch_llm_stream_main_task(llm_stream_class: Any) -> None:
 
     _ORIGINAL_LLM_STREAM_MAIN_TASK = original
     _PATCHED_LLM_STREAM_CLASS = llm_stream_class
-    setattr(llm_stream_class, "_main_task", wrapped_main_task)
+    llm_stream_class._main_task = wrapped_main_task
 
 
 def _restore_llm_stream_main_task() -> None:
@@ -180,7 +216,7 @@ def _restore_llm_stream_main_task() -> None:
     global _PATCHED_LLM_STREAM_CLASS
 
     if _PATCHED_LLM_STREAM_CLASS is not None and _ORIGINAL_LLM_STREAM_MAIN_TASK:
-        setattr(_PATCHED_LLM_STREAM_CLASS, "_main_task", _ORIGINAL_LLM_STREAM_MAIN_TASK)
+        _PATCHED_LLM_STREAM_CLASS._main_task = _ORIGINAL_LLM_STREAM_MAIN_TASK
     _ORIGINAL_LLM_STREAM_MAIN_TASK = None
     _PATCHED_LLM_STREAM_CLASS = None
 
@@ -209,7 +245,9 @@ class LiveKitInstrumentor:
             return
 
         if not self._is_respan_tracing_enabled():
-            logger.info("LiveKit instrumentation skipped because Respan tracing is disabled")
+            logger.info(
+                "LiveKit instrumentation skipped because Respan tracing is disabled"
+            )
             return
 
         try:
@@ -229,7 +267,7 @@ class LiveKitInstrumentor:
 
         _register_processor(self._processor)
         _patch_execute_function_call(livekit_llm_utils, livekit_llm)
-        _patch_llm_stream_main_task(getattr(livekit_llm, "LLMStream"))
+        _patch_llm_stream_main_task(livekit_llm.LLMStream)
 
         _ACTIVE_INSTANCES += 1
         self._is_instrumented = True

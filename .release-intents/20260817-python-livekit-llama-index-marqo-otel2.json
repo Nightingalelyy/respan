@@ -1,0 +1,8 @@
+{
+  "summary": "Repair OTel 2.x span translation and validation for LiveKit, LlamaIndex, and Marqo instrumentations",
+  "packages": {
+    "respan-instrumentation-livekit": "patch",
+    "respan-instrumentation-llama-index": "patch",
+    "respan-instrumentation-marqo": "patch"
+  }
+}

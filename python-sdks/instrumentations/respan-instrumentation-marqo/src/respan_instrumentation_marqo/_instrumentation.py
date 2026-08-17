@@ -5,6 +5,7 @@ from typing import Any
 
 from opentelemetry.semconv_ai import SpanAttributes
 from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
+
 from ._native_instrumentation import (
     NativeClientInstrumentor,
     PatchSpec,
