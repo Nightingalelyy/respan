@@ -5,9 +5,12 @@ from __future__ import annotations
 import importlib
 import inspect
 import logging
+import threading
 import time
-from collections.abc import AsyncIterator, Iterator
-from typing import Any, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
+from typing import Any
+
+from respan_tracing.core.tracer import RespanTracer
 
 from respan_instrumentation_ollama._constants import (
     ASYNC_CLIENT_CLASS_NAME,
@@ -21,11 +24,15 @@ from respan_instrumentation_ollama._constants import (
     STREAM_KEY,
 )
 from respan_instrumentation_ollama._otel_emitter import (
+    _current_trace_parent_ids,
     emit_chat_span,
     emit_embedding_span,
     emit_generate_span,
 )
-from respan_tracing.core.tracer import RespanTracer
+from respan_instrumentation_ollama._translator import (
+    StreamResponseAccumulator,
+    bounded_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +44,27 @@ _original_sync_embed = None
 _original_async_embed = None
 _original_sync_embeddings = None
 _original_async_embeddings = None
+
+
+def _error_status_code(exc: BaseException) -> int:
+    """Return an explicit provider status without guessing from error text."""
+    response = getattr(exc, "response", None)
+    for value in (
+        getattr(exc, "status_code", None),
+        getattr(response, "status_code", None),
+        getattr(response, "status", None),
+    ):
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 400:
+            return value
+    return 500
+
+
+def _error_message(exc: BaseException) -> str:
+    try:
+        message = str(exc)
+    except Exception:  # noqa: BLE001 - broken vendor exceptions must not escape
+        message = ""
+    return bounded_text(message or type(exc).__name__)
 
 
 def _get_module_attr(module_path: str, attr_name: str) -> Any:
@@ -72,32 +100,63 @@ def _request_kwargs_from_call(
     }
 
 
+def _close_sync_iterator(iterator: Any) -> None:
+    close = getattr(iterator, "close", None)
+    if not callable(close):
+        return
+    try:
+        close()
+    except BaseException:
+        logger.debug("Failed to close Ollama stream iterator", exc_info=True)
+
+
+async def _close_async_iterator(async_iterator: Any) -> None:
+    close = getattr(async_iterator, "aclose", None)
+    if not callable(close):
+        return
+    try:
+        await close()
+    except BaseException:
+        logger.debug("Failed to close Ollama async stream iterator", exc_info=True)
+
+
 def _instrument_sync_stream(
     *,
     iterator: Iterator[Any],
     emit_span: Callable[..., None],
     request_kwargs: dict[str, Any],
     start_ns: int,
+    parent_ids: tuple[str | None, str | None],
 ) -> Iterator[Any]:
-    chunks: list[Any] = []
+    captured = StreamResponseAccumulator()
+    error_message: str | None = None
+    status_code = 200
+    close_source = False
     try:
         for chunk in iterator:
-            chunks.append(chunk)
+            try:
+                captured.append(chunk)
+            except Exception:  # instrumentation must never break provider iteration
+                logger.debug("Failed to capture Ollama stream chunk", exc_info=True)
             yield chunk
-    except Exception as exc:
-        emit_span(
-            request_kwargs=request_kwargs,
-            response_or_chunks=chunks,
-            start_ns=start_ns,
-            error_message=str(exc),
-            status_code=500,
-        )
+    except GeneratorExit:
+        close_source = True
         raise
-    else:
+    except BaseException as exc:
+        close_source = True
+        error_message = _error_message(exc)
+        status_code = _error_status_code(exc)
+        raise
+    finally:
+        if close_source:
+            _close_sync_iterator(iterator)
         emit_span(
             request_kwargs=request_kwargs,
-            response_or_chunks=chunks,
+            response_or_chunks=captured.response(),
             start_ns=start_ns,
+            error_message=error_message,
+            status_code=status_code,
+            parent_ids=parent_ids,
         )
 
 
@@ -107,26 +166,39 @@ async def _instrument_async_stream(
     emit_span: Callable[..., None],
     request_kwargs: dict[str, Any],
     start_ns: int,
+    parent_ids: tuple[str | None, str | None],
 ) -> AsyncIterator[Any]:
-    chunks: list[Any] = []
+    captured = StreamResponseAccumulator()
+    error_message: str | None = None
+    status_code = 200
+    close_source = False
     try:
         async for chunk in async_iterator:
-            chunks.append(chunk)
+            try:
+                captured.append(chunk)
+            except Exception:  # instrumentation must never break provider iteration
+                logger.debug(
+                    "Failed to capture Ollama async stream chunk", exc_info=True
+                )
             yield chunk
-    except Exception as exc:
-        emit_span(
-            request_kwargs=request_kwargs,
-            response_or_chunks=chunks,
-            start_ns=start_ns,
-            error_message=str(exc),
-            status_code=500,
-        )
+    except GeneratorExit:
+        close_source = True
         raise
-    else:
+    except BaseException as exc:
+        close_source = True
+        error_message = _error_message(exc)
+        status_code = _error_status_code(exc)
+        raise
+    finally:
+        if close_source:
+            await _close_async_iterator(async_iterator)
         emit_span(
             request_kwargs=request_kwargs,
-            response_or_chunks=chunks,
+            response_or_chunks=captured.response(),
             start_ns=start_ns,
+            error_message=error_message,
+            status_code=status_code,
+            parent_ids=parent_ids,
         )
 
 
@@ -138,14 +210,16 @@ def _wrap_sync_llm_call(
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
         request_kwargs = _request_kwargs_from_call(original, self, args, kwargs)
         start_ns = time.time_ns()
+        parent_ids = _current_trace_parent_ids()
         try:
             response = original(self, *args, **kwargs)
         except Exception as exc:
             emit_span(
                 request_kwargs=request_kwargs,
                 start_ns=start_ns,
-                error_message=str(exc),
-                status_code=500,
+                error_message=_error_message(exc),
+                status_code=_error_status_code(exc),
+                parent_ids=parent_ids,
             )
             raise
 
@@ -155,12 +229,14 @@ def _wrap_sync_llm_call(
                 emit_span=emit_span,
                 request_kwargs=request_kwargs,
                 start_ns=start_ns,
+                parent_ids=parent_ids,
             )
 
         emit_span(
             request_kwargs=request_kwargs,
             response_or_chunks=response,
             start_ns=start_ns,
+            parent_ids=parent_ids,
         )
         return response
 
@@ -175,14 +251,16 @@ def _wrap_async_llm_call(
     async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
         request_kwargs = _request_kwargs_from_call(original, self, args, kwargs)
         start_ns = time.time_ns()
+        parent_ids = _current_trace_parent_ids()
         try:
             response = await original(self, *args, **kwargs)
         except Exception as exc:
             emit_span(
                 request_kwargs=request_kwargs,
                 start_ns=start_ns,
-                error_message=str(exc),
-                status_code=500,
+                error_message=_error_message(exc),
+                status_code=_error_status_code(exc),
+                parent_ids=parent_ids,
             )
             raise
 
@@ -192,12 +270,14 @@ def _wrap_async_llm_call(
                 emit_span=emit_span,
                 request_kwargs=request_kwargs,
                 start_ns=start_ns,
+                parent_ids=parent_ids,
             )
 
         emit_span(
             request_kwargs=request_kwargs,
             response_or_chunks=response,
             start_ns=start_ns,
+            parent_ids=parent_ids,
         )
         return response
 
@@ -212,15 +292,17 @@ def _wrap_sync_embedding_call(
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
         request_kwargs = _request_kwargs_from_call(original, self, args, kwargs)
         start_ns = time.time_ns()
+        parent_ids = _current_trace_parent_ids()
         try:
             response = original(self, *args, **kwargs)
         except Exception as exc:
             emit_embedding_span(
                 request_kwargs=request_kwargs,
                 start_ns=start_ns,
-                error_message=str(exc),
-                status_code=500,
+                error_message=_error_message(exc),
+                status_code=_error_status_code(exc),
                 method_name=method_name,
+                parent_ids=parent_ids,
             )
             raise
 
@@ -229,6 +311,7 @@ def _wrap_sync_embedding_call(
             response=response,
             start_ns=start_ns,
             method_name=method_name,
+            parent_ids=parent_ids,
         )
         return response
 
@@ -243,15 +326,17 @@ def _wrap_async_embedding_call(
     async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
         request_kwargs = _request_kwargs_from_call(original, self, args, kwargs)
         start_ns = time.time_ns()
+        parent_ids = _current_trace_parent_ids()
         try:
             response = await original(self, *args, **kwargs)
         except Exception as exc:
             emit_embedding_span(
                 request_kwargs=request_kwargs,
                 start_ns=start_ns,
-                error_message=str(exc),
-                status_code=500,
+                error_message=_error_message(exc),
+                status_code=_error_status_code(exc),
                 method_name=method_name,
+                parent_ids=parent_ids,
             )
             raise
 
@@ -260,6 +345,7 @@ def _wrap_async_embedding_call(
             response=response,
             start_ns=start_ns,
             method_name=method_name,
+            parent_ids=parent_ids,
         )
         return response
 
@@ -270,6 +356,9 @@ class OllamaInstrumentor:
     """Respan instrumentor for the official Ollama Python SDK."""
 
     name = OLLAMA_INSTRUMENTATION_NAME
+    _lifecycle_lock = threading.RLock()
+    _patches_applied = False
+    _activation_count = 0
 
     def __init__(self) -> None:
         self._is_instrumented = False
@@ -283,11 +372,16 @@ class OllamaInstrumentor:
 
     def activate(self) -> None:
         """Monkey-patch Ollama client generation and embedding methods."""
+        with type(self)._lifecycle_lock:
+            self._activate_locked()
+
+    def _activate_locked(self) -> None:
         global _original_sync_chat, _original_async_chat
         global _original_sync_generate, _original_async_generate
         global _original_sync_embed, _original_async_embed
         global _original_sync_embeddings, _original_async_embeddings
 
+        cls = type(self)
         if self._is_instrumented:
             return
 
@@ -295,6 +389,11 @@ class OllamaInstrumentor:
             logger.info(
                 "Ollama instrumentation skipped because Respan tracing is disabled"
             )
+            return
+
+        if cls._patches_applied:
+            cls._activation_count += 1
+            self._is_instrumented = True
             return
 
         try:
@@ -315,7 +414,7 @@ class OllamaInstrumentor:
                 exc,
             )
             return
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - plugin activation is best-effort
             logger.warning("Failed to activate Ollama instrumentation: %s", exc)
             return
 
@@ -419,22 +518,40 @@ class OllamaInstrumentor:
                 )
         except Exception:
             logger.exception("Failed to patch Ollama client methods")
-            self.deactivate()
+            self._is_instrumented = True
+            cls._patches_applied = True
+            cls._activation_count = 1
+            self._deactivate_locked()
             return
 
         self._is_instrumented = True
+        cls._patches_applied = True
+        cls._activation_count = 1
         logger.info("Ollama instrumentation activated")
 
     def deactivate(self) -> None:
         """Restore Ollama client methods."""
+        with type(self)._lifecycle_lock:
+            self._deactivate_locked()
+
+    def _deactivate_locked(self) -> None:
         global _original_sync_chat, _original_async_chat
         global _original_sync_generate, _original_async_generate
         global _original_sync_embed, _original_async_embed
         global _original_sync_embeddings, _original_async_embeddings
 
+        cls = type(self)
+        if not self._is_instrumented:
+            return
+
+        self._is_instrumented = False
+        cls._activation_count = max(cls._activation_count - 1, 0)
+        if cls._activation_count:
+            return
+
         try:
             Client, AsyncClient = _load_client_classes()
-        except Exception:
+        except Exception:  # noqa: BLE001 - teardown must clear local state
             Client = AsyncClient = None
 
         if Client is not None:
@@ -469,5 +586,6 @@ class OllamaInstrumentor:
         _original_async_embed = None
         _original_sync_embeddings = None
         _original_async_embeddings = None
-        self._is_instrumented = False
+        cls._patches_applied = False
+        cls._activation_count = 0
         logger.info("Ollama instrumentation deactivated")

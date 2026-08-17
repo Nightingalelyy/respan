@@ -1,0 +1,8 @@
+{
+  "summary": "Repair Mirascope, Mistral, and Ollama OTel 2.x span semantics, lifecycle, streaming, tools, errors, and coverage",
+  "packages": {
+    "respan-instrumentation-mirascope": "patch",
+    "respan-instrumentation-mistralai": "patch",
+    "respan-instrumentation-ollama": "patch"
+  }
+}
