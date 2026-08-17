@@ -19,6 +19,10 @@ opentelemetry-semantic-conventions-ai = ">=0.4.1"
 [tool.poetry.plugins."respan.instrumentations"]
 litellm = "respan_instrumentation_litellm:LiteLLMInstrumentor"
 
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.4.1"
+respan-instrumentation-openai = "^1.2.0"
+
 [tool.pytest.ini_options]
 markers = [
     "integration: live network tests (requires API keys)",

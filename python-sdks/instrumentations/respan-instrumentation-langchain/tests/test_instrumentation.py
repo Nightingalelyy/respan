@@ -1,3 +1,4 @@
+import json
 import sys
 from types import ModuleType, SimpleNamespace
 from uuid import UUID, uuid4
@@ -12,7 +13,6 @@ from respan_instrumentation_langchain import (
     get_callback_handler,
 )
 from respan_sdk.constants.otlp_constants import ERROR_MESSAGE_ATTR
-from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT
 from respan_sdk.constants.span_attributes import (
     GEN_AI_TOOL_CALL_ARGUMENTS,
     GEN_AI_TOOL_CALL_RESULT,
@@ -22,7 +22,8 @@ from respan_sdk.constants.span_attributes import (
     LLM_USAGE_COMPLETION_TOKENS,
     LLM_USAGE_PROMPT_TOKENS,
     RESPAN_LOG_TYPE,
-    RESPAN_SPAN_TOOL_CALLS,
+    RESPAN_METADATA,
+    RESPAN_TRACE_GROUP_ID,
 )
 
 
@@ -30,7 +31,9 @@ def _capture_spans(monkeypatch):
     captured = []
 
     def _fake_build_readable_span(name, **kwargs):
-        span = SimpleNamespace(name=name, attributes=kwargs.get("attributes", {}), kwargs=kwargs)
+        span = SimpleNamespace(
+            name=name, attributes=kwargs.get("attributes", {}), kwargs=kwargs
+        )
         captured.append(span)
         return span
 
@@ -81,7 +84,9 @@ def test_add_respan_callback_does_not_duplicate_respan_handlers():
 def test_add_respan_callback_adds_to_callback_manager_like_object():
     handler = RespanCallbackHandler()
     manager = SimpleNamespace(handlers=[])
-    manager.add_handler = lambda callback, inherit=True: manager.handlers.append(callback)
+    manager.add_handler = lambda callback, inherit=True: manager.handlers.append(
+        callback
+    )
 
     new_config = add_respan_callback({"callbacks": manager}, handler)
 
@@ -205,19 +210,55 @@ def test_chat_model_start_end_maps_messages_usage_model_and_tool_calls(monkeypat
         {"name": "ChatOpenAI", "kwargs": {"model": "gpt-4o-mini"}},
         [[user_message]],
         run_id=run_id,
+        invocation_params={
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "calculator",
+                        "description": "Evaluate an expression.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"expression": {"type": "string"}},
+                            "required": ["expression"],
+                        },
+                    },
+                }
+            ]
+        },
     )
     handler.on_llm_end(response, run_id=run_id)
 
     attrs = captured[0].attributes
     assert attrs[RESPAN_LOG_TYPE] == "chat"
-    assert attrs[SpanAttributes.TRACELOOP_SPAN_KIND] == LOG_TYPE_CHAT
+    assert SpanAttributes.TRACELOOP_SPAN_KIND not in attrs
     assert attrs[LLM_REQUEST_TYPE] == "chat"
     assert attrs[LLM_REQUEST_MODEL] == "gpt-4o-mini"
     assert attrs[LLM_USAGE_PROMPT_TOKENS] == 10
     assert attrs[LLM_USAGE_COMPLETION_TOKENS] == 3
     assert attrs[f"{SpanAttributes.LLM_PROMPTS}.0.role"] == "user"
     assert attrs[f"{SpanAttributes.LLM_COMPLETIONS}.0.role"] == "assistant"
-    assert "calculator" in attrs[RESPAN_SPAN_TOOL_CALLS]
+    assert json.loads(attrs[SpanAttributes.LLM_REQUEST_FUNCTIONS])[0]["function"] == {
+        "name": "calculator",
+        "description": "Evaluate an expression.",
+        "parameters": {
+            "type": "object",
+            "properties": {"expression": {"type": "string"}},
+            "required": ["expression"],
+        },
+    }
+    assert json.loads(attrs[f"{SpanAttributes.LLM_COMPLETIONS}.0.tool_calls"]) == [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "calculator",
+                "arguments": '{"expression": "2+2"}',
+            },
+        }
+    ]
+    assert "respan.span.tools" not in attrs
+    assert "respan.span.tool_calls" not in attrs
 
 
 def test_llm_json_code_fence_output_is_unwrapped_for_logged_content(monkeypatch):
@@ -284,10 +325,40 @@ def test_llm_start_new_tokens_and_end_emit_completion_span(monkeypatch):
     assert attrs[RESPAN_LOG_TYPE] == "completion"
     assert attrs[LLM_REQUEST_TYPE] == "completion"
     assert attrs[LLM_REQUEST_MODEL] == "text-davinci"
+    assert attrs[SpanAttributes.LLM_IS_STREAMING] is True
     assert (
         attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
         == '[[{"role": "assistant", "content": ""}]]'
     )
+
+
+def test_explicit_respan_params_bridge_to_canonical_attributes(monkeypatch):
+    captured = _capture_spans(monkeypatch)
+    handler = RespanCallbackHandler()
+    run_id = uuid4()
+
+    handler.on_chain_start(
+        {"name": "root_chain"},
+        {"question": "hi"},
+        run_id=run_id,
+        metadata={
+            "respan_params": {
+                "trace_group_identifier": "langchain_group_16.workflow",
+                "metadata": {
+                    "example_run_id": "otel2-fix-py-group-16-marker",
+                    "batch_size": 2,
+                },
+            }
+        },
+    )
+    handler.on_chain_end({"answer": "hello"}, run_id=run_id)
+
+    attrs = captured[0].attributes
+    assert attrs[RESPAN_TRACE_GROUP_ID] == "langchain_group_16.workflow"
+    assert attrs[f"{RESPAN_METADATA}.example_run_id"] == (
+        "otel2-fix-py-group-16-marker"
+    )
+    assert attrs[f"{RESPAN_METADATA}.batch_size"] == 2
 
 
 def test_tool_start_end_maps_tool_fields(monkeypatch):
@@ -350,7 +421,9 @@ def test_llm_tool_and_retriever_error_callbacks_mark_spans_as_error(monkeypatch)
     handler.on_tool_start({"name": "tool"}, "input", run_id=tool_run_id)
     handler.on_tool_error(RuntimeError("tool failed"), run_id=tool_run_id)
     handler.on_retriever_start({"name": "retriever"}, "query", run_id=retriever_run_id)
-    handler.on_retriever_error(RuntimeError("retriever failed"), run_id=retriever_run_id)
+    handler.on_retriever_error(
+        RuntimeError("retriever failed"), run_id=retriever_run_id
+    )
 
     assert [span.kwargs["status_code"] for span in captured] == [500, 500, 500]
     assert [span.kwargs["error_message"] for span in captured] == [
@@ -375,7 +448,9 @@ def test_on_text_uses_streamed_text_when_run_has_no_output(monkeypatch):
     handler.on_text("world", run_id=run_id)
     handler.on_chain_end(None, run_id=run_id)
 
-    assert captured[0].attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] == "hello world"
+    assert (
+        captured[0].attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] == "hello world"
+    )
 
 
 def test_agent_action_and_finish_emit_event_spans(monkeypatch):
@@ -481,8 +556,12 @@ def test_instrumentor_patches_langgraph_config_helpers(monkeypatch):
     _install_fake_langchain_modules(monkeypatch)
     langgraph = ModuleType("langgraph")
     callbacks = ModuleType("langgraph.callbacks")
-    callbacks.get_sync_graph_callback_manager_for_config = lambda config, **kwargs: config
-    callbacks.get_async_graph_callback_manager_for_config = lambda config, **kwargs: config
+    callbacks.get_sync_graph_callback_manager_for_config = lambda config, **kwargs: (
+        config
+    )
+    callbacks.get_async_graph_callback_manager_for_config = lambda config, **kwargs: (
+        config
+    )
     langgraph.callbacks = callbacks
     monkeypatch.setitem(sys.modules, "langgraph", langgraph)
     monkeypatch.setitem(sys.modules, "langgraph.callbacks", callbacks)
@@ -502,9 +581,7 @@ def test_instrumentor_logs_warning_when_langchain_missing(monkeypatch, caplog):
     )
 
     def _blocked_import_module(name, package=None):
-        if (
-            name == "langchain_core.callbacks.manager"
-        ):
+        if name == "langchain_core.callbacks.manager":
             raise ImportError("missing langchain")
         return original_import_module(name, package=package)
 
@@ -535,6 +612,5 @@ def test_run_id_to_hex_accepts_uuid_strings_and_plain_strings():
         == "12345678123456781234567812345678"
     )
     assert (
-        len(respan_instrumentation_langchain._callback._run_id_to_hex("plain-id"))
-        == 32
+        len(respan_instrumentation_langchain._callback._run_id_to_hex("plain-id")) == 32
     )

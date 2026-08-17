@@ -1,0 +1,8 @@
+{
+  "summary": "Restore canonical OTel 2.x span translation and current example coverage for LangChain, Langfuse, and LiteLLM.",
+  "packages": {
+    "respan-instrumentation-langchain": "patch",
+    "respan-instrumentation-langfuse": "patch",
+    "respan-instrumentation-litellm": "patch"
+  }
+}
