@@ -1,5 +1,6 @@
 """pgvector and psycopg SDK-specific instrumentation constants."""
 
+from importlib.metadata import PackageNotFoundError, version
 from typing import NamedTuple
 
 
@@ -19,6 +20,10 @@ class FunctionPatchSpec(NamedTuple):
 
 
 PGVECTOR_INSTRUMENTATION_NAME = "pgvector"
+try:
+    PGVECTOR_INSTRUMENTATION_VERSION = version("respan-instrumentation-pgvector")
+except PackageNotFoundError:  # pragma: no cover - source-only imports
+    PGVECTOR_INSTRUMENTATION_VERSION = "unknown"
 
 CURSOR_OPERATIONS = (
     "execute",
@@ -92,9 +97,16 @@ FUNCTION_PATCH_SPECS = (
 
 MAX_ATTRIBUTE_CHARS = 16_000
 MAX_PREVIEW_ITEMS = 128
+MAX_SERIALIZATION_DEPTH = 7
+MAX_STRING_CHARS = 4_096
 SENSITIVE_KEY_PARTS = (
     "api_key",
     "authorization",
+    "connection_string",
+    "credential",
+    "dsn",
+    "passfile",
+    "sslkey",
     "password",
     "secret",
     "token",

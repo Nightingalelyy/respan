@@ -1,0 +1,8 @@
+{
+  "summary": "Repair OpenLIT, OpenRouter, and PGVector instrumentation for OpenTelemetry 2.x span contracts, lifecycle safety, bounded serialization, and current SDK behavior",
+  "packages": {
+    "respan-instrumentation-openlit": "patch",
+    "respan-instrumentation-openrouter": "patch",
+    "respan-instrumentation-pgvector": "patch"
+  }
+}

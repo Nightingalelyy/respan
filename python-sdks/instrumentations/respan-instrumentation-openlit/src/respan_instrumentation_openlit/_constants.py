@@ -12,10 +12,13 @@ OPENLIT_TOOL_OUTPUT = "gen_ai.tool.output"
 OPENLIT_TOOL_ARGS = "gen_ai.tool.args"
 OPENLIT_WORKFLOW_INPUT = "gen_ai.workflow.input"
 OPENLIT_WORKFLOW_OUTPUT = "gen_ai.workflow.output"
+OPENLIT_PROVIDER_USAGE = "openlit.respan.provider_usage"
 
 OPENLIT_OPERATION_LOG_TYPES = {
     "chat": "chat",
+    "completion": "text",
     "text_completion": "text",
+    "embedding": "embedding",
     "embeddings": "embedding",
     "execute_tool": "tool",
     "invoke_agent": "agent",
@@ -37,6 +40,7 @@ OFF_CONTRACT_ALIASES = {
     "span_tools",
     "has_tool_calls",
     "parallel_tool_calls",
+    "traceloop.span.kind",
     "respan.span.tools",
     "respan.span.tool_calls",
     "respan.span.handoffs",

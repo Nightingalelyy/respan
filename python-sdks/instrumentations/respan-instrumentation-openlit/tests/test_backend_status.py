@@ -1,9 +1,7 @@
-import json
 from types import SimpleNamespace
 
 from opentelemetry.semconv_ai import SpanAttributes
 from opentelemetry.trace import Status, StatusCode
-
 from respan_instrumentation_openlit._processor import translate_openlit_span
 
 
@@ -23,12 +21,8 @@ def test_otel_error_sets_backend_visible_status_and_message() -> None:
     )
     translate_openlit_span(span, capture_content=False)
     assert span._attributes["status_code"] == 500
-    assert span._attributes["error.message"] == "openlit provider failed"
-    assert json.loads(span._attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == {
-        "error": "OpenLITError",
-        "message": "openlit provider failed",
-        "status": "error",
-    }
+    assert span._attributes["error.message"] == "OpenLIT operation failed"
+    assert SpanAttributes.TRACELOOP_ENTITY_OUTPUT not in span._attributes
 
 
 def test_upstream_http_status_is_preserved() -> None:
@@ -41,8 +35,8 @@ def test_upstream_http_status_is_preserved() -> None:
     )
     translate_openlit_span(span, capture_content=False)
     assert span._attributes["status_code"] == 429
-    assert span._attributes["error.message"] == "rate limited"
-    assert SpanAttributes.TRACELOOP_ENTITY_OUTPUT in span._attributes
+    assert span._attributes["error.message"] == "OpenLIT operation failed"
+    assert SpanAttributes.TRACELOOP_ENTITY_OUTPUT not in span._attributes
 
 
 def test_success_sets_backend_visible_200() -> None:

@@ -7,14 +7,18 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
-from opentelemetry.trace import StatusCode
 from opentelemetry.semconv_ai import LLMRequestTypeValues
 from opentelemetry.semconv_ai import SpanAttributes as TLSpanAttributes
+from opentelemetry.trace import Status, StatusCode
+from respan_sdk.constants import ERROR_MESSAGE_ATTR
+from respan_sdk.constants.llm_logging import LogMethodChoices
+from respan_sdk.constants.span_attributes import RESPAN_LOG_METHOD, RESPAN_LOG_TYPE
 
 from respan_instrumentation_openlit._constants import (
     OFF_CONTRACT_ALIASES,
     OPENLIT_INSTRUMENTATION_NAME,
     OPENLIT_OPERATION_LOG_TYPES,
+    OPENLIT_PROVIDER_USAGE,
     OPENLIT_REQUEST_PROVIDER,
     OPENLIT_RESPONSE_TOOL_CALLS,
     OPENLIT_SCOPE_PREFIX,
@@ -27,9 +31,19 @@ from respan_instrumentation_openlit._constants import (
     STANDARD_DB_ATTRIBUTES,
     STANDARD_GEN_AI_ATTRIBUTES,
 )
-from respan_sdk.constants import ERROR_MESSAGE_ATTR
-from respan_sdk.constants.llm_logging import LogMethodChoices
-from respan_sdk.constants.span_attributes import RESPAN_LOG_METHOD, RESPAN_LOG_TYPE
+from respan_instrumentation_openlit._serialization import (
+    MAX_ATTRIBUTE_BYTES,
+    MAX_COLLECTION_ITEMS,
+    MAX_STRING_CHARS,
+    safe_text,
+    safe_url,
+)
+from respan_instrumentation_openlit._serialization import (
+    json_string as _bounded_json_string,
+)
+from respan_instrumentation_openlit._serialization import (
+    json_value as _bounded_json_value,
+)
 
 try:
     from opentelemetry.semconv._incubating.attributes import gen_ai_attributes
@@ -73,6 +87,10 @@ GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS = _otel_key(
     "GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS",
     "gen_ai.usage.cache_read.input_tokens",
 )
+GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS = _otel_key(
+    "GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS",
+    "gen_ai.usage.cache_creation.input_tokens",
+)
 DB_SYSTEM_NAME = "db.system.name"
 DB_OPERATION_NAME = "db.operation.name"
 DB_QUERY_TEXT = "db.query.text"
@@ -94,30 +112,36 @@ _CACHE_READ_USAGE = getattr(
 
 def _json_value(value: Any) -> Any:
     if isinstance(value, str):
-        try:
-            return json.loads(value)
-        except (json.JSONDecodeError, TypeError):
-            return value
-    return value
+        if len(value.encode("utf-8")) <= MAX_ATTRIBUTE_BYTES:
+            try:
+                return _bounded_json_value(json.loads(value))
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return safe_text(value, limit=MAX_STRING_CHARS)
+    return _bounded_json_value(value)
 
 
 def _json_string(value: Any) -> str:
-    if isinstance(value, str):
-        try:
-            json.loads(value)
-        except (json.JSONDecodeError, TypeError):
-            return json.dumps(value)
-        return value
-    return json.dumps(value, default=str)
+    return _bounded_json_string(_json_value(value))
 
 
 def _sequence(value: Any) -> list[Any]:
     parsed = _json_value(value)
     if isinstance(parsed, list):
-        return parsed
+        return parsed[:MAX_COLLECTION_ITEMS]
     if parsed is None:
         return []
     return [parsed]
+
+
+def _is_truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "on", "true", "yes"}
+    return False
 
 
 def _part_payload(part: Any) -> Any:
@@ -150,13 +174,17 @@ def _message_content(message: Mapping[str, Any]) -> Any:
 def _message_tool_calls(message: Mapping[str, Any]) -> list[dict[str, Any]]:
     direct = _json_value(message.get("tool_calls"))
     if isinstance(direct, list):
-        return [dict(item) for item in direct if isinstance(item, Mapping)]
+        return [
+            dict(item)
+            for item in direct[:MAX_COLLECTION_ITEMS]
+            if isinstance(item, Mapping)
+        ]
 
     calls: list[dict[str, Any]] = []
     parts = message.get("parts")
     if not isinstance(parts, Sequence) or isinstance(parts, str | bytes):
         return calls
-    for part in parts:
+    for part in parts[:MAX_COLLECTION_ITEMS]:
         if not isinstance(part, Mapping) or part.get("type") not in {
             "tool_call",
             "function_call",
@@ -181,7 +209,7 @@ def _set_message_attributes(
     messages: list[Any],
     target_prefix: str,
 ) -> None:
-    for index, raw_message in enumerate(messages):
+    for index, raw_message in enumerate(messages[:MAX_COLLECTION_ITEMS]):
         if isinstance(raw_message, str):
             message: Mapping[str, Any] = {"role": "user", "content": raw_message}
         elif isinstance(raw_message, Mapping):
@@ -192,11 +220,15 @@ def _set_message_attributes(
         role = message.get("role") or (
             "assistant" if target_prefix == _COMPLETION_PREFIX else "user"
         )
-        attrs[f"{target_prefix}{index}.role"] = str(role)
+        attrs[f"{target_prefix}{index}.role"] = safe_text(
+            role, default="user", limit=64
+        )
         content = _message_content(message)
         if content is not None:
             attrs[f"{target_prefix}{index}.content"] = (
-                content if isinstance(content, str) else _json_string(content)
+                safe_text(content, limit=MAX_STRING_CHARS)
+                if isinstance(content, str)
+                else _json_string(content)
             )
         tool_calls = _message_tool_calls(message)
         if tool_calls:
@@ -207,7 +239,18 @@ def _scope_name(span: ReadableSpan) -> str:
     scope = getattr(span, "instrumentation_scope", None) or getattr(
         span, "instrumentation_info", None
     )
-    return str(getattr(scope, "name", "") or "")
+    return safe_text(getattr(scope, "name", ""), limit=256)
+
+
+def _has_parent(span: ReadableSpan) -> bool:
+    parent = getattr(span, "parent", None)
+    if parent is None:
+        return False
+    is_valid = getattr(parent, "is_valid", None)
+    if is_valid is not None:
+        return bool(is_valid)
+    span_id = getattr(parent, "span_id", None)
+    return bool(span_id) if span_id is not None else True
 
 
 def _is_openlit_span(span: ReadableSpan, attrs: Mapping[str, Any]) -> bool:
@@ -223,7 +266,7 @@ def _is_openlit_span(span: ReadableSpan, attrs: Mapping[str, Any]) -> bool:
 
 
 def _operation_log_type(attrs: Mapping[str, Any]) -> str:
-    operation = str(attrs.get(GEN_AI_OPERATION_NAME) or "").lower()
+    operation = safe_text(attrs.get(GEN_AI_OPERATION_NAME), limit=128).lower()
     if attrs.get(DB_SYSTEM_NAME):
         return "task"
     return OPENLIT_OPERATION_LOG_TYPES.get(operation, "task")
@@ -243,8 +286,8 @@ def _entity_name(span: ReadableSpan, attrs: Mapping[str, Any], log_type: str) ->
                 filter(
                     None,
                     [
-                        str(attrs.get(DB_SYSTEM_NAME) or ""),
-                        str(attrs.get(DB_OPERATION_NAME) or ""),
+                        safe_text(attrs.get(DB_SYSTEM_NAME), limit=128),
+                        safe_text(attrs.get(DB_OPERATION_NAME), limit=128),
                     ],
                 )
             ),
@@ -253,8 +296,12 @@ def _entity_name(span: ReadableSpan, attrs: Mapping[str, Any], log_type: str) ->
         candidates = ()
     for candidate in candidates:
         if candidate:
-            return str(candidate)
-    return str(getattr(span, "name", None) or OPENLIT_INSTRUMENTATION_NAME)
+            return safe_text(candidate, default=OPENLIT_INSTRUMENTATION_NAME, limit=256)
+    return safe_text(
+        getattr(span, "name", None),
+        default=OPENLIT_INSTRUMENTATION_NAME,
+        limit=256,
+    )
 
 
 def _set_usage(attrs: dict[str, Any]) -> None:
@@ -280,6 +327,25 @@ def _set_usage(attrs: dict[str, Any]) -> None:
         attrs[_CACHE_READ_USAGE] = cache_read_tokens
 
 
+def _clear_synthetic_usage(attrs: dict[str, Any]) -> None:
+    for key in (
+        GEN_AI_USAGE_INPUT_TOKENS,
+        GEN_AI_USAGE_OUTPUT_TOKENS,
+        GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
+        GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
+        "gen_ai.usage.cache_creation_input_tokens",
+        "gen_ai.usage.cache_read_input_tokens",
+        OPENLIT_USAGE_TOTAL_TOKENS,
+        TLSpanAttributes.LLM_USAGE_PROMPT_TOKENS,
+        TLSpanAttributes.LLM_USAGE_COMPLETION_TOKENS,
+        TLSpanAttributes.LLM_USAGE_TOTAL_TOKENS,
+        _MODERN_INPUT_USAGE,
+        _MODERN_OUTPUT_USAGE,
+        _CACHE_READ_USAGE,
+    ):
+        attrs.pop(key, None)
+
+
 def _strip_content(attrs: dict[str, Any]) -> None:
     for key in (
         GEN_AI_INPUT_MESSAGES,
@@ -288,6 +354,10 @@ def _strip_content(attrs: dict[str, Any]) -> None:
         GEN_AI_TOOL_DEFINITIONS,
         GEN_AI_TOOL_CALL_ARGUMENTS,
         GEN_AI_TOOL_CALL_RESULT,
+        "gen_ai.prompt",
+        "gen_ai.completion",
+        "gen_ai.retrieval.query.text",
+        "gen_ai.retrieval.documents",
         OPENLIT_RESPONSE_TOOL_CALLS,
         OPENLIT_TOOL_ARGS,
         OPENLIT_TOOL_INPUT,
@@ -295,13 +365,21 @@ def _strip_content(attrs: dict[str, Any]) -> None:
         OPENLIT_WORKFLOW_INPUT,
         OPENLIT_WORKFLOW_OUTPUT,
         DB_QUERY_TEXT,
+        "db.query.parameter",
         TLSpanAttributes.LLM_REQUEST_FUNCTIONS,
         TLSpanAttributes.TRACELOOP_ENTITY_INPUT,
         TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT,
     ):
         attrs.pop(key, None)
     for key in list(attrs):
-        if key.startswith(_PROMPT_PREFIX) or key.startswith(_COMPLETION_PREFIX):
+        if key.startswith(
+            (
+                _PROMPT_PREFIX,
+                _COMPLETION_PREFIX,
+                "gen_ai.retrieval.",
+                "db.query.parameter.",
+            )
+        ):
             attrs.pop(key, None)
 
 
@@ -309,15 +387,31 @@ def _strip_openlit_vendor_attributes(attrs: dict[str, Any]) -> None:
     """Drop OpenLIT-only fields while retaining standard span semantics."""
 
     for key in list(attrs):
-        if key.startswith("openlit."):
-            attrs.pop(key, None)
-        elif (
-            key.startswith("gen_ai.")
-            and key not in STANDARD_GEN_AI_ATTRIBUTES
-            and not key.startswith(("gen_ai.prompt.", "gen_ai.completion."))
+        if (
+            key.startswith("openlit.")
+            or (
+                key.startswith("gen_ai.")
+                and key not in STANDARD_GEN_AI_ATTRIBUTES
+                and not key.startswith(("gen_ai.prompt.", "gen_ai.completion."))
+            )
+            or key.startswith("db.")
+            and key not in STANDARD_DB_ATTRIBUTES
         ):
             attrs.pop(key, None)
-        elif key.startswith("db.") and key not in STANDARD_DB_ATTRIBUTES:
+
+
+def _sanitize_url_attributes(attrs: dict[str, Any]) -> None:
+    for key in list(attrs):
+        normalized = key.lower()
+        if not (
+            normalized in {"http.url", "url.full", "url.original"}
+            or normalized.endswith((".url", "_url", ".base_url", "_base_url"))
+        ):
+            continue
+        sanitized = safe_url(attrs[key])
+        if sanitized:
+            attrs[key] = sanitized
+        else:
             attrs.pop(key, None)
 
 
@@ -338,7 +432,9 @@ def _backend_status_code(attrs: Mapping[str, Any], *, is_error: bool) -> int:
     return 500 if is_error else 200
 
 
-def _set_backend_status(span: ReadableSpan, attrs: dict[str, Any]) -> None:
+def _set_backend_status(
+    span: ReadableSpan, attrs: dict[str, Any], *, capture_content: bool
+) -> None:
     status = getattr(span, "status", None)
     otel_error = getattr(status, "status_code", None) is StatusCode.ERROR
     code = _backend_status_code(attrs, is_error=otel_error)
@@ -356,18 +452,40 @@ def _set_backend_status(span: ReadableSpan, attrs: dict[str, Any]) -> None:
             message = event_attrs.get("exception.message")
             if message:
                 break
-    message = str(message or "OpenLIT operation failed")
-    attrs[ERROR_MESSAGE_ATTR] = message
-    attrs.setdefault(
-        TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT,
-        _json_string(
-            {
-                "status": "error",
-                "error": str(attrs.get("error.type") or "OpenLITError"),
-                "message": message,
-            }
-        ),
+    message = (
+        safe_text(message, default="OpenLIT operation failed", limit=1_024)
+        if capture_content
+        else "OpenLIT operation failed"
     )
+    attrs[ERROR_MESSAGE_ATTR] = message
+    sanitized_status = Status(StatusCode.ERROR, message)
+    if hasattr(span, "_status"):
+        span._status = sanitized_status
+    else:
+        try:
+            span.status = sanitized_status
+        except AttributeError:
+            pass
+    if capture_content:
+        attrs.setdefault(
+            TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT,
+            _json_string(
+                {
+                    "status": "error",
+                    "error": safe_text(
+                        attrs.get("error.type"), default="OpenLITError", limit=256
+                    ),
+                    "message": message,
+                }
+            ),
+        )
+
+
+def _remove_openlit_events(span: ReadableSpan) -> None:
+    events = getattr(span, "_events", None)
+    if events is None:
+        return
+    span._events = ()
 
 
 def translate_openlit_span(span: ReadableSpan, *, capture_content: bool) -> bool:
@@ -389,34 +507,57 @@ def translate_openlit_span(span: ReadableSpan, *, capture_content: bool) -> bool
     attrs[RESPAN_LOG_METHOD] = LogMethodChoices.TRACING_INTEGRATION.value
     attrs[RESPAN_LOG_TYPE] = log_type
     attrs[TLSpanAttributes.TRACELOOP_ENTITY_NAME] = entity_name
-    attrs[TLSpanAttributes.TRACELOOP_ENTITY_PATH] = entity_name
+    attrs[TLSpanAttributes.TRACELOOP_ENTITY_PATH] = (
+        entity_name if _has_parent(span) else ""
+    )
 
     provider = attrs.get(GEN_AI_PROVIDER_NAME) or attrs.pop(
         OPENLIT_REQUEST_PROVIDER, None
     )
     if provider is not None:
-        attrs[TLSpanAttributes.LLM_SYSTEM] = str(provider)
+        attrs[TLSpanAttributes.LLM_SYSTEM] = safe_text(provider, limit=128)
 
-    operation = str(attrs.get(GEN_AI_OPERATION_NAME) or "").lower()
-    if log_type == "chat":
+    if _is_truthy(attrs.get("gen_ai.request.stream")):
+        attrs[TLSpanAttributes.LLM_IS_STREAMING] = True
+
+    operation = safe_text(attrs.get(GEN_AI_OPERATION_NAME), limit=128).lower()
+    if log_type in {"chat", "text"}:
         attrs[TLSpanAttributes.LLM_REQUEST_TYPE] = LLMRequestTypeValues.CHAT.value
-    elif operation in {"text_completion", "completion"}:
-        attrs[TLSpanAttributes.LLM_REQUEST_TYPE] = LLMRequestTypeValues.COMPLETION.value
     elif operation in {"embeddings", "embedding"}:
         attrs[TLSpanAttributes.LLM_REQUEST_TYPE] = LLMRequestTypeValues.EMBEDDING.value
 
-    _set_usage(attrs)
+    provider_usage = attrs.pop(OPENLIT_PROVIDER_USAGE, None)
+    if provider_usage is False:
+        _clear_synthetic_usage(attrs)
+    else:
+        _set_usage(attrs)
 
     if capture_content:
         input_messages = _sequence(attrs.get(GEN_AI_INPUT_MESSAGES))
         output_messages = _sequence(attrs.get(GEN_AI_OUTPUT_MESSAGES))
         if input_messages:
-            attrs[TLSpanAttributes.TRACELOOP_ENTITY_INPUT] = _json_string(
-                input_messages
-            )
-            _set_message_attributes(
-                attrs, messages=input_messages, target_prefix=_PROMPT_PREFIX
-            )
+            if log_type == "embedding":
+                if TLSpanAttributes.TRACELOOP_ENTITY_INPUT not in attrs:
+                    embedding_input = [
+                        _message_content(message)
+                        if isinstance(message, Mapping)
+                        else message
+                        for message in input_messages
+                    ]
+                    attrs[TLSpanAttributes.TRACELOOP_ENTITY_INPUT] = _json_string(
+                        embedding_input
+                    )
+                attrs.pop(GEN_AI_INPUT_MESSAGES, None)
+                for key in list(attrs):
+                    if key.startswith(_PROMPT_PREFIX):
+                        attrs.pop(key, None)
+            else:
+                attrs[TLSpanAttributes.TRACELOOP_ENTITY_INPUT] = _json_string(
+                    input_messages
+                )
+                _set_message_attributes(
+                    attrs, messages=input_messages, target_prefix=_PROMPT_PREFIX
+                )
         if output_messages:
             attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _json_string(
                 output_messages
@@ -451,6 +592,9 @@ def translate_openlit_span(span: ReadableSpan, *, capture_content: bool) -> bool
                 attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _json_string(
                     _json_value(tool_output)
                 )
+            for key in list(attrs):
+                if key.startswith("gen_ai.tool."):
+                    attrs.pop(key, None)
         elif log_type == "workflow":
             workflow_input = attrs.get(OPENLIT_WORKFLOW_INPUT)
             workflow_output = attrs.get(OPENLIT_WORKFLOW_OUTPUT)
@@ -469,7 +613,13 @@ def translate_openlit_span(span: ReadableSpan, *, capture_content: bool) -> bool
     else:
         _strip_content(attrs)
 
-    _set_backend_status(span, attrs)
+    for key in list(attrs):
+        if key.startswith("gen_ai.tool."):
+            attrs.pop(key, None)
+
+    _set_backend_status(span, attrs, capture_content=capture_content)
+    _remove_openlit_events(span)
+    _sanitize_url_attributes(attrs)
     for key in OFF_CONTRACT_ALIASES:
         attrs.pop(key, None)
     _strip_openlit_vendor_attributes(attrs)

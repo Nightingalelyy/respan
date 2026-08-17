@@ -4,7 +4,7 @@ import json
 from types import SimpleNamespace
 
 from opentelemetry.semconv_ai import SpanAttributes
-
+from opentelemetry.trace import Status, StatusCode
 from respan_instrumentation_openlit import OpenLITInstrumentor
 from respan_instrumentation_openlit._processor import translate_openlit_span
 from respan_sdk.constants.span_attributes import RESPAN_LOG_METHOD, RESPAN_LOG_TYPE
@@ -17,6 +17,20 @@ class FakeSpan:
         self._attributes = attributes
         self.name = name
         self.instrumentation_scope = SimpleNamespace(name="openlit")
+        self._status = Status(StatusCode.UNSET)
+        self._events: tuple[object, ...] = ()
+
+    @property
+    def status(self) -> Status:
+        return self._status
+
+    @status.setter
+    def status(self, value: Status) -> None:
+        self._status = value
+
+    @property
+    def events(self) -> tuple[object, ...]:
+        return self._events
 
 
 def test_chat_span_is_normalized_to_canonical_contract() -> None:
@@ -25,6 +39,7 @@ def test_chat_span_is_normalized_to_canonical_contract() -> None:
             "gen_ai.operation.name": "chat",
             "gen_ai.provider.name": "openai",
             "gen_ai.request.model": "gpt-4.1-mini",
+            "gen_ai.request.stream": "true",
             "gen_ai.input.messages": json.dumps([{"role": "user", "content": "hello"}]),
             "gen_ai.output.messages": json.dumps(
                 [{"role": "assistant", "content": "hi"}]
@@ -37,6 +52,7 @@ def test_chat_span_is_normalized_to_canonical_contract() -> None:
             "gen_ai.usage.total_tokens": 6,
             "model": "forbidden-alias",
             "tool_calls": "forbidden-alias",
+            "traceloop.span.kind": "llm",
         }
     )
 
@@ -44,7 +60,9 @@ def test_chat_span_is_normalized_to_canonical_contract() -> None:
     attrs = span._attributes
     assert attrs[RESPAN_LOG_TYPE] == "chat"
     assert attrs[RESPAN_LOG_METHOD] == "tracing_integration"
+    assert attrs[SpanAttributes.TRACELOOP_ENTITY_PATH] == ""
     assert attrs[SpanAttributes.LLM_SYSTEM] == "openai"
+    assert attrs[SpanAttributes.LLM_IS_STREAMING] is True
     assert attrs[f"{SpanAttributes.LLM_PROMPTS}.0.role"] == "user"
     assert attrs[f"{SpanAttributes.LLM_PROMPTS}.0.content"] == "hello"
     assert attrs[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"] == "hi"
@@ -58,6 +76,7 @@ def test_chat_span_is_normalized_to_canonical_contract() -> None:
     assert "traceloop.span.kind" not in attrs
     assert "model" not in attrs
     assert "tool_calls" not in attrs
+    assert not any(key.startswith("gen_ai.tool.") for key in attrs)
 
 
 def test_tool_span_uses_entity_input_and_output() -> None:
@@ -80,6 +99,7 @@ def test_tool_span_uses_entity_input_and_output() -> None:
         "temperature": 18
     }
     assert not any(key.endswith("tool_calls") for key in attrs)
+    assert not any(key.startswith("gen_ai.tool.") for key in attrs)
 
 
 def test_capture_content_false_removes_sensitive_payloads_but_keeps_usage() -> None:
@@ -99,6 +119,96 @@ def test_capture_content_false_removes_sensitive_payloads_but_keeps_usage() -> N
     assert "secret" not in json.dumps(attrs)
     assert attrs[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] == 11
     assert RESPAN_LOG_TYPE in attrs
+
+
+def test_capture_content_false_strips_all_content_and_exception_events() -> None:
+    secret = "privacy-sentinel-openlit"
+    span = FakeSpan(
+        {
+            "gen_ai.operation.name": "chat",
+            "gen_ai.prompt": secret,
+            "gen_ai.completion": secret,
+            "gen_ai.prompt.42.content": secret,
+            "gen_ai.completion.42.content": secret,
+            "gen_ai.retrieval.query.text": secret,
+            "gen_ai.retrieval.documents": secret,
+            "db.query.text": secret,
+            "db.query.parameter": secret,
+            "db.query.parameter.42": secret,
+        }
+    )
+    span.status = Status(StatusCode.ERROR, f"password={secret}")
+    span._events = (
+        SimpleNamespace(
+            name="exception",
+            attributes={
+                "exception.message": f"postgresql://user:{secret}@db/private",
+                "exception.stacktrace": f"Bearer {secret}",
+            },
+        ),
+        SimpleNamespace(name="kept", attributes={"safe": True}),
+        SimpleNamespace(name="prompt", attributes={"content": secret}),
+    )
+
+    translate_openlit_span(span, capture_content=False)
+
+    assert secret not in json.dumps(span._attributes)
+    assert span._attributes["error.message"] == "OpenLIT operation failed"
+    assert span.events == ()
+    assert secret not in (span.status.description or "")
+    assert span.status.description == "OpenLIT operation failed"
+
+
+def test_url_attributes_remove_credentials_query_and_fragment_in_both_modes() -> None:
+    for capture_content in (True, False):
+        span = FakeSpan(
+            {
+                "gen_ai.operation.name": "chat",
+                "url.full": (
+                    "https://user:plain-password@host.example/v1/models"
+                    "?api_key=plain-secret#private-fragment"
+                ),
+                "client.base_url": (
+                    "https://tenant:tenant-secret@api.example/v1?token=plain-token"
+                ),
+                "server.address": "host.example",
+            }
+        )
+
+        translate_openlit_span(span, capture_content=capture_content)
+
+        assert span._attributes["url.full"] == ("https://host.example/v1/models")
+        assert span._attributes["client.base_url"] == "https://api.example/v1"
+        assert span._attributes["server.address"] == "host.example"
+        serialized = json.dumps(span._attributes)
+        assert "plain-password" not in serialized
+        assert "plain-secret" not in serialized
+        assert "private-fragment" not in serialized
+        assert "tenant-secret" not in serialized
+        assert "plain-token" not in serialized
+
+
+def test_singular_operations_and_native_non_openai_usage_are_preserved() -> None:
+    embedding = FakeSpan(
+        {
+            "gen_ai.operation.name": "embedding",
+            "gen_ai.provider.name": "anthropic",
+            "gen_ai.usage.input_tokens": 9,
+            "gen_ai.usage.output_tokens": 0,
+        }
+    )
+    embedding.instrumentation_scope = SimpleNamespace(
+        name="openlit.instrumentation.anthropic"
+    )
+    translate_openlit_span(embedding, capture_content=True)
+    assert embedding._attributes[RESPAN_LOG_TYPE] == "embedding"
+    assert embedding._attributes[SpanAttributes.LLM_REQUEST_TYPE] == "embedding"
+    assert embedding._attributes[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] == 9
+
+    completion = FakeSpan({"gen_ai.operation.name": "completion"})
+    translate_openlit_span(completion, capture_content=True)
+    assert completion._attributes[RESPAN_LOG_TYPE] == "text"
+    assert completion._attributes[SpanAttributes.LLM_REQUEST_TYPE] == "chat"
 
 
 def test_non_openlit_span_is_ignored() -> None:
