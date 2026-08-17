@@ -1,6 +1,9 @@
 # respan-instrumentation-openai
 
-Respan instrumentation plugin for direct OpenAI SDK usage. A native, Traceloop-free instrumentation: it patches the OpenAI SDK directly and emits Respan's own LLM span conventions (`llm.request.type`, `gen_ai.*`, `traceloop.entity.*`, `respan.entity.log_type`), so chat, responses, completions, and embeddings calls are traced as real LLM calls with token/cost roll-up. Covers sync, async, and streaming.
+Respan instrumentation plugin for direct OpenAI 3.x SDK usage. The native,
+Traceloop-free integration patches sync and async Chat Completions, Responses,
+Completions, and Embeddings resources. Chat and Responses structured-output
+`parse` methods, streaming, tools, usage, and provider failures are included.
 
 ## Configuration
 
@@ -15,9 +18,11 @@ pip install respan-instrumentation-openai
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `RESPAN_API_KEY` | Yes | Your Respan API key. Authenticates both proxy and tracing. |
-| `RESPAN_BASE_URL` | No | Defaults to `https://api.respan.ai`. |
+| `RESPAN_BASE_URL` | No | Defaults to `https://api.respan.ai/api`. |
 
-All vendor-specific variables (e.g. `OPENAI_API_KEY`) are derived from these in your application code.
+Use `OPENAI_API_KEY` and optionally `OPENAI_BASE_URL` when calling OpenAI
+directly. A Respan gateway deployment may instead use its gateway credential
+and OpenAI-compatible base URL.
 
 ## Quickstart
 
@@ -50,6 +55,7 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 
 respan.flush()
+respan.shutdown()
 ```
 
 ### 4. View Dashboard
@@ -58,4 +64,7 @@ After running the script, traces appear on your [Respan dashboard](https://platf
 
 ## Further Reading
 
-See the [examples/openai-sdk/](../../examples/openai-sdk/) directory for runnable examples including streaming, tool use, Responses API, and gateway routing.
+See `respan-example-projects/python/tracing/openai-sdk` for deterministic
+OpenAI 3.x examples. Set `RESPAN_OPENAI_LIVE=1` to opt into a configured live
+provider; deterministic mode still executes the real OpenAI SDK request and
+response parsing layers through an in-process HTTP transport.

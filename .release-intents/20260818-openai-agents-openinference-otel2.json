@@ -1,0 +1,8 @@
+{
+  "summary": "Repair OpenAI, OpenAI Agents, and OpenInference OTel 2.x span semantics, lifecycle, errors, tools, parsing, and example coverage.",
+  "packages": {
+    "respan-instrumentation-openai": "patch",
+    "respan-instrumentation-openai-agents": "patch",
+    "respan-instrumentation-openinference": "patch"
+  }
+}

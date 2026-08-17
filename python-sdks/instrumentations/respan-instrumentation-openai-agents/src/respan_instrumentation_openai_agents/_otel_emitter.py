@@ -1,22 +1,11 @@
-"""Emit OpenAI Agents SDK spans as OTEL ReadableSpan objects.
+"""Translate current OpenAI Agents SDK trace items into canonical OTEL spans."""
 
-Each per-type emitter converts an OpenAI Agents SDK Trace/Span into a
-``ReadableSpan`` with ``traceloop.*`` and ``gen_ai.*`` attributes, then
-injects it into the OTEL pipeline via ``inject_span()``.
+from __future__ import annotations
 
-Attribute mapping follows the same conventions as decorator-based
-``traceloop.entity.*`` fields and auto-instrumented LLM spans
-(``llm.request.type``, ``gen_ai.*``). Auto-emitted spans do not set
-``traceloop.span.kind``.
-
-**Critical:** ALL child spans must have a non-empty
-``traceloop.entity.path`` to prevent accidental root-span promotion
-by ``is_root_span_candidate()``.
-"""
-
-import json
 import logging
-from typing import Any, Dict, Union
+import math
+from collections.abc import Mapping
+from typing import Any
 
 from agents.tracing.span_data import (
     AgentSpanData,
@@ -31,9 +20,11 @@ from agents.tracing.span_data import (
 )
 from agents.tracing.spans import Span, SpanImpl
 from agents.tracing.traces import Trace
-
-from opentelemetry.semconv_ai import SpanAttributes, LLMRequestTypeValues
-
+from opentelemetry.semconv._incubating.attributes.gen_ai_attributes import (
+    GEN_AI_USAGE_INPUT_TOKENS,
+    GEN_AI_USAGE_OUTPUT_TOKENS,
+)
+from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
 from respan_sdk.constants.llm_logging import (
     LOG_TYPE_AGENT,
     LOG_TYPE_CHAT,
@@ -45,16 +36,28 @@ from respan_sdk.constants.llm_logging import (
     LOG_TYPE_WORKFLOW,
 )
 from respan_sdk.constants.span_attributes import (
+    RESPAN_INTERNAL_SPAN_NAME_DETAIL,
+    RESPAN_INTERNAL_SPAN_NAME_KIND,
     RESPAN_LOG_TYPE,
+    RESPAN_METADATA,
     RESPAN_METADATA_AGENT_NAME,
     RESPAN_METADATA_FROM_AGENT,
     RESPAN_METADATA_GUARDRAIL_NAME,
     RESPAN_METADATA_TO_AGENT,
     RESPAN_METADATA_TRIGGERED,
+    RESPAN_TRACE_GROUP_ID,
 )
-from respan_sdk.utils.serialization import serialize_value
 from respan_tracing.utils.span_factory import build_readable_span, inject_span
 
+from respan_instrumentation_openai_agents._serialization import (
+    error_status_code,
+    flatten_metadata_attributes,
+    json_string,
+    json_value,
+    parse_json_string,
+    safe_error_message,
+    safe_text,
+)
 from respan_instrumentation_openai_agents._utils import (
     _format_input_messages,
     _format_output,
@@ -64,519 +67,573 @@ from respan_instrumentation_openai_agents._utils import (
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _resolve_timestamps(item: SpanImpl):
-    """Extract start/end nanoseconds from an SDK span's ISO timestamps."""
+def _resolve_timestamps(item: SpanImpl) -> tuple[int | None, int | None]:
     start_ns = end_ns = None
     if item.started_at:
         try:
             start_ns = int(_parse_ts(item.started_at).timestamp() * 1e9)
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             pass
     if item.ended_at:
         try:
             end_ns = int(_parse_ts(item.ended_at).timestamp() * 1e9)
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             pass
     return start_ns, end_ns
 
 
 def _base_attrs(
-    span_kind: str,
+    *,
     entity_name: str,
     entity_path: str,
     log_type: str,
-) -> Dict[str, Any]:
-    """Build the common attribute dict shared by all emitters."""
-    return {
-        SpanAttributes.TRACELOOP_ENTITY_NAME: entity_name,
-        SpanAttributes.TRACELOOP_ENTITY_PATH: entity_path,
+    metadata: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    normalized_name = safe_text(entity_name, default="unknown")
+    normalized_path = safe_text(entity_path)
+    attrs: dict[str, Any] = {
+        SpanAttributes.TRACELOOP_ENTITY_NAME: normalized_name,
+        SpanAttributes.TRACELOOP_ENTITY_PATH: normalized_path,
         RESPAN_LOG_TYPE: log_type,
     }
+    if metadata:
+        attrs[RESPAN_METADATA] = json_string(metadata)
+        for key, value in flatten_metadata_attributes(metadata).items():
+            attrs[f"{RESPAN_METADATA}.{key}"] = value
+    return attrs
 
 
-def _llm_base_attrs(
-    entity_name: str,
-    entity_path: str,
-    log_type: str,
-) -> Dict[str, Any]:
-    """Common attrs for an LLM span — deliberately WITHOUT a span kind.
-
-    Stamping ``traceloop.span.kind="task"`` on the LLM span makes the
-    backend file it as a generic task, so ``total_cost``/``total_tokens``
-    never roll up ($0). Omitting the kind (the span stays processable via
-    its ``traceloop.entity.path``) lets the backend classify it as a
-    ``chat`` LLM call off ``llm.request.type``/``gen_ai.system``.
-    """
-    return {
-        SpanAttributes.TRACELOOP_ENTITY_NAME: entity_name,
-        SpanAttributes.TRACELOOP_ENTITY_PATH: entity_path,
-        RESPAN_LOG_TYPE: log_type,
-    }
-
-
-def _safe_json(obj: Any) -> str:
-    """JSON-encode *obj*, falling back to str() on failure."""
-    try:
-        return json.dumps(obj, default=str)
-    except Exception:
-        return str(obj)
-
-
-def _set_json_structured_attr(attrs: Dict[str, Any], key: str, value: Any) -> None:
-    """Store structured values as JSON strings for OTEL attribute safety."""
-    if value:
-        attrs[key] = _safe_json(value)
+def _item_metadata(
+    item: Any, extra_metadata: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    trace_metadata = getattr(item, "trace_metadata", None)
+    if isinstance(trace_metadata, Mapping):
+        metadata.update(trace_metadata)
+    if extra_metadata:
+        metadata.update(extra_metadata)
+    return metadata
 
 
 def _set_message_attrs(
-    attrs: Dict[str, Any],
-    prefix: str,
-    messages: list[dict[str, Any]],
+    attrs: dict[str, Any], prefix: str, messages: list[dict[str, Any]]
 ) -> None:
-    """Set indexed GenAI message attributes from normalized chat messages."""
-    for index, message in enumerate(messages):
+    for index, message in enumerate(messages[:50]):
         message_prefix = f"{prefix}.{index}"
         role = message.get("role")
         content = message.get("content")
         tool_calls = message.get("tool_calls")
         if role is not None:
-            attrs[f"{message_prefix}.role"] = str(role)
+            attrs[f"{message_prefix}.role"] = safe_text(
+                role, default="unknown", limit=64
+            )
         if content is not None:
             attrs[f"{message_prefix}.content"] = (
-                content if isinstance(content, str) else _safe_json(content)
+                safe_text(content, limit=4_000)
+                if isinstance(content, str)
+                else json_string(content)
             )
-        _set_json_structured_attr(attrs, f"{message_prefix}.tool_calls", tool_calls)
+        if tool_calls:
+            attrs[f"{message_prefix}.tool_calls"] = json_string(tool_calls)
 
 
 def _set_completion_attrs(
-    attrs: Dict[str, Any],
-    *,
-    content: str,
-    tool_calls: list[dict[str, Any]] | None = None,
+    attrs: dict[str, Any], *, content: str, tool_calls: list[dict[str, Any]]
 ) -> None:
-    completion_prefix = f"{SpanAttributes.LLM_COMPLETIONS}.0"
-    attrs[f"{completion_prefix}.role"] = "assistant"
-    attrs[f"{completion_prefix}.content"] = content
-    _set_json_structured_attr(
-        attrs,
-        f"{completion_prefix}.tool_calls",
-        tool_calls,
-    )
+    prefix = f"{SpanAttributes.LLM_COMPLETIONS}.0"
+    attrs[f"{prefix}.role"] = "assistant"
+    attrs[f"{prefix}.content"] = safe_text(content, limit=4_000)
+    if tool_calls:
+        attrs[f"{prefix}.tool_calls"] = json_string(tool_calls)
 
 
-def _extract_tools(tools: list) -> list:
-    """Convert Response API tool definitions to Chat Completions format."""
+def _get_field(value: Any, name: str, default: Any = None) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(name, default)
+    try:
+        return getattr(value, name, default)
+    except Exception:  # noqa: BLE001 - SDK objects may implement hostile descriptors.
+        return default
+
+
+def _tool_definition(tool: Any) -> dict[str, Any] | None:
+    dumped = json_value(tool)
+    if isinstance(dumped, str):
+        return {"type": "function", "function": {"name": dumped}}
+    if not isinstance(dumped, Mapping):
+        return None
+    tool_type = safe_text(dumped.get("type"), default="function", limit=64)
+    function = dumped.get("function")
+    if isinstance(function, Mapping):
+        name = function.get("name")
+        if not name:
+            return None
+        normalized = {"name": safe_text(name, default="unknown")}
+        for key in ("description", "parameters"):
+            if function.get(key) is not None:
+                normalized[key] = function[key]
+        return {"type": tool_type, "function": normalized}
+
+    name = dumped.get("name")
+    if not name:
+        return dict(dumped)
+    normalized = {"name": safe_text(name, default="unknown")}
+    for key in ("description", "parameters"):
+        if dumped.get(key) is not None:
+            normalized[key] = dumped[key]
+    return {"type": tool_type, "function": normalized}
+
+
+def _extract_tools(tools: Any) -> list[dict[str, Any]]:
+    if not tools:
+        return []
+    if isinstance(tools, str) or not isinstance(tools, (list, tuple)):
+        tools = [tools]
     result = []
-    for tool in tools:
-        tool_dict = serialize_value(tool)
-        if not isinstance(tool_dict, dict):
+    for tool in tools[:50]:
+        definition = _tool_definition(tool)
+        if definition is not None:
+            result.append(definition)
+    return result
+
+
+def _normalize_tool_call(value: Any) -> dict[str, Any] | None:
+    dumped = json_value(value)
+    if not isinstance(dumped, Mapping):
+        return None
+    function = dumped.get("function")
+    if isinstance(function, Mapping):
+        name = function.get("name")
+        arguments = function.get("arguments", {})
+    else:
+        name = dumped.get("name")
+        arguments = dumped.get("arguments", {})
+    if not name:
+        return None
+    normalized: dict[str, Any] = {
+        "type": "function",
+        "function": {
+            "name": safe_text(name, default="unknown"),
+            "arguments": (
+                arguments if isinstance(arguments, str) else json_string(arguments)
+            ),
+        },
+    }
+    call_id = dumped.get("call_id") or dumped.get("id")
+    if call_id:
+        normalized["id"] = safe_text(call_id, limit=256)
+    return normalized
+
+
+def _extract_tool_calls(output: Any) -> list[dict[str, Any]]:
+    dumped = json_value(output)
+    items = dumped if isinstance(dumped, list) else [dumped]
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items[:50]:
+        if not isinstance(item, Mapping):
             continue
-        tool_type = tool_dict.get("type", "")
-        if tool_type == "function":
-            func = {
-                "name": tool_dict.get("name", ""),
-            }
-            desc = tool_dict.get("description")
-            if desc:
-                func["description"] = desc
-            params = tool_dict.get("parameters")
-            if params:
-                func["parameters"] = params
-            result.append({"type": "function", "function": func})
-        else:
-            result.append(tool_dict)
+        candidates: list[Any] = []
+        if item.get("type") == "function_call":
+            candidates.append(item)
+        nested = item.get("tool_calls")
+        if isinstance(nested, list):
+            candidates.extend(nested)
+        for candidate in candidates:
+            normalized = _normalize_tool_call(candidate)
+            if normalized is None:
+                continue
+            signature = json_string(normalized)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            result.append(normalized)
     return result
 
 
-def _extract_tool_calls(output: list) -> list:
-    """Extract function tool calls from Response API output items."""
-    result = []
-    for item in output:
-        item_dict = serialize_value(item)
-        if isinstance(item_dict, dict) and item_dict.get("type") == "function_call":
-            result.append({
-                "id": item_dict.get("call_id", ""),
-                "type": "function",
-                "function": {
-                    "name": item_dict.get("name", ""),
-                    "arguments": item_dict.get("arguments", ""),
-                },
-            })
-    return result
+def _usage_value(usage: Any, *names: str) -> int | None:
+    for name in names:
+        value = _get_field(usage, name)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int) and value >= 0:
+            return int(value)
+        if isinstance(value, float) and math.isfinite(value) and value >= 0:
+            return int(value)
+    return None
 
 
-# ---------------------------------------------------------------------------
-# Per-type emitters
-# ---------------------------------------------------------------------------
+def _set_usage(attrs: dict[str, Any], usage: Any) -> None:
+    if not usage:
+        return
+    input_tokens = _usage_value(usage, "input_tokens", "prompt_tokens")
+    output_tokens = _usage_value(usage, "output_tokens", "completion_tokens")
+    total_tokens = _usage_value(usage, "total_tokens")
+    if input_tokens is not None:
+        attrs[GEN_AI_USAGE_INPUT_TOKENS] = input_tokens
+        attrs[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] = input_tokens
+    if output_tokens is not None:
+        attrs[GEN_AI_USAGE_OUTPUT_TOKENS] = output_tokens
+        attrs[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] = output_tokens
+    if total_tokens is None and input_tokens is not None and output_tokens is not None:
+        total_tokens = input_tokens + output_tokens
+    if total_tokens is not None:
+        attrs[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] = total_tokens
 
 
-def emit_trace(trace_obj: Trace) -> None:
-    """Emit a Trace (root workflow span)."""
-    attrs = _base_attrs(
-        span_kind="workflow",
-        entity_name=trace_obj.name or "trace",
-        entity_path="",  # root — no parent path
-        log_type=LOG_TYPE_WORKFLOW,
-    )
-    attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] = trace_obj.name or "trace"
-
-    span = build_readable_span(
-        name=f"{trace_obj.name}.workflow",
-        trace_id=trace_obj.trace_id,
-        span_id=trace_obj.trace_id,  # root span uses trace_id as span_id
-        attributes=attrs,
-    )
-    inject_span(span)
+def _agent_tools(agent_context: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    return _extract_tools(agent_context.get("tools")) if agent_context else []
 
 
-def emit_agent(item: SpanImpl, span_data: AgentSpanData) -> None:
-    """Emit an AgentSpanData span."""
+def _is_streaming(
+    span_data: Any, explicit: bool, agent_context: Mapping[str, Any] | None
+) -> bool:
+    if explicit:
+        return True
+    model_config = _get_field(span_data, "model_config")
+    if isinstance(model_config, Mapping) and model_config.get("stream") is True:
+        return True
+    return bool(agent_context and agent_context.get("is_streaming"))
+
+
+def _build_item_span(
+    item: SpanImpl,
+    *,
+    name: str,
+    attributes: dict[str, Any],
+) -> Any:
     start_ns, end_ns = _resolve_timestamps(item)
-    name = span_data.name or "agent"
+    error = item.error
+    message = safe_error_message(error)
+    status_code = error_status_code(error) if error else 200
+    if message:
+        attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = json_string(
+            {"error": {"message": message, "status_code": status_code}}
+        )
+    return build_readable_span(
+        name=safe_text(name, default="span"),
+        trace_id=item.trace_id,
+        span_id=item.span_id,
+        parent_id=item.parent_id or item.trace_id,
+        start_time_ns=start_ns,
+        end_time_ns=end_ns,
+        attributes=attributes,
+        status_code=status_code,
+        error_message=message,
+    )
+
+
+def emit_trace(
+    trace_obj: Trace,
+    *,
+    extra_metadata: Mapping[str, Any] | None = None,
+    start_ns: int | None = None,
+    end_ns: int | None = None,
+) -> None:
+    name = safe_text(trace_obj.name, default="trace")
+    metadata: dict[str, Any] = {}
+    trace_metadata = getattr(trace_obj, "metadata", None)
+    if isinstance(trace_metadata, Mapping):
+        metadata.update(trace_metadata)
+    if extra_metadata:
+        metadata.update(extra_metadata)
     attrs = _base_attrs(
-        span_kind="agent",
+        entity_name=name, entity_path="", log_type=LOG_TYPE_WORKFLOW, metadata=metadata
+    )
+    attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] = name
+    attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = json_string({"workflow_name": name})
+    group_id = getattr(trace_obj, "group_id", None)
+    if group_id:
+        attrs[RESPAN_TRACE_GROUP_ID] = safe_text(group_id, limit=512)
+    inject_span(
+        build_readable_span(
+            name=f"{name}.workflow",
+            trace_id=trace_obj.trace_id,
+            span_id=trace_obj.trace_id,
+            start_time_ns=start_ns,
+            end_time_ns=end_ns,
+            attributes=attrs,
+        )
+    )
+
+
+def emit_agent(
+    item: SpanImpl,
+    span_data: AgentSpanData,
+    *,
+    extra_metadata: Mapping[str, Any] | None = None,
+    **_: Any,
+) -> None:
+    name = safe_text(span_data.name, default="agent")
+    attrs = _base_attrs(
         entity_name=name,
         entity_path=name,
         log_type=LOG_TYPE_AGENT,
+        metadata=_item_metadata(item, extra_metadata),
     )
     attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] = name
     attrs[RESPAN_METADATA_AGENT_NAME] = name
-
-    span = build_readable_span(
-        name=f"{name}.agent",
-        trace_id=item.trace_id,
-        span_id=item.span_id,
-        parent_id=item.parent_id or item.trace_id,
-        start_time_ns=start_ns,
-        end_time_ns=end_ns,
-        attributes=attrs,
-        status_code=400 if item.error else 200,
-        error_message=str(item.error) if item.error else None,
+    attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = json_string(
+        {
+            "handoffs": span_data.handoffs or [],
+            "name": name,
+            "output_type": span_data.output_type,
+            "tools": span_data.tools or [],
+        }
     )
-    inject_span(span)
+    inject_span(_build_item_span(item, name=f"{name}.agent", attributes=attrs))
 
 
-def emit_response(item: SpanImpl, span_data: ResponseSpanData) -> None:
-    """Emit a ResponseSpanData span (the actual LLM call)."""
-    start_ns, end_ns = _resolve_timestamps(item)
-    attrs = _llm_base_attrs(
-        entity_name="response",
-        entity_path="response",
+def _llm_attrs(
+    item: SpanImpl,
+    *,
+    entity_name: str,
+    extra_metadata: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    attrs = _base_attrs(
+        entity_name=entity_name,
+        entity_path=entity_name,
         log_type=LOG_TYPE_CHAT,
+        metadata=_item_metadata(item, extra_metadata),
     )
     attrs[SpanAttributes.LLM_REQUEST_TYPE] = LLMRequestTypeValues.CHAT.value
     attrs[SpanAttributes.LLM_SYSTEM] = "openai"
+    return attrs
 
-    # Input
-    input_msgs = _format_input_messages(span_data.input)
-    if input_msgs:
-        attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = _safe_json(input_msgs)
-        _set_message_attrs(attrs, SpanAttributes.LLM_PROMPTS, input_msgs)
 
-    # Response data
-    resp = span_data.response
-    if resp:
-        model = getattr(resp, "model", None) or ""
-        if model:
-            attrs[SpanAttributes.LLM_REQUEST_MODEL] = model
+def _set_llm_content(
+    attrs: dict[str, Any], *, input_value: Any, output_value: Any
+) -> None:
+    messages = _format_input_messages(input_value)
+    if messages:
+        attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = json_string(messages)
+        _set_message_attrs(attrs, SpanAttributes.LLM_PROMPTS, messages)
+    tool_calls = _extract_tool_calls(output_value)
+    output = _format_output(output_value)
+    if output_value is not None:
+        attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = json_string(
+            {"content": output, "tool_calls": tool_calls}
+        )
+        _set_completion_attrs(attrs, content=output, tool_calls=tool_calls)
 
-        if hasattr(resp, "output") and resp.output:
-            output = _format_output(resp.output)
-            attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = output
 
-            tool_calls = _extract_tool_calls(resp.output)
-            _set_completion_attrs(attrs, content=output, tool_calls=tool_calls)
-
-        if hasattr(resp, "tools") and resp.tools:
-            tools_list = _extract_tools(resp.tools)
-            _set_json_structured_attr(
-                attrs,
-                SpanAttributes.LLM_REQUEST_FUNCTIONS,
-                tools_list,
-            )
-
-        usage = getattr(resp, "usage", None)
-        if usage:
-            attrs[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] = (
-                getattr(usage, "input_tokens", 0) or 0
-            )
-            attrs[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] = (
-                getattr(usage, "output_tokens", 0) or 0
-            )
-
-    span = build_readable_span(
-        name="openai.chat",
-        trace_id=item.trace_id,
-        span_id=item.span_id,
-        parent_id=item.parent_id or item.trace_id,
-        start_time_ns=start_ns,
-        end_time_ns=end_ns,
-        attributes=attrs,
-        status_code=400 if item.error else 200,
-        error_message=str(item.error) if item.error else None,
+def emit_response(
+    item: SpanImpl,
+    span_data: ResponseSpanData,
+    *,
+    extra_metadata: Mapping[str, Any] | None = None,
+    agent_context: Mapping[str, Any] | None = None,
+    is_streaming: bool = False,
+) -> None:
+    attrs = _llm_attrs(item, entity_name="response", extra_metadata=extra_metadata)
+    response = span_data.response
+    output = _get_field(response, "output") if response is not None else None
+    _set_llm_content(attrs, input_value=span_data.input, output_value=output)
+    model = _get_field(response, "model")
+    if model:
+        attrs[SpanAttributes.LLM_REQUEST_MODEL] = safe_text(model)
+        attrs[SpanAttributes.LLM_RESPONSE_MODEL] = safe_text(model)
+    tools = _extract_tools(_get_field(response, "tools")) or _agent_tools(agent_context)
+    if tools:
+        attrs[SpanAttributes.LLM_REQUEST_FUNCTIONS] = json_string(tools)
+    _set_usage(attrs, _get_field(span_data, "usage") or _get_field(response, "usage"))
+    attrs[SpanAttributes.LLM_IS_STREAMING] = _is_streaming(
+        span_data, is_streaming, agent_context
     )
-    inject_span(span)
+    inject_span(_build_item_span(item, name="openai.chat", attributes=attrs))
 
 
-def emit_function(item: SpanImpl, span_data: FunctionSpanData) -> None:
-    """Emit a FunctionSpanData span (tool call)."""
-    start_ns, end_ns = _resolve_timestamps(item)
-    name = span_data.name or "function"
+def emit_generation(
+    item: SpanImpl,
+    span_data: GenerationSpanData,
+    *,
+    extra_metadata: Mapping[str, Any] | None = None,
+    agent_context: Mapping[str, Any] | None = None,
+    is_streaming: bool = False,
+) -> None:
+    attrs = _llm_attrs(item, entity_name="generation", extra_metadata=extra_metadata)
+    if span_data.model:
+        attrs[SpanAttributes.LLM_REQUEST_MODEL] = safe_text(span_data.model)
+        attrs[SpanAttributes.LLM_RESPONSE_MODEL] = safe_text(span_data.model)
+    _set_llm_content(attrs, input_value=span_data.input, output_value=span_data.output)
+    tools = _agent_tools(agent_context)
+    if tools:
+        attrs[SpanAttributes.LLM_REQUEST_FUNCTIONS] = json_string(tools)
+    _set_usage(attrs, span_data.usage)
+    attrs[SpanAttributes.LLM_IS_STREAMING] = _is_streaming(
+        span_data, is_streaming, agent_context
+    )
+    inject_span(_build_item_span(item, name="openai.chat", attributes=attrs))
+
+
+def emit_function(
+    item: SpanImpl,
+    span_data: FunctionSpanData,
+    *,
+    extra_metadata: Mapping[str, Any] | None = None,
+    **_: Any,
+) -> None:
+    name = safe_text(span_data.name, default="function")
     attrs = _base_attrs(
-        span_kind="tool",
         entity_name=name,
         entity_path=name,
         log_type=LOG_TYPE_TOOL,
+        metadata=_item_metadata(item, extra_metadata),
     )
-
-    input_str = serialize_value(span_data.input) or ""
-    if not isinstance(input_str, str):
-        input_str = json.dumps(input_str, default=str)
-    attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = _safe_json(
-        [{"role": "tool", "content": input_str}]
+    attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = json_string(
+        {"arguments": parse_json_string(span_data.input), "name": name}
     )
-
-    output_str = serialize_value(span_data.output) or ""
-    if not isinstance(output_str, str):
-        output_str = json.dumps(output_str, default=str)
-    attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _safe_json(
-        {"role": "tool", "content": output_str}
-    )
-
-    span = build_readable_span(
-        name=f"{name}.tool",
-        trace_id=item.trace_id,
-        span_id=item.span_id,
-        parent_id=item.parent_id or item.trace_id,
-        start_time_ns=start_ns,
-        end_time_ns=end_ns,
-        attributes=attrs,
-        status_code=400 if item.error else 200,
-        error_message=str(item.error) if item.error else None,
-    )
-    inject_span(span)
+    attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = json_string(span_data.output)
+    inject_span(_build_item_span(item, name=f"{name}.tool", attributes=attrs))
 
 
-def emit_generation(item: SpanImpl, span_data: GenerationSpanData) -> None:
-    """Emit a GenerationSpanData span."""
-    start_ns, end_ns = _resolve_timestamps(item)
-    attrs = _llm_base_attrs(
-        entity_name="generation",
-        entity_path="generation",
-        log_type=LOG_TYPE_CHAT,
-    )
-    attrs[SpanAttributes.LLM_REQUEST_TYPE] = LLMRequestTypeValues.CHAT.value
-    attrs[SpanAttributes.LLM_SYSTEM] = "openai"
-
-    if span_data.model:
-        attrs[SpanAttributes.LLM_REQUEST_MODEL] = span_data.model
-
-    input_msgs = _format_input_messages(span_data.input)
-    if input_msgs:
-        attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = _safe_json(input_msgs)
-        _set_message_attrs(attrs, SpanAttributes.LLM_PROMPTS, input_msgs)
-
-    output = _format_output(span_data.output)
-    attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = output
-    _set_completion_attrs(
-        attrs,
-        content=output,
-        tool_calls=_extract_tool_calls(span_data.output or []),
-    )
-
-    if span_data.usage:
-        u = span_data.usage
-        attrs[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] = (
-            u.get("prompt_tokens") or u.get("input_tokens") or 0
-        )
-        attrs[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] = (
-            u.get("completion_tokens") or u.get("output_tokens") or 0
-        )
-
-    span = build_readable_span(
-        name="openai.chat",
-        trace_id=item.trace_id,
-        span_id=item.span_id,
-        parent_id=item.parent_id or item.trace_id,
-        start_time_ns=start_ns,
-        end_time_ns=end_ns,
-        attributes=attrs,
-        status_code=400 if item.error else 200,
-        error_message=str(item.error) if item.error else None,
-    )
-    inject_span(span)
-
-
-def emit_handoff(item: SpanImpl, span_data: HandoffSpanData) -> None:
-    """Emit a HandoffSpanData span."""
-    start_ns, end_ns = _resolve_timestamps(item)
-    from_agent = span_data.from_agent or ""
-    to_agent = span_data.to_agent or ""
+def emit_handoff(
+    item: SpanImpl,
+    span_data: HandoffSpanData,
+    *,
+    extra_metadata: Mapping[str, Any] | None = None,
+    **_: Any,
+) -> None:
+    from_agent = safe_text(span_data.from_agent, default="unknown")
+    to_agent = safe_text(span_data.to_agent, default="unknown")
     attrs = _base_attrs(
-        span_kind="task",
         entity_name="handoff",
         entity_path="handoff",
         log_type=LOG_TYPE_HANDOFF,
+        metadata=_item_metadata(item, extra_metadata),
     )
-    attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = _safe_json(from_agent)
-    attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _safe_json(to_agent)
+    attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = json_string(
+        {"from_agent": from_agent}
+    )
+    attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = json_string({"to_agent": to_agent})
     attrs[RESPAN_METADATA_FROM_AGENT] = from_agent
     attrs[RESPAN_METADATA_TO_AGENT] = to_agent
-
-    span = build_readable_span(
-        name="handoff.task",
-        trace_id=item.trace_id,
-        span_id=item.span_id,
-        parent_id=item.parent_id or item.trace_id,
-        start_time_ns=start_ns,
-        end_time_ns=end_ns,
-        attributes=attrs,
-        status_code=400 if item.error else 200,
-        error_message=str(item.error) if item.error else None,
-    )
-    inject_span(span)
+    attrs[RESPAN_INTERNAL_SPAN_NAME_KIND] = "handoff"
+    attrs[RESPAN_INTERNAL_SPAN_NAME_DETAIL] = f"{from_agent}_to_{to_agent}"
+    inject_span(_build_item_span(item, name="handoff.task", attributes=attrs))
 
 
-def emit_guardrail(item: SpanImpl, span_data: GuardrailSpanData) -> None:
-    """Emit a GuardrailSpanData span."""
-    start_ns, end_ns = _resolve_timestamps(item)
-    name = f"guardrail:{span_data.name}"
+def emit_guardrail(
+    item: SpanImpl,
+    span_data: GuardrailSpanData,
+    *,
+    extra_metadata: Mapping[str, Any] | None = None,
+    **_: Any,
+) -> None:
+    name = safe_text(span_data.name, default="guardrail")
     attrs = _base_attrs(
-        span_kind="task",
         entity_name=name,
         entity_path=name,
         log_type=LOG_TYPE_GUARDRAIL,
+        metadata=_item_metadata(item, extra_metadata),
     )
-    attrs[RESPAN_METADATA_GUARDRAIL_NAME] = span_data.name
-    attrs[RESPAN_METADATA_TRIGGERED] = str(span_data.triggered)
-
-    span = build_readable_span(
-        name=f"{name}.task",
-        trace_id=item.trace_id,
-        span_id=item.span_id,
-        parent_id=item.parent_id or item.trace_id,
-        start_time_ns=start_ns,
-        end_time_ns=end_ns,
-        attributes=attrs,
-        status_code=400 if item.error else 200,
-        error_message=str(item.error) if item.error else None,
+    attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = json_string({"name": name})
+    attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = json_string(
+        {"triggered": bool(span_data.triggered)}
     )
-    inject_span(span)
+    attrs[RESPAN_METADATA_GUARDRAIL_NAME] = name
+    attrs[RESPAN_METADATA_TRIGGERED] = bool(span_data.triggered)
+    inject_span(_build_item_span(item, name=f"{name}.task", attributes=attrs))
 
 
-def emit_custom(item: SpanImpl, span_data: CustomSpanData) -> None:
-    """Emit a CustomSpanData span."""
-    start_ns, end_ns = _resolve_timestamps(item)
-    name = span_data.name or "custom"
+def emit_custom(
+    item: SpanImpl,
+    span_data: CustomSpanData,
+    *,
+    extra_metadata: Mapping[str, Any] | None = None,
+    **_: Any,
+) -> None:
+    name = safe_text(span_data.name, default="custom")
+    metadata = _item_metadata(item, extra_metadata)
     attrs = _base_attrs(
-        span_kind="task",
         entity_name=name,
         entity_path=name,
         log_type=LOG_TYPE_CUSTOM,
+        metadata=metadata,
     )
     data = span_data.data or {}
-    for k, v in data.items():
-        if k in ("model",):
-            attrs[SpanAttributes.LLM_REQUEST_MODEL] = v
-        elif k == "prompt_tokens":
-            attrs[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] = v
-        elif k == "completion_tokens":
-            attrs[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] = v
-        elif k == "input":
-            attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = _safe_json(v)
-        elif k == "output":
-            attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _safe_json(v)
-        else:
-            attrs[f"respan.metadata.{k}"] = str(v)
-
-    span = build_readable_span(
-        name=f"{name}.task",
-        trace_id=item.trace_id,
-        span_id=item.span_id,
-        parent_id=item.parent_id or item.trace_id,
-        start_time_ns=start_ns,
-        end_time_ns=end_ns,
-        attributes=attrs,
-        status_code=400 if item.error else 200,
-        error_message=str(item.error) if item.error else None,
-    )
-    inject_span(span)
+    if data.get("model"):
+        attrs[SpanAttributes.LLM_REQUEST_MODEL] = safe_text(data["model"])
+    _set_usage(attrs, data)
+    if "input" in data:
+        attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = json_string(data["input"])
+    if "output" in data:
+        attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = json_string(data["output"])
+    excluded = {
+        "completion_tokens",
+        "input",
+        "input_tokens",
+        "model",
+        "output",
+        "output_tokens",
+        "prompt_tokens",
+        "total_tokens",
+    }
+    remaining = {key: value for key, value in data.items() if key not in excluded}
+    if remaining:
+        attrs[RESPAN_METADATA] = json_string({**metadata, **remaining})
+    inject_span(_build_item_span(item, name=f"{name}.task", attributes=attrs))
 
 
 def _emit_structural(
     item: SpanImpl,
     span_data: Any,
+    *,
     name: str,
     log_type: str,
-    agent_name: str = None,
+    input_value: Mapping[str, Any],
+    extra_metadata: Mapping[str, Any] | None,
 ) -> None:
-    """Emit a structural parent span (Task/Turn).
-
-    These are the SDK's tree scaffolding — one ``TaskSpanData`` per
-    ``Runner.run`` and one ``TurnSpanData`` per agent-loop turn. Without
-    them the agent/LLM/tool children orphan onto the trace root and the
-    backend renders the trace **flat**. Emitting them with the SDK's real
-    ``span_id``/``parent_id`` re-nests the tree.
-    """
-    start_ns, end_ns = _resolve_timestamps(item)
     attrs = _base_attrs(
-        span_kind="task",
         entity_name=name,
         entity_path=name,
         log_type=log_type,
+        metadata=_item_metadata(item, extra_metadata),
     )
+    attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = json_string(input_value)
+    agent_name = getattr(span_data, "agent_name", None)
     if agent_name:
-        attrs[RESPAN_METADATA_AGENT_NAME] = agent_name
-
-    usage = getattr(span_data, "usage", None) or {}
-    if usage:
-        attrs[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] = (
-            usage.get("prompt_tokens") or usage.get("input_tokens") or 0
-        )
-        attrs[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] = (
-            usage.get("completion_tokens") or usage.get("output_tokens") or 0
-        )
-
-    span = build_readable_span(
-        name=f"{name}.task",
-        trace_id=item.trace_id,
-        span_id=item.span_id,
-        parent_id=item.parent_id or item.trace_id,
-        start_time_ns=start_ns,
-        end_time_ns=end_ns,
-        attributes=attrs,
-        status_code=400 if item.error else 200,
-        error_message=str(item.error) if item.error else None,
-    )
-    inject_span(span)
+        attrs[RESPAN_METADATA_AGENT_NAME] = safe_text(agent_name)
+    _set_usage(attrs, getattr(span_data, "usage", None))
+    inject_span(_build_item_span(item, name=f"{name}.task", attributes=attrs))
 
 
-def emit_task(item: SpanImpl, span_data: TaskSpanData) -> None:
-    """Emit a TaskSpanData span (one top-level Runner run)."""
-    _emit_structural(
-        item, span_data, span_data.name or "agent-run", LOG_TYPE_WORKFLOW
-    )
-
-
-def emit_turn(item: SpanImpl, span_data: TurnSpanData) -> None:
-    """Emit a TurnSpanData span (one agent-loop turn)."""
+def emit_task(
+    item: SpanImpl,
+    span_data: TaskSpanData,
+    *,
+    extra_metadata: Mapping[str, Any] | None = None,
+    **_: Any,
+) -> None:
+    name = safe_text(span_data.name, default="agent-run")
     _emit_structural(
         item,
         span_data,
-        f"turn-{span_data.turn}",
-        LOG_TYPE_TASK,
-        span_data.agent_name,
+        name=name,
+        log_type=LOG_TYPE_WORKFLOW,
+        input_value={"name": name},
+        extra_metadata=extra_metadata,
     )
 
 
-# ---------------------------------------------------------------------------
-# Dispatcher
-# ---------------------------------------------------------------------------
+def emit_turn(
+    item: SpanImpl,
+    span_data: TurnSpanData,
+    *,
+    extra_metadata: Mapping[str, Any] | None = None,
+    **_: Any,
+) -> None:
+    turn = safe_text(span_data.turn, default="unknown", limit=64)
+    name = f"turn-{turn}"
+    _emit_structural(
+        item,
+        span_data,
+        name=name,
+        log_type=LOG_TYPE_TASK,
+        input_value={"agent_name": span_data.agent_name, "turn": span_data.turn},
+        extra_metadata=extra_metadata,
+    )
+
 
 _EMITTERS = {
     ResponseSpanData: emit_response,
@@ -591,21 +648,40 @@ _EMITTERS = {
 }
 
 
-def emit_sdk_item(item: Union[Trace, Span[Any]]) -> None:
-    """Convert an OpenAI Agents SDK Trace or Span and inject into OTEL pipeline."""
+def emit_sdk_item(
+    item: Trace | Span[Any],
+    *,
+    extra_metadata: Mapping[str, Any] | None = None,
+    agent_context: Mapping[str, Any] | None = None,
+    is_streaming: bool = False,
+    trace_start_ns: int | None = None,
+    trace_end_ns: int | None = None,
+) -> bool:
+    """Convert one completed SDK item and inject it into the OTEL pipeline."""
     if isinstance(item, Trace):
-        emit_trace(item)
-        return
-
-    if isinstance(item, SpanImpl):
-        emitter = _EMITTERS.get(type(item.span_data))
-        if emitter is None:
-            logger.warning("Unknown span data type: %s", type(item.span_data).__name__)
-            return
-        try:
-            emitter(item, item.span_data)
-        except Exception:
-            logger.exception("Error emitting %s", type(item.span_data).__name__)
-        return
-
-    logger.debug("Skipping unsupported item type: %s", type(item).__name__)
+        emit_trace(
+            item,
+            extra_metadata=extra_metadata,
+            start_ns=trace_start_ns,
+            end_ns=trace_end_ns,
+        )
+        return True
+    if not isinstance(item, SpanImpl):
+        logger.debug("Skipping unsupported item type: %s", type(item).__name__)
+        return False
+    emitter = _EMITTERS.get(type(item.span_data))
+    if emitter is None:
+        logger.warning("Unknown span data type: %s", type(item.span_data).__name__)
+        return False
+    try:
+        emitter(
+            item,
+            item.span_data,
+            extra_metadata=extra_metadata,
+            agent_context=agent_context,
+            is_streaming=is_streaming,
+        )
+    except Exception:
+        logger.exception("Error emitting %s", type(item.span_data).__name__)
+        return False
+    return True

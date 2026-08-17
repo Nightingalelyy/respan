@@ -1,4 +1,11 @@
+"""Lifecycle management for generic OpenInference instrumentors."""
+
+from __future__ import annotations
+
 import logging
+import threading
+from dataclasses import dataclass
+from typing import Any, ClassVar
 
 from opentelemetry import trace
 
@@ -7,35 +14,35 @@ from respan_instrumentation_openinference._translator import OpenInferenceTransl
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class _SharedRegistration:
+    instrumentor: Any
+    kwargs: dict[str, Any]
+    is_span_processor: bool
+    owned_activation: bool
+    refcount: int = 1
+
+
 class OpenInferenceInstrumentor:
-    """Generic wrapper that adapts any OpenInference instrumentor to the
-    Respan ``Instrumentation`` protocol.
+    """Adapt any OpenInference instrumentor to Respan's lifecycle protocol.
 
-    Usage::
-
-        from openinference.instrumentation.google_adk import GoogleADKInstrumentor
-
-        respan = Respan(instrumentations=[
-            OpenInferenceInstrumentor(GoogleADKInstrumentor)
-        ])
-
-    Handles both standard OI instrumentors (``.instrument()``) and
-    SpanProcessor-based ones (e.g. pydantic-ai, strands-agents) automatically.
-
-    Automatically registers an ``OpenInferenceTranslator`` SpanProcessor that
-    converts OI span attributes to OpenLLMetry/Traceloop format before export.
+    Standard ``instrument``/``uninstrument`` delegates and processor-style
+    delegates are shared process-wide per instrumentor class. The first active
+    wrapper owns activation and the last wrapper owns teardown. A single
+    translator is kept before export processors while any delegate is active.
     """
 
-    # Class-level flag: only register the translator once across all instances
-    _translator_registered = False
-    _translator = None
-    _active_span_processors = []
+    _lock: ClassVar[threading.RLock] = threading.RLock()
+    _translator: ClassVar[OpenInferenceTranslator] = OpenInferenceTranslator()
+    _translator_registered: ClassVar[bool] = False
+    _active_span_processors: ClassVar[list[Any]] = []
+    _registrations: ClassVar[dict[type, _SharedRegistration]] = {}
+    _provider: ClassVar[Any] = None
 
-    def __init__(self, instrumentor_class: type, **kwargs) -> None:
+    def __init__(self, instrumentor_class: type, **kwargs: Any) -> None:
         self._instrumentor_class = instrumentor_class
-        # tracer_provider is always set by activate(); drop to avoid collision
         kwargs.pop("tracer_provider", None)
-        self._instrumentor_kwargs = kwargs
+        self._instrumentor_kwargs = dict(kwargs)
         self._instrumentor = None
         self._is_instrumented = False
         self._is_span_processor = False
@@ -43,123 +50,263 @@ class OpenInferenceInstrumentor:
 
     @classmethod
     def _get_translator(cls) -> OpenInferenceTranslator:
-        if cls._translator is None:
-            cls._translator = OpenInferenceTranslator()
         return cls._translator
 
     @staticmethod
-    def _get_active_span_processor(tp):
-        return getattr(tp, "_active_span_processor", None)
+    def _active_processor_state(provider: Any) -> tuple[Any, tuple[Any, ...] | None]:
+        active = getattr(provider, "_active_span_processor", None)
+        processors = getattr(active, "_span_processors", None) if active else None
+        return active, processors
+
+    @staticmethod
+    def _delegate_is_active(delegate: Any) -> bool:
+        for attribute_name in (
+            "is_instrumented_by_opentelemetry",
+            "_is_instrumented_by_opentelemetry",
+        ):
+            value = getattr(delegate, attribute_name, None)
+            if value is None:
+                continue
+            try:
+                return bool(value() if callable(value) else value)
+            except Exception:
+                logger.debug(
+                    "Could not inspect OpenInference delegate state",
+                    exc_info=True,
+                )
+        return False
 
     @classmethod
-    def _rebuild_processor_chain(cls, tp) -> None:
-        asp = cls._get_active_span_processor(tp)
-        translator = cls._get_translator()
-
-        if asp is None:
-            return
-
-        processors = getattr(asp, "_span_processors", None)
+    def _existing_processor(cls, provider: Any, processor_class: type) -> Any | None:
+        """Return an externally registered processor of the requested class."""
+        _, processors = cls._active_processor_state(provider)
         if processors is None:
+            return None
+        return next(
+            (
+                processor
+                for processor in processors
+                if isinstance(processor, processor_class)
+            ),
+            None,
+        )
+
+    @classmethod
+    def _rebuild_processor_chain(cls, provider: Any) -> None:
+        active, processors = cls._active_processor_state(provider)
+        if active is None or processors is None:
             return
 
-        active_oi_processors = tuple(cls._active_span_processors)
+        processor_delegates = tuple(
+            registration.instrumentor
+            for registration in cls._registrations.values()
+            if registration.is_span_processor
+        )
         other_processors = tuple(
             processor
             for processor in processors
-            if processor is not translator and processor not in active_oi_processors
+            if processor is not cls._translator
+            and processor not in processor_delegates
+            and processor not in cls._active_span_processors
         )
-
-        asp._span_processors = (
-            *active_oi_processors,
-            translator,
-            *other_processors,
-        )
-        cls._translator_registered = True
-
-    @classmethod
-    def _remove_processor_instance(cls, tp, processor_to_remove) -> None:
-        asp = cls._get_active_span_processor(tp)
-        if asp is None:
-            return
-        processors = getattr(asp, "_span_processors", None)
-        if processors is None:
-            return
-        asp._span_processors = tuple(
-            processor
-            for processor in processors
-            if processor is not processor_to_remove
-        )
-
-    @classmethod
-    def _ensure_translator_registered(cls, tp) -> None:
-        translator = cls._get_translator()
-        asp = cls._get_active_span_processor(tp)
-        processors = getattr(asp, "_span_processors", None) if asp is not None else None
-
-        if processors is not None:
-            cls._rebuild_processor_chain(tp)
-            logger.info("Registered OpenInference → OpenLLMetry translator")
-            return
-
-        if hasattr(tp, "add_span_processor"):
-            tp.add_span_processor(translator)
+        if cls._registrations:
+            active._span_processors = (
+                *processor_delegates,
+                cls._translator,
+                *other_processors,
+            )
             cls._translator_registered = True
-            logger.info("Registered OpenInference → OpenLLMetry translator")
+        else:
+            active._span_processors = other_processors
+            cls._translator_registered = False
+        cls._active_span_processors = list(processor_delegates)
+
+    @classmethod
+    def _ensure_translator_registered(cls, provider: Any) -> None:
+        active, processors = cls._active_processor_state(provider)
+        if active is not None and processors is not None:
+            remaining = tuple(
+                processor
+                for processor in processors
+                if processor is not cls._translator
+            )
+            active._span_processors = (cls._translator, *remaining)
+            cls._translator_registered = True
+            return
+        add_span_processor = getattr(provider, "add_span_processor", None)
+        if callable(add_span_processor):
+            add_span_processor(cls._translator)
+            cls._translator_registered = True
+
+    @classmethod
+    def _remove_processor(cls, provider: Any, target: Any) -> None:
+        active, processors = cls._active_processor_state(provider)
+        if active is not None and processors is not None:
+            active._span_processors = tuple(
+                processor for processor in processors if processor is not target
+            )
+
+    @classmethod
+    def _reset_if_idle(cls) -> None:
+        if cls._registrations:
+            return
+        provider = cls._provider
+        if provider is not None:
+            cls._remove_processor(provider, cls._translator)
+        cls._translator_registered = False
+        cls._active_span_processors = []
+        cls._provider = None
 
     def activate(self) -> None:
-        self._instrumentor = self._instrumentor_class()
-        tp = trace.get_tracer_provider()
+        """Activate or reference-count one shared OpenInference delegate."""
+        if self._is_instrumented:
+            return
 
-        # Register the OI → OpenLLMetry translator once so it runs
-        # BEFORE the export processors on every OI span.  The translator
-        # enriches spans with traceloop.* attributes that is_processable_span()
-        # needs to see.  Insert at position 0 of the processor list so it
-        # runs before BufferingSpanProcessor → FilteringSpanProcessor → exporter.
-        if not OpenInferenceInstrumentor._translator_registered:
-            OpenInferenceInstrumentor._ensure_translator_registered(tp)
+        cls = OpenInferenceInstrumentor
+        with cls._lock:
+            if self._is_instrumented:
+                return
+            provider = trace.get_tracer_provider()
+            if cls._provider is not None and cls._provider is not provider:
+                raise RuntimeError(
+                    "OpenInference delegates are already active on another tracer provider"
+                )
 
-        # Standard OI instrumentors expose .instrument()
-        if hasattr(self._instrumentor, "instrument"):
-            self._instrumentor.instrument(tracer_provider=tp, **self._instrumentor_kwargs)
-        # SpanProcessor-based OI packages (pydantic-ai, strands-agents)
-        elif hasattr(tp, "add_span_processor"):
-            OpenInferenceInstrumentor._active_span_processors = [
-                *OpenInferenceInstrumentor._active_span_processors,
-                self._instrumentor,
-            ]
-            asp = self._get_active_span_processor(tp)
-            processors = getattr(asp, "_span_processors", None) if asp is not None else None
-            if processors is not None:
-                OpenInferenceInstrumentor._rebuild_processor_chain(tp)
-            else:
-                tp.add_span_processor(self._instrumentor)
-                OpenInferenceInstrumentor._ensure_translator_registered(tp)
-            self._is_span_processor = True
+            registration = cls._registrations.get(self._instrumentor_class)
+            if registration is not None:
+                if registration.kwargs != self._instrumentor_kwargs:
+                    logger.warning(
+                        "%s is already active; the first instrumentation settings win",
+                        self.name,
+                    )
+                registration.refcount += 1
+                self._instrumentor = registration.instrumentor
+                self._is_span_processor = registration.is_span_processor
+                self._is_instrumented = True
+                return
 
-        self._is_instrumented = True
-        logger.info("%s instrumentation activated (via OpenInference)", self.name)
+            delegate = self._instrumentor_class()
+            is_standard = callable(getattr(delegate, "instrument", None))
+            is_processor = not is_standard and callable(
+                getattr(provider, "add_span_processor", None)
+            )
+            if not is_standard and not is_processor:
+                raise TypeError(
+                    f"{self._instrumentor_class.__name__} is neither an "
+                    "OpenInference instrumentor nor a span processor"
+                )
+
+            owned_activation = False
+            try:
+                if is_standard:
+                    already_active = cls._delegate_is_active(delegate)
+                    if not already_active:
+                        owned_activation = True
+                        delegate.instrument(
+                            tracer_provider=provider,
+                            **self._instrumentor_kwargs,
+                        )
+                else:
+                    external_delegate = cls._existing_processor(
+                        provider, self._instrumentor_class
+                    )
+                    if external_delegate is not None:
+                        delegate = external_delegate
+                    else:
+                        provider.add_span_processor(delegate)
+                        owned_activation = True
+
+                cls._provider = provider
+                registration = _SharedRegistration(
+                    instrumentor=delegate,
+                    kwargs=dict(self._instrumentor_kwargs),
+                    is_span_processor=is_processor,
+                    owned_activation=owned_activation,
+                )
+                cls._registrations[self._instrumentor_class] = registration
+                if is_processor:
+                    cls._active_span_processors.append(delegate)
+                    cls._rebuild_processor_chain(provider)
+                else:
+                    cls._ensure_translator_registered(provider)
+                    cls._rebuild_processor_chain(provider)
+            except BaseException:
+                cls._registrations.pop(self._instrumentor_class, None)
+                if owned_activation:
+                    cls._remove_processor(provider, delegate)
+                if owned_activation and is_standard:
+                    uninstrument = getattr(delegate, "uninstrument", None)
+                    if callable(uninstrument):
+                        try:
+                            uninstrument()
+                        except Exception:
+                            logger.exception(
+                                "Failed to roll back partial OpenInference activation"
+                            )
+                if owned_activation and is_processor:
+                    shutdown = getattr(delegate, "shutdown", None)
+                    if callable(shutdown):
+                        try:
+                            shutdown()
+                        except Exception:
+                            logger.exception(
+                                "Failed to roll back OpenInference processor activation"
+                            )
+                cls._reset_if_idle()
+                raise
+
+            self._instrumentor = delegate
+            self._is_span_processor = is_processor
+            self._is_instrumented = True
+            logger.info("%s instrumentation activated (via OpenInference)", self.name)
 
     def deactivate(self) -> None:
-        if self._is_instrumented and self._instrumentor is not None:
-            try:
-                if self._is_span_processor:
-                    self._instrumentor.shutdown()
-                    OpenInferenceInstrumentor._active_span_processors = [
-                        processor
-                        for processor in OpenInferenceInstrumentor._active_span_processors
-                        if processor is not self._instrumentor
-                    ]
-                    OpenInferenceInstrumentor._remove_processor_instance(
-                        trace.get_tracer_provider(),
-                        self._instrumentor,
-                    )
-                    OpenInferenceInstrumentor._rebuild_processor_chain(
-                        trace.get_tracer_provider()
-                    )
-                else:
-                    self._instrumentor.uninstrument()
-            except Exception:
-                pass
+        """Release this wrapper and tear down only the last owned delegate."""
+        if not self._is_instrumented:
+            return
+
+        cls = OpenInferenceInstrumentor
+        with cls._lock:
+            if not self._is_instrumented:
+                return
             self._is_instrumented = False
+            registration = cls._registrations.get(self._instrumentor_class)
+            if registration is None:
+                self._instrumentor = None
+                self._is_span_processor = False
+                cls._reset_if_idle()
+                return
+
+            registration.refcount = max(0, registration.refcount - 1)
+            if registration.refcount:
+                self._instrumentor = None
+                self._is_span_processor = False
+                return
+
+            delegate = registration.instrumentor
+            provider = cls._provider or trace.get_tracer_provider()
+            cls._registrations.pop(self._instrumentor_class, None)
+            try:
+                if registration.is_span_processor:
+                    if registration.owned_activation:
+                        cls._remove_processor(provider, delegate)
+                    shutdown = getattr(delegate, "shutdown", None)
+                    if registration.owned_activation and callable(shutdown):
+                        shutdown()
+                elif registration.owned_activation:
+                    uninstrument = getattr(delegate, "uninstrument", None)
+                    if callable(uninstrument):
+                        uninstrument()
+            except Exception:
+                logger.exception("Failed to deactivate %s", self.name)
+            finally:
+                cls._active_span_processors = [
+                    processor
+                    for processor in cls._active_span_processors
+                    if processor is not delegate
+                ]
+                cls._rebuild_processor_chain(provider)
+                cls._reset_if_idle()
+                self._instrumentor = None
+                self._is_span_processor = False
         logger.info("%s instrumentation deactivated", self.name)

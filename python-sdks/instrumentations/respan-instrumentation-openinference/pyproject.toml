@@ -12,8 +12,8 @@ packages = [
 [tool.poetry.dependencies]
 python = ">=3.11,<3.14"
 respan-tracing = "^2.15.2"
-openinference-semantic-conventions = ">=0.1.28"
-opentelemetry-semantic-conventions-ai = ">=0.4.1"
+openinference-semantic-conventions = ">=0.1.32,<0.2.0"
+opentelemetry-semantic-conventions-ai = ">=0.5.1,<0.6.0"
 # Users install individual OpenInference packages as needed, e.g.:
 #   pip install openinference-instrumentation-google-adk
 
