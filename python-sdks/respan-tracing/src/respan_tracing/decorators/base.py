@@ -1,21 +1,23 @@
-import json
 import inspect
+import json
+import os
 from functools import wraps
-from typing import Optional, TypeVar, Callable, Any, ParamSpec, Awaitable
+from typing import Any, Awaitable, Callable, Optional, ParamSpec, TypeVar
+
 from opentelemetry import context as context_api
-from opentelemetry.trace.status import Status, StatusCode
 from opentelemetry.semconv_ai import SpanAttributes
+from opentelemetry.trace.status import Status, StatusCode
 from respan_sdk import FilterParamDict
-from respan_tracing.constants.context_constants import (
-    ENABLE_CONTENT_TRACING_KEY
-)
+from respan_sdk.utils.serialization import serialize_value
+
+from respan_tracing.constants.context_constants import ENABLE_CONTENT_TRACING_KEY
 from respan_tracing.constants.generic_constants import LOGGER_NAME_DECORATORS
 from respan_tracing.utils.auto_flush import (
     flush_after_span,
     has_recording_parent_span,
 )
 from respan_tracing.utils.logging import get_respan_logger
-from respan_tracing.utils.span_setup import setup_span, cleanup_span, LinksParam
+from respan_tracing.utils.span_setup import LinksParam, cleanup_span, setup_span
 
 logger = get_respan_logger(LOGGER_NAME_DECORATORS)
 
@@ -32,7 +34,13 @@ def _is_json_size_valid(json_str: str) -> bool:
 
 def _should_send_prompts() -> bool:
     """Check if we should send prompt content in traces"""
-    return context_api.get_value(ENABLE_CONTENT_TRACING_KEY) is not False
+    if context_api.get_value(ENABLE_CONTENT_TRACING_KEY) is False:
+        return False
+
+    trace_content = os.getenv("TRACELOOP_TRACE_CONTENT")
+    if trace_content is None:
+        return True
+    return trace_content.strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _is_async_method(fn):
@@ -75,23 +83,49 @@ def _handle_span_input(span, args, kwargs):
     """Handle entity input logging"""
     try:
         if _should_send_prompts():
-            json_input = json.dumps({"args": list(args), "kwargs": kwargs})
+            json_input = json.dumps(
+                {
+                    "args": [_serialize_input_value(value) for value in args],
+                    "kwargs": {
+                        str(key): _serialize_input_value(value)
+                        for key, value in kwargs.items()
+                    },
+                }
+            )
             if _is_json_size_valid(json_input):
                 span.set_attribute(SpanAttributes.TRACELOOP_ENTITY_INPUT, json_input)
-    except (TypeError, ValueError) as e:
-        # Skip if serialization fails
-        pass
+    except (RecursionError, TypeError, ValueError) as error:
+        logger.debug("Skipping span input that could not be serialized: %s", error)
+
+
+def _serialize_input_value(value):
+    """Bound arbitrary runtime objects without traversing private client state."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {
+            str(key): _serialize_input_value(nested_value)
+            for key, nested_value in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_serialize_input_value(nested_value) for nested_value in value]
+
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return _serialize_input_value(model_dump())
+
+    return f"<{type(value).__name__}>"
+
 
 def _handle_span_output(span, result):
     """Handle entity output logging"""
     try:
         if _should_send_prompts():
-            json_output = json.dumps(result)
+            json_output = json.dumps(serialize_value(value=result))
             if _is_json_size_valid(json_output):
                 span.set_attribute(SpanAttributes.TRACELOOP_ENTITY_OUTPUT, json_output)
-    except (TypeError, ValueError) as e:
-        # Skip if serialization fails
-        pass
+    except (RecursionError, TypeError, ValueError) as error:
+        logger.debug("Skipping span output that could not be serialized: %s", error)
 
 
 def _cleanup_span(span, ctx_token, *, is_root_boundary: bool = False):
@@ -99,8 +133,8 @@ def _cleanup_span(span, ctx_token, *, is_root_boundary: bool = False):
     cleanup_span(
         span,
         ctx_token,
-        entity_name_token=getattr(span, '_entity_name_token', None),
-        entity_path_token=getattr(span, '_entity_path_token', None),
+        entity_name_token=getattr(span, "_entity_name_token", None),
+        entity_path_token=getattr(span, "_entity_path_token", None),
     )
     flush_after_span(is_root_boundary)
 
@@ -118,7 +152,9 @@ def _handle_generator(span, ctx_token, generator, *, is_root_boundary: bool = Fa
         _cleanup_span(span, ctx_token, is_root_boundary=is_root_boundary)
 
 
-async def _ahandle_generator(span, ctx_token, async_generator, *, is_root_boundary: bool = False):
+async def _ahandle_generator(
+    span, ctx_token, async_generator, *, is_root_boundary: bool = False
+):
     """Handle async generator functions"""
     try:
         async for item in async_generator:
@@ -272,7 +308,9 @@ def _create_entity_method_decorator(
                         span.record_exception(e)
                         raise
                     finally:
-                        _cleanup_span(span, ctx_token, is_root_boundary=is_root_boundary)
+                        _cleanup_span(
+                            span, ctx_token, is_root_boundary=is_root_boundary
+                        )
 
                 return async_wrapper
         else:
@@ -312,7 +350,9 @@ def _create_entity_method_decorator(
                     raise
                 finally:
                     if not inspect.isgeneratorfunction(fn):
-                        _cleanup_span(span, ctx_token, is_root_boundary=is_root_boundary)
+                        _cleanup_span(
+                            span, ctx_token, is_root_boundary=is_root_boundary
+                        )
 
             return sync_wrapper
 

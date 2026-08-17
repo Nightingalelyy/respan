@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import logging
 from typing import Any
 
@@ -11,6 +12,10 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanProcessor
 from opentelemetry.semconv_ai import LLMRequestTypeValues
 from opentelemetry.semconv_ai import SpanAttributes as TLSpanAttributes
+from respan_sdk.constants.llm_logging import LOG_TYPE_TEXT
+from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
+from respan_tracing.core.tracer import RespanTracer
+
 from respan_instrumentation_huggingface._constants import (
     ASSISTANT_ROLE,
     HUGGINGFACE_GEN_AI_SYSTEM,
@@ -20,9 +25,6 @@ from respan_instrumentation_huggingface._constants import (
     TRANSFORMERS_TEXT_GENERATION_SPAN_NAME,
     USER_ROLE,
 )
-from respan_sdk.constants.llm_logging import LOG_TYPE_TEXT
-from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
-from respan_tracing.core.tracer import RespanTracer
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +103,18 @@ def _indexed_content_indices(attrs: dict[str, Any], prefix: str) -> set[str]:
     return indices
 
 
+def _indexed_contents(attrs: dict[str, Any], prefix: str) -> list[Any]:
+    def sort_key(index: str) -> tuple[int, int | str]:
+        if index.isdigit():
+            return (0, int(index))
+        return (1, index)
+
+    return [
+        attrs[f"{prefix}.{index}.content"]
+        for index in sorted(_indexed_content_indices(attrs, prefix), key=sort_key)
+    ]
+
+
 class HuggingFaceSpanContractProcessor(SpanProcessor):
     """Normalize upstream Transformers spans into Respan's span contract."""
 
@@ -135,6 +149,27 @@ class HuggingFaceSpanContractProcessor(SpanProcessor):
             attrs.setdefault(
                 f"{TLSpanAttributes.LLM_COMPLETIONS}.{index}.role",
                 ASSISTANT_ROLE,
+            )
+
+        prompts = _indexed_contents(attrs, TLSpanAttributes.LLM_PROMPTS)
+        completions = _indexed_contents(attrs, TLSpanAttributes.LLM_COMPLETIONS)
+        if prompts:
+            attrs[TLSpanAttributes.TRACELOOP_ENTITY_INPUT] = json.dumps(
+                prompts,
+                separators=(",", ":"),
+            )
+        if completions:
+            attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = json.dumps(
+                completions,
+                separators=(",", ":"),
+            )
+        if len(completions) > 1:
+            # Respan's chat projection renders completion index 0. Keep every
+            # indexed attribute and make that canonical content unambiguously
+            # preserve the full batch in prompt order.
+            attrs[f"{TLSpanAttributes.LLM_COMPLETIONS}.0.content"] = json.dumps(
+                completions,
+                separators=(",", ":"),
             )
 
         span._attributes = attrs

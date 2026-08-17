@@ -1,0 +1,9 @@
+{
+  "summary": "Repair Chroma workflow serialization and preserve Hugging Face and Instructor content, tool calls, and exact usage in canonical trace attributes",
+  "packages": {
+    "respan-sdk": "patch",
+    "respan-tracing": "patch",
+    "respan-instrumentation-huggingface": "patch",
+    "respan-instrumentation-instructor": "patch"
+  }
+}

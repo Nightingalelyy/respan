@@ -1,16 +1,13 @@
 import asyncio
 import json
 import sys
-from types import ModuleType
-from types import SimpleNamespace
-from typing import Literal
-from typing import TypedDict
+from types import ModuleType, SimpleNamespace
+from typing import Literal, TypedDict
 
 import pytest
 from opentelemetry.semconv_ai import SpanAttributes
-
-from respan_instrumentation_instructor import InstructorInstrumentor
-from respan_instrumentation_instructor import _instrumentation
+from respan_instrumentation_instructor import InstructorInstrumentor, _instrumentation
+from respan_instrumentation_instructor._instrumentation import _set_success_attributes
 from respan_sdk.constants.span_attributes import (
     GEN_AI_SYSTEM,
     RESPAN_LOG_TYPE,
@@ -85,6 +82,34 @@ class FakeTracer:
         span = FakeSpan(name=name, attributes=attributes)
         self.spans.append(span)
         return FakeSpanContext(span=span)
+
+
+def _raw_tool_completion():
+    return SimpleNamespace(
+        model="gpt-4o-mini-2024-07-18",
+        usage=SimpleNamespace(
+            prompt_tokens=124,
+            completion_tokens=71,
+            total_tokens=195,
+        ),
+        choices=[
+            SimpleNamespace(
+                finish_reason="tool_calls",
+                message=SimpleNamespace(
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="call_release_note",
+                            type="function",
+                            function=SimpleNamespace(
+                                name="ReleaseNote",
+                                arguments='{"title":"Canonical tracing"}',
+                            ),
+                        )
+                    ]
+                ),
+            )
+        ],
+    )
 
 
 def _fake_create(**kwargs):
@@ -275,8 +300,7 @@ def test_patch_create_emits_native_respan_chat_span(monkeypatch):
     assert attributes[GEN_AI_SYSTEM] == "openai"
     assert attributes[f"{SpanAttributes.LLM_PROMPTS}.0.role"] == "user"
     assert (
-        attributes[f"{SpanAttributes.LLM_PROMPTS}.0.content"]
-        == "Extract Ada Lovelace."
+        attributes[f"{SpanAttributes.LLM_PROMPTS}.0.content"] == "Extract Ada Lovelace."
     )
     assert attributes[f"{SpanAttributes.LLM_COMPLETIONS}.0.role"] == "assistant"
     assert attributes[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"] == '{"name":"Ada"}'
@@ -396,6 +420,61 @@ def test_patch_create_records_consumed_iterable_output(monkeypatch):
     )
 
 
+def test_success_attributes_extract_raw_tool_call_and_exact_usage():
+    span = FakeSpan(name="instructor.create_with_completion", attributes={})
+
+    _set_success_attributes(
+        span=span,
+        result=({"title": "Canonical tracing"}, _raw_tool_completion()),
+    )
+
+    assert span.attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] == (
+        '{"title":"Canonical tracing"}'
+    )
+    assert span.attributes[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"] == (
+        '{"title":"Canonical tracing"}'
+    )
+    assert json.loads(
+        span.attributes[f"{SpanAttributes.LLM_COMPLETIONS}.0.tool_calls"]
+    ) == [
+        {
+            "id": "call_release_note",
+            "type": "function",
+            "function": {
+                "name": "ReleaseNote",
+                "arguments": '{"title":"Canonical tracing"}',
+            },
+        }
+    ]
+    assert span.attributes["gen_ai.usage.input_tokens"] == 124
+    assert span.attributes["gen_ai.usage.output_tokens"] == 71
+    assert span.attributes[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] == 124
+    assert span.attributes[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] == 71
+    assert span.attributes[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] == 195
+    assert span.attributes[SpanAttributes.GEN_AI_RESPONSE_FINISH_REASON] == (
+        "tool_calls"
+    )
+    assert span.attributes[SpanAttributes.LLM_RESPONSE_MODEL] == (
+        "gpt-4o-mini-2024-07-18"
+    )
+    assert "tools" not in span.attributes
+    assert "tool_calls" not in span.attributes
+
+
+def test_success_attributes_preserve_structured_tuple_results():
+    span = FakeSpan(name="instructor.create", attributes={})
+
+    _set_success_attributes(
+        span=span,
+        result=({"name": "Ada"}, {"confidence": 0.99}),
+    )
+
+    assert json.loads(span.attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == [
+        {"name": "Ada"},
+        {"confidence": 0.99},
+    ]
+
+
 def test_instructor_create_uses_wrapped_create_fn_without_duplicate_span(monkeypatch):
     fake = _install_fake_instructor_modules(monkeypatch)
     tracer = _install_fake_tracer(monkeypatch)
@@ -413,9 +492,9 @@ def test_instructor_create_uses_wrapped_create_fn_without_duplicate_span(monkeyp
 
     assert len(tracer.spans) == 1
     assert tracer.spans[0].name == "instructor.create"
-    assert "UserResult" in tracer.spans[0].attributes[
-        SpanAttributes.LLM_REQUEST_FUNCTIONS
-    ]
+    assert (
+        "UserResult" in tracer.spans[0].attributes[SpanAttributes.LLM_REQUEST_FUNCTIONS]
+    )
 
 
 def test_create_iterable_preserves_method_context_for_wrapped_create_fn(monkeypatch):
@@ -441,6 +520,90 @@ def test_create_iterable_preserves_method_context_for_wrapped_create_fn(monkeypa
     schema = json.loads(functions)[0]["function"]["parameters"]
     assert schema["title"] == "TicketResult"
     assert schema["properties"]["priority"]["enum"] == ["low", "medium", "high"]
+
+
+def test_unwrapped_create_iterable_records_items_after_consumption(monkeypatch):
+    tracer = _install_fake_tracer(monkeypatch)
+
+    class StreamingClient:
+        provider = FakeProvider()
+        mode = FakeMode()
+        default_model = "gpt-4o-mini"
+        create_fn = staticmethod(_fake_create)
+
+        def create_iterable(self, messages, response_model, hooks=None, **kwargs):
+            return iter([{"task": "send checklist"}, {"task": "finish dashboard"}])
+
+    instrumentor = InstructorInstrumentor()
+    wrapped = instrumentor._wrap_instructor_method(
+        original_method=StreamingClient.create_iterable,
+        operation_name="instructor.create_iterable",
+    )
+
+    result = wrapped(
+        StreamingClient(),
+        messages=[{"role": "user", "content": "Extract action items."}],
+        response_model=TicketResult,
+    )
+
+    assert SpanAttributes.TRACELOOP_ENTITY_OUTPUT not in tracer.spans[0].attributes
+    assert list(result) == [
+        {"task": "send checklist"},
+        {"task": "finish dashboard"},
+    ]
+    assert json.loads(
+        tracer.spans[0].attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
+    ) == [
+        {"task": "send checklist"},
+        {"task": "finish dashboard"},
+    ]
+
+
+def test_unwrapped_async_create_iterable_records_items_after_consumption(monkeypatch):
+    tracer = _install_fake_tracer(monkeypatch)
+
+    class AsyncStreamingClient:
+        provider = FakeProvider()
+        mode = FakeMode()
+        default_model = "gpt-4o-mini"
+        create_fn = staticmethod(_fake_async_create)
+
+        async def create_iterable(
+            self,
+            messages,
+            response_model,
+            hooks=None,
+            **kwargs,
+        ):
+            yield {"task": "send checklist"}
+            yield {"task": "finish dashboard"}
+
+    instrumentor = InstructorInstrumentor()
+    wrapped = instrumentor._wrap_instructor_method(
+        original_method=AsyncStreamingClient.create_iterable,
+        operation_name="instructor.async_create_iterable",
+    )
+
+    async def consume():
+        return [
+            item
+            async for item in wrapped(
+                AsyncStreamingClient(),
+                messages=[{"role": "user", "content": "Extract action items."}],
+                response_model=TicketResult,
+            )
+        ]
+
+    assert asyncio.run(consume()) == [
+        {"task": "send checklist"},
+        {"task": "finish dashboard"},
+    ]
+    assert json.loads(
+        tracer.spans[0].attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
+    ) == [
+        {"task": "send checklist"},
+        {"task": "finish dashboard"},
+    ]
 
 
 def test_instructor_create_emits_span_for_unwrapped_create_fn(monkeypatch):
@@ -502,9 +665,10 @@ def test_patch_async_create_emits_span(monkeypatch):
 
     assert result.model_dump() == {"name": "Grace"}
     assert len(tracer.spans) == 1
-    assert tracer.spans[0].attributes[
-        f"{SpanAttributes.LLM_COMPLETIONS}.0.content"
-    ] == '{"name":"Grace"}'
+    assert (
+        tracer.spans[0].attributes[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"]
+        == '{"name":"Grace"}'
+    )
 
 
 def test_deactivate_restores_patches(monkeypatch):

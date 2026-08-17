@@ -1,12 +1,11 @@
+import json
 import logging
 import sys
 from types import ModuleType, SimpleNamespace
 
 import pytest
 from opentelemetry.semconv_ai import SpanAttributes as TLSpanAttributes
-
-from respan_instrumentation_huggingface import HuggingFaceInstrumentor
-from respan_instrumentation_huggingface import _instrumentation
+from respan_instrumentation_huggingface import HuggingFaceInstrumentor, _instrumentation
 from respan_instrumentation_huggingface._constants import (
     HUGGINGFACE_GEN_AI_SYSTEM,
     TRANSFORMERS_MODULE,
@@ -232,6 +231,54 @@ def test_contract_processor_preserves_existing_roles():
 
     assert span._attributes[f"{TLSpanAttributes.LLM_PROMPTS}.0.role"] == "system"
     assert span._attributes[f"{TLSpanAttributes.LLM_COMPLETIONS}.0.role"] == "model"
+
+
+def test_contract_processor_preserves_complete_indexed_batch_content():
+    processor = HuggingFaceSpanContractProcessor()
+    span = SimpleNamespace(
+        name=TRANSFORMERS_TEXT_GENERATION_SPAN_NAME,
+        instrumentation_scope=SimpleNamespace(name=TRANSFORMERS_SCOPE_NAME),
+        _attributes={
+            f"{TLSpanAttributes.LLM_PROMPTS}.0.content": "Batch prompt one:",
+            f"{TLSpanAttributes.LLM_PROMPTS}.1.content": "Batch prompt two:",
+            f"{TLSpanAttributes.LLM_COMPLETIONS}.0.content": "First result",
+            f"{TLSpanAttributes.LLM_COMPLETIONS}.1.content": "Second result",
+        },
+    )
+
+    processor.on_end(span)
+
+    assert json.loads(span._attributes[TLSpanAttributes.TRACELOOP_ENTITY_INPUT]) == [
+        "Batch prompt one:",
+        "Batch prompt two:",
+    ]
+    assert json.loads(span._attributes[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == [
+        "First result",
+        "Second result",
+    ]
+    assert json.loads(
+        span._attributes[f"{TLSpanAttributes.LLM_COMPLETIONS}.0.content"]
+    ) == ["First result", "Second result"]
+    assert (
+        span._attributes[f"{TLSpanAttributes.LLM_COMPLETIONS}.1.content"]
+        == "Second result"
+    )
+    assert span._attributes[f"{TLSpanAttributes.LLM_PROMPTS}.1.role"] == "user"
+    assert span._attributes[f"{TLSpanAttributes.LLM_COMPLETIONS}.1.role"] == "assistant"
+
+
+def test_contract_processor_does_not_recreate_redacted_content():
+    processor = HuggingFaceSpanContractProcessor()
+    span = SimpleNamespace(
+        name=TRANSFORMERS_TEXT_GENERATION_SPAN_NAME,
+        instrumentation_scope=SimpleNamespace(name=TRANSFORMERS_SCOPE_NAME),
+        _attributes={TLSpanAttributes.LLM_REQUEST_MODEL: "private-model"},
+    )
+
+    processor.on_end(span)
+
+    assert TLSpanAttributes.TRACELOOP_ENTITY_INPUT not in span._attributes
+    assert TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT not in span._attributes
 
 
 def test_contract_processor_ignores_non_transformers_spans():
