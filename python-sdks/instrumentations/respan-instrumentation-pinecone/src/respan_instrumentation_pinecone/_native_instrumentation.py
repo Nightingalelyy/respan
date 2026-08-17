@@ -4,27 +4,34 @@ from __future__ import annotations
 
 import importlib
 import inspect
-import json
 import logging
-from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any
+from threading import RLock
+from typing import Any, ClassVar
 
 from opentelemetry import trace
 from opentelemetry.instrumentation.utils import unwrap
+from opentelemetry.semconv.attributes.http_attributes import HTTP_RESPONSE_STATUS_CODE
 from opentelemetry.semconv.trace import SpanAttributes as OTelSpanAttributes
 from opentelemetry.semconv_ai import SpanAttributes
 from opentelemetry.trace import SpanKind, Status, StatusCode
+from respan_sdk.constants import ERROR_MESSAGE_ATTR
+from respan_sdk.constants.llm_logging import LOG_TYPE_TASK
 from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
 from respan_tracing.core.tracer import RespanTracer
 from wrapt import wrap_function_wrapper
 
-logger = logging.getLogger(__name__)
+from respan_instrumentation_pinecone._serialization import (
+    exception_message,
+    exception_status_code,
+    is_sensitive_key,
+    json_dumps,
+    safe_text,
+    safe_type_name,
+)
 
-_MAX_ITEMS = 12
-_MAX_CHARS = 16_000
-_SENSITIVE_PARTS = ("api_key", "authorization", "password", "secret", "token")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -39,48 +46,6 @@ class PatchSpec:
     exclude: frozenset[str] = field(default_factory=frozenset)
 
 
-def _jsonable(value: Any, *, depth: int = 0) -> Any:
-    if depth > 5:
-        return repr(value)
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, bytes):
-        return {"type": "bytes", "length": len(value)}
-    if isinstance(value, Mapping):
-        result: dict[str, Any] = {}
-        for index, (key, item) in enumerate(value.items()):
-            if index >= _MAX_ITEMS:
-                result["__truncated__"] = max(len(value) - _MAX_ITEMS, 0)
-                break
-            key_text = str(key)
-            result[key_text] = (
-                "<redacted>"
-                if any(part in key_text.lower() for part in _SENSITIVE_PARTS)
-                else _jsonable(item, depth=depth + 1)
-            )
-        return result
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        items = [_jsonable(item, depth=depth + 1) for item in value[:_MAX_ITEMS]]
-        if len(value) > _MAX_ITEMS:
-            return {"count": len(value), "items": items, "truncated": True}
-        return items
-    for method_name in ("model_dump", "to_dict", "dict", "to_pylist"):
-        method = getattr(value, method_name, None)
-        if callable(method):
-            try:
-                return _jsonable(method(), depth=depth + 1)
-            except Exception:
-                pass
-    return repr(value)
-
-
-def _json_dumps(value: Any) -> str:
-    text = json.dumps(_jsonable(value), default=str, sort_keys=True)
-    if len(text) <= _MAX_CHARS:
-        return text
-    return json.dumps({"preview": text[:_MAX_CHARS], "truncated": True})
-
-
 def _call_input(
     wrapped: Any,
     args: tuple[Any, ...],
@@ -89,7 +54,7 @@ def _call_input(
     try:
         bound = inspect.signature(wrapped).bind_partial(*args, **kwargs)
         return {key: value for key, value in bound.arguments.items() if key != "self"}
-    except Exception:
+    except Exception:  # noqa: BLE001 - provider call signatures may be hostile
         return {"args": list(args), "kwargs": kwargs}
 
 
@@ -107,14 +72,32 @@ def _instance_identity(instance: Any) -> dict[str, str]:
         "uri",
         "_uri",
     ):
-        value = getattr(instance, key, None)
+        try:
+            value = getattr(instance, key, None)
+        except Exception:  # noqa: BLE001 - provider descriptors must not break calls
+            value = None
         if isinstance(value, (str, int)):
-            identity[key.lstrip("_")] = str(value)
-    config = getattr(instance, "_config", None)
-    host = getattr(config, "host", None)
+            identity_key = key.lstrip("_")
+            identity[identity_key] = (
+                "<redacted>"
+                if is_sensitive_key(identity_key)
+                else safe_text(str(value), endpoint=identity_key in {"uri", "host"})
+            )
+    try:
+        config = getattr(instance, "_config", None)
+        host = getattr(config, "host", None)
+    except Exception:  # noqa: BLE001 - provider config descriptors may raise
+        host = None
     if isinstance(host, str):
-        identity["host"] = host
+        identity["host"] = safe_text(host, endpoint=True)
     return identity
+
+
+@dataclass(frozen=True)
+class AppliedPatch:
+    target: type
+    attribute: str
+    installed_wrapper: Any
 
 
 class NativeClientInstrumentor:
@@ -123,15 +106,18 @@ class NativeClientInstrumentor:
     name = "native-client"
     vendor = "native-client"
     patches: tuple[PatchSpec, ...] = ()
-    _patches_applied = False
-    _activation_count = 0
-    _patched_targets: list[tuple[type, str]] = []
-    _active_call: ContextVar[bool] = ContextVar(
+    _patches_applied: ClassVar[bool] = False
+    _activation_count: ClassVar[int] = 0
+    _patched_targets: ClassVar[list[AppliedPatch]] = []
+    _capture_content_config: ClassVar[bool | None] = None
+    _lifecycle_lock: ClassVar[RLock] = RLock()
+    _active_call: ClassVar[ContextVar[bool]] = ContextVar(
         "respan_native_client_active",
         default=False,
     )
 
-    def __init__(self) -> None:
+    def __init__(self, *, capture_content: bool = True) -> None:
+        self._capture_content = capture_content
         self._is_instrumented = False
 
     @staticmethod
@@ -163,24 +149,42 @@ class NativeClientInstrumentor:
             **_instance_identity(instance),
             **_call_input(wrapped, args, kwargs),
         }
-        span.set_attribute(RESPAN_LOG_TYPE, "task")
+        span.set_attribute(RESPAN_LOG_TYPE, LOG_TYPE_TASK)
         span.set_attribute(SpanAttributes.TRACELOOP_ENTITY_NAME, entity_name)
-        span.set_attribute(SpanAttributes.TRACELOOP_ENTITY_PATH, entity_name)
         span.set_attribute(
-            SpanAttributes.TRACELOOP_ENTITY_INPUT,
-            _json_dumps(payload),
+            SpanAttributes.TRACELOOP_ENTITY_PATH,
+            "" if getattr(span, "parent", None) is None else entity_name,
         )
+        if getattr(cls, "_capture_content_config", True):
+            span.set_attribute(
+                SpanAttributes.TRACELOOP_ENTITY_INPUT,
+                json_dumps(payload),
+            )
         span.set_attribute(OTelSpanAttributes.DB_SYSTEM, cls.vendor)
         span.set_attribute(OTelSpanAttributes.DB_OPERATION, operation)
 
-    @staticmethod
-    def _set_error(span: Any, exc: Exception) -> None:
-        span.record_exception(exc)
-        span.set_status(Status(StatusCode.ERROR, str(exc)))
-        span.set_attribute(
-            SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
-            _json_dumps({"error": type(exc).__name__, "message": str(exc)}),
-        )
+    @classmethod
+    def _set_error(cls, span: Any, exc: Exception) -> None:
+        message = exception_message(exc)
+        exception_type = safe_type_name(exc)
+        status_code = exception_status_code(exc)
+        add_event = getattr(span, "add_event", None)
+        if callable(add_event):
+            add_event(
+                "exception",
+                {
+                    OTelSpanAttributes.EXCEPTION_MESSAGE: message,
+                    OTelSpanAttributes.EXCEPTION_TYPE: exception_type,
+                },
+            )
+        span.set_status(Status(StatusCode.ERROR, message))
+        span.set_attribute(HTTP_RESPONSE_STATUS_CODE, status_code)
+        span.set_attribute(ERROR_MESSAGE_ATTR, message)
+        if cls._capture_content_config:
+            span.set_attribute(
+                SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
+                json_dumps({"error": exception_type, "message": message}),
+            )
 
     def _trace_sync(
         self,
@@ -195,10 +199,12 @@ class NativeClientInstrumentor:
             return wrapped(*args, **kwargs)
         token = active_call.set(True)
         try:
-            tracer = trace.get_tracer(type(self).__module__)
+            tracer = trace.get_tracer(self.name, "0.1.0")
             with tracer.start_as_current_span(
                 self._span_name(operation),
                 kind=SpanKind.CLIENT,
+                record_exception=False,
+                set_status_on_exception=False,
             ) as span:
                 self._set_start_attributes(
                     span,
@@ -214,10 +220,11 @@ class NativeClientInstrumentor:
                     self._set_error(span, exc)
                     raise
                 span.set_status(Status(StatusCode.OK))
-                span.set_attribute(
-                    SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
-                    _json_dumps(result),
-                )
+                if self._capture_content:
+                    span.set_attribute(
+                        SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
+                        json_dumps(result),
+                    )
                 return result
         finally:
             active_call.reset(token)
@@ -235,10 +242,12 @@ class NativeClientInstrumentor:
             return await wrapped(*args, **kwargs)
         token = active_call.set(True)
         try:
-            tracer = trace.get_tracer(type(self).__module__)
+            tracer = trace.get_tracer(self.name, "0.1.0")
             with tracer.start_as_current_span(
                 self._span_name(operation),
                 kind=SpanKind.CLIENT,
+                record_exception=False,
+                set_status_on_exception=False,
             ) as span:
                 self._set_start_attributes(
                     span,
@@ -254,10 +263,11 @@ class NativeClientInstrumentor:
                     self._set_error(span, exc)
                     raise
                 span.set_status(Status(StatusCode.OK))
-                span.set_attribute(
-                    SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
-                    _json_dumps(result),
-                )
+                if self._capture_content:
+                    span.set_attribute(
+                        SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
+                        json_dumps(result),
+                    )
                 return result
         finally:
             active_call.reset(token)
@@ -274,85 +284,150 @@ class NativeClientInstrumentor:
             and callable(getattr(target_class, name, None))
         )
 
-    def activate(self) -> None:
-        cls = type(self)
-        if self._is_instrumented or not self._tracing_enabled():
-            return
-        if cls._patches_applied:
-            cls._activation_count += 1
-            self._is_instrumented = True
-            return
+    @staticmethod
+    def _wrapper_chain_contains(current: Any, expected: Any) -> bool:
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            if current is expected:
+                return True
+            seen.add(id(current))
+            current = getattr(current, "__wrapped__", None)
+        return False
 
-        patched_targets: list[tuple[type, str]] = []
-        for patch in cls.patches:
+    @classmethod
+    def _remove_owned_patches(cls, patches: list[AppliedPatch]) -> list[AppliedPatch]:
+        retained: list[AppliedPatch] = []
+        for patch in reversed(patches):
             try:
-                module = importlib.import_module(patch.module)
-                target_class = getattr(module, patch.class_name)
-            except (ImportError, AttributeError):
-                continue
-            for method in self._methods_for(target_class, patch):
-                if not hasattr(target_class, method):
-                    continue
-                operation = self._operation_name(patch, method)
-
-                def traced(
-                    wrapped: Any,
-                    instance: Any,
-                    args: tuple[Any, ...],
-                    kwargs: dict[str, Any],
-                    *,
-                    _operation: str = operation,
-                    _async: bool = patch.is_async,
-                ) -> Any:
-                    if _async:
-                        return self._trace_async(
-                            _operation,
-                            wrapped,
-                            instance,
-                            args,
-                            kwargs,
-                        )
-                    return self._trace_sync(
-                        _operation,
-                        wrapped,
-                        instance,
-                        args,
-                        kwargs,
-                    )
-
-                target = f"{patch.class_name}.{method}"
-                wrap_function_wrapper(patch.module, target, traced)
-                patched_targets.append((target_class, method))
-
-        self._is_instrumented = bool(patched_targets)
-        cls._patches_applied = self._is_instrumented
-        cls._activation_count = int(self._is_instrumented)
-        cls._patched_targets = patched_targets
-        if not self._is_instrumented:
-            logger.warning(
-                "%s instrumentation found no supported methods",
-                cls.vendor,
-            )
-
-    def deactivate(self) -> None:
-        if not self._is_instrumented:
-            return
-        self._is_instrumented = False
-        cls = type(self)
-        cls._activation_count = max(cls._activation_count - 1, 0)
-        if cls._activation_count:
-            return
-
-        for target_class, method in reversed(cls._patched_targets):
-            try:
-                unwrap(target_class, method)
+                current = inspect.getattr_static(patch.target, patch.attribute)
+                if current is patch.installed_wrapper:
+                    unwrap(patch.target, patch.attribute)
+                    current = inspect.getattr_static(patch.target, patch.attribute)
+                if cls._wrapper_chain_contains(current, patch.installed_wrapper):
+                    retained.append(patch)
             except Exception:
+                retained.append(patch)
                 logger.debug(
-                    "Failed to unwrap %s.%s.%s",
-                    target_class.__module__,
-                    target_class.__qualname__,
-                    method,
+                    "Failed to remove %s.%s wrapper",
+                    getattr(patch.target, "__name__", safe_type_name(patch.target)),
+                    patch.attribute,
                     exc_info=True,
                 )
-        cls._patched_targets = []
-        cls._patches_applied = False
+        retained.reverse()
+        return retained
+
+    def activate(self) -> None:
+        cls = type(self)
+        with cls._lifecycle_lock:
+            if self._is_instrumented or not self._tracing_enabled():
+                return
+            if cls._patches_applied:
+                if cls._capture_content_config != self._capture_content:
+                    raise ValueError(
+                        "all active PineconeInstrumentor instances must use the "
+                        "same capture_content setting"
+                    )
+                cls._activation_count += 1
+                self._is_instrumented = True
+                return
+            if cls._patched_targets and all(
+                cls._wrapper_chain_contains(
+                    inspect.getattr_static(item.target, item.attribute),
+                    item.installed_wrapper,
+                )
+                for item in cls._patched_targets
+            ):
+                cls._patches_applied = True
+                cls._activation_count = 1
+                cls._capture_content_config = self._capture_content
+                self._is_instrumented = True
+                return
+
+            cls._patched_targets = cls._remove_owned_patches(cls._patched_targets)
+            if cls._patched_targets:
+                raise RuntimeError("Pinecone instrumentation has stale wrappers")
+
+            patched_targets: list[AppliedPatch] = []
+            try:
+                for patch in cls.patches:
+                    try:
+                        module = importlib.import_module(patch.module)
+                        target_class = getattr(module, patch.class_name)
+                    except (ImportError, AttributeError):
+                        continue
+                    for method in self._methods_for(target_class, patch):
+                        if not callable(getattr(target_class, method, None)):
+                            continue
+                        operation = self._operation_name(patch, method)
+
+                        def traced(
+                            wrapped: Any,
+                            instance: Any,
+                            args: tuple[Any, ...],
+                            kwargs: dict[str, Any],
+                            *,
+                            _operation: str = operation,
+                            _async: bool = patch.is_async,
+                        ) -> Any:
+                            instrumentor_class = type(self)
+                            if (
+                                not instrumentor_class._patches_applied
+                                or not instrumentor_class._activation_count
+                            ):
+                                return wrapped(*args, **kwargs)
+                            if _async:
+                                return self._trace_async(
+                                    _operation, wrapped, instance, args, kwargs
+                                )
+                            return self._trace_sync(
+                                _operation, wrapped, instance, args, kwargs
+                            )
+
+                        target = f"{patch.class_name}.{method}"
+                        wrap_function_wrapper(patch.module, target, traced)
+                        patched_targets.append(
+                            AppliedPatch(
+                                target_class,
+                                method,
+                                inspect.getattr_static(target_class, method),
+                            )
+                        )
+            except Exception:
+                cls._patched_targets = cls._remove_owned_patches(patched_targets)
+                cls._patches_applied = False
+                cls._activation_count = 0
+                cls._capture_content_config = None
+                self._is_instrumented = False
+                raise
+
+            self._is_instrumented = bool(patched_targets)
+            cls._patches_applied = self._is_instrumented
+            cls._activation_count = int(self._is_instrumented)
+            cls._patched_targets = patched_targets
+            cls._capture_content_config = (
+                self._capture_content if self._is_instrumented else None
+            )
+            if not self._is_instrumented:
+                logger.warning(
+                    "%s instrumentation found no supported methods", cls.vendor
+                )
+
+    def deactivate(self) -> None:
+        cls = type(self)
+        with cls._lifecycle_lock:
+            if not self._is_instrumented:
+                return
+            self._is_instrumented = False
+            cls._activation_count = max(cls._activation_count - 1, 0)
+            if cls._activation_count:
+                return
+            cls._patches_applied = False
+            cls._patched_targets = cls._remove_owned_patches(cls._patched_targets)
+            if not cls._patched_targets:
+                cls._capture_content_config = None
+
+    def instrument(self) -> None:
+        self.activate()
+
+    def uninstrument(self) -> None:
+        self.deactivate()
