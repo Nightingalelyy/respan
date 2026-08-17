@@ -9,7 +9,8 @@ import logging
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
+from urllib.parse import urlsplit, urlunsplit
 
 from opentelemetry import trace
 from opentelemetry.instrumentation.utils import unwrap
@@ -40,12 +41,15 @@ class PatchSpec:
 
 
 def _jsonable(value: Any, *, depth: int = 0) -> Any:
-    if depth > 5:
-        return repr(value)
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, bytes):
         return {"type": "bytes", "length": len(value)}
+    if depth > 5:
+        return {
+            "type": f"{type(value).__module__}.{type(value).__qualname__}",
+            "truncated": True,
+        }
     if isinstance(value, Mapping):
         result: dict[str, Any] = {}
         for index, (key, item) in enumerate(value.items()):
@@ -64,14 +68,29 @@ def _jsonable(value: Any, *, depth: int = 0) -> Any:
         if len(value) > _MAX_ITEMS:
             return {"count": len(value), "items": items, "truncated": True}
         return items
-    for method_name in ("model_dump", "to_dict", "dict", "to_pylist"):
+    for method_name in (
+        "model_dump",
+        "to_dict",
+        "dict",
+        "to_pylist",
+        "tolist",
+        "item",
+    ):
         method = getattr(value, method_name, None)
         if callable(method):
             try:
                 return _jsonable(method(), depth=depth + 1)
             except Exception:
-                pass
-    return repr(value)
+                logger.debug(
+                    "Failed to serialize %s with %s",
+                    type(value).__qualname__,
+                    method_name,
+                    exc_info=True,
+                )
+    identity = _instance_identity(value)
+    if identity:
+        return identity
+    return {"type": f"{type(value).__module__}.{type(value).__qualname__}"}
 
 
 def _json_dumps(value: Any) -> str:
@@ -89,7 +108,7 @@ def _call_input(
     try:
         bound = inspect.signature(wrapped).bind_partial(*args, **kwargs)
         return {key: value for key, value in bound.arguments.items() if key != "self"}
-    except Exception:
+    except (TypeError, ValueError):
         return {"args": list(args), "kwargs": kwargs}
 
 
@@ -109,12 +128,41 @@ def _instance_identity(instance: Any) -> dict[str, str]:
     ):
         value = getattr(instance, key, None)
         if isinstance(value, (str, int)):
-            identity[key.lstrip("_")] = str(value)
+            identity_key = key.lstrip("_")
+            identity[identity_key] = (
+                _sanitize_endpoint(str(value)) if identity_key == "uri" else str(value)
+            )
     config = getattr(instance, "_config", None)
     host = getattr(config, "host", None)
     if isinstance(host, str):
-        identity["host"] = host
+        identity["host"] = _sanitize_endpoint(host)
     return identity
+
+
+def _sanitize_endpoint(value: str) -> str:
+    """Remove endpoint credentials while retaining stable routing identity."""
+
+    candidate = value.strip()
+    if not candidate:
+        return candidate
+
+    has_scheme = "://" in candidate
+    try:
+        parsed = urlsplit(candidate if has_scheme else f"//{candidate}")
+        hostname = parsed.hostname
+        if hostname is None:
+            if has_scheme:
+                return urlunsplit((parsed.scheme, "", parsed.path, "", ""))
+            return "<redacted-endpoint>"
+        port = parsed.port
+    except ValueError:
+        return "<redacted-endpoint>"
+
+    safe_hostname = f"[{hostname}]" if ":" in hostname else hostname
+    netloc = f"{safe_hostname}:{port}" if port is not None else safe_hostname
+    if has_scheme:
+        return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    return urlunsplit(("", netloc, parsed.path, "", "")).removeprefix("//")
 
 
 class NativeClientInstrumentor:
@@ -125,7 +173,7 @@ class NativeClientInstrumentor:
     patches: tuple[PatchSpec, ...] = ()
     _patches_applied = False
     _activation_count = 0
-    _patched_targets: list[tuple[type, str]] = []
+    _patched_targets: ClassVar[list[tuple[type, str]]] = []
     _active_call: ContextVar[bool] = ContextVar(
         "respan_native_client_active",
         default=False,

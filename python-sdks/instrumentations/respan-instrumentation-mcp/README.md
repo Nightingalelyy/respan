@@ -9,7 +9,7 @@ The package enables upstream OpenInference MCP transport context propagation and
 ### 1. Install
 
 ```bash
-pip install respan-ai respan-instrumentation-mcp mcp
+pip install respan-ai respan-instrumentation-mcp "mcp>=1.27,<2"
 ```
 
 ### 2. Set Environment Variables
@@ -56,6 +56,10 @@ asyncio.run(run_mcp_client())
 respan.flush()
 respan.shutdown()
 ```
+
+This release supports MCP Python SDK 1.27 or newer on the 1.x line. MCP 2.x
+removed the `mcp.server.fastmcp` API used by the current examples and is not
+yet supported.
 
 ## Further Reading
 

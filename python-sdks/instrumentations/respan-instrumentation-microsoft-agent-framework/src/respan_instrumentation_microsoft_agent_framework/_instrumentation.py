@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import importlib
 import logging
+from collections.abc import Mapping
+from contextvars import ContextVar
+from functools import wraps
+from threading import Lock
 from typing import Any
 
 from opentelemetry import trace
+from respan_tracing.core.tracer import RespanTracer
 
 from respan_instrumentation_microsoft_agent_framework._constants import (
     AGENT_FRAMEWORK_INSTRUMENTATION_NAME,
@@ -14,9 +19,137 @@ from respan_instrumentation_microsoft_agent_framework._constants import (
 from respan_instrumentation_microsoft_agent_framework._processor import (
     AgentFrameworkSpanProcessor,
 )
-from respan_tracing.core.tracer import RespanTracer
 
 logger = logging.getLogger(__name__)
+
+
+_chat_telemetry_patch_lock = Lock()
+_chat_telemetry_patch_users = 0
+_chat_telemetry_layer: type[Any] | None = None
+_chat_observability: Any = None
+_original_chat_get_response: Any = None
+_patched_chat_get_response: Any = None
+_original_get_span_attributes: Any = None
+_patched_get_span_attributes: Any = None
+_chat_tool_definitions: ContextVar[Any | None] = ContextVar(
+    "respan_agent_framework_chat_tool_definitions",
+    default=None,
+)
+_processor_registration_lock = Lock()
+_shared_processor_provider: Any = None
+_shared_processor: AgentFrameworkSpanProcessor | None = None
+_shared_processor_users = 0
+
+
+def _patch_chat_tool_capture(observability: Any) -> bool:
+    """Include request tools in Agent Framework's native chat telemetry.
+
+    Agent Framework accepts tools through ``options`` but its telemetry layer
+    currently derives span attributes from other keyword arguments. A scoped
+    context value lets the attribute builder see those tools without changing
+    any arguments forwarded to the provider. The Respan processor then maps
+    ``gen_ai.tool.definitions`` to canonical ``llm.request.functions`` and
+    strips the raw attribute.
+    """
+    global _chat_telemetry_layer
+    global _chat_observability
+    global _chat_telemetry_patch_users
+    global _original_chat_get_response
+    global _patched_chat_get_response
+    global _original_get_span_attributes
+    global _patched_get_span_attributes
+
+    layer = getattr(observability, "ChatTelemetryLayer", None)
+    if layer is None:
+        logger.warning(
+            "Microsoft Agent Framework chat tool capture is unavailable: "
+            "ChatTelemetryLayer was not found"
+        )
+        return False
+
+    with _chat_telemetry_patch_lock:
+        if _chat_telemetry_patch_users:
+            if layer is not _chat_telemetry_layer:
+                logger.warning(
+                    "Microsoft Agent Framework ChatTelemetryLayer changed while "
+                    "instrumentation was active"
+                )
+                return False
+            _chat_telemetry_patch_users += 1
+            return True
+
+        original = getattr(layer, "get_response", None)
+        get_span_attributes = getattr(observability, "_get_span_attributes", None)
+        if not callable(original) or not callable(get_span_attributes):
+            logger.warning(
+                "Microsoft Agent Framework chat tool capture is unavailable: "
+                "required telemetry hooks were not found"
+            )
+            return False
+
+        @wraps(original)
+        def get_response_with_tool_capture(self: Any, *args: Any, **kwargs: Any) -> Any:
+            options = kwargs.get("options")
+            tools = options.get("tools") if isinstance(options, Mapping) else None
+            token = _chat_tool_definitions.set(tools)
+            try:
+                return original(self, *args, **kwargs)
+            finally:
+                _chat_tool_definitions.reset(token)
+
+        @wraps(get_span_attributes)
+        def get_span_attributes_with_tool_capture(*args: Any, **kwargs: Any) -> Any:
+            tools = _chat_tool_definitions.get()
+            if tools not in (None, (), []) and kwargs.get("tools") in (None, (), []):
+                kwargs = {**kwargs, "tools": tools}
+            return get_span_attributes(*args, **kwargs)
+
+        _chat_telemetry_layer = layer
+        _chat_observability = observability
+        _original_chat_get_response = original
+        _patched_chat_get_response = get_response_with_tool_capture
+        _original_get_span_attributes = get_span_attributes
+        _patched_get_span_attributes = get_span_attributes_with_tool_capture
+        layer.get_response = get_response_with_tool_capture
+        observability._get_span_attributes = get_span_attributes_with_tool_capture
+        _chat_telemetry_patch_users = 1
+        return True
+
+
+def _unpatch_chat_tool_capture() -> None:
+    global _chat_telemetry_layer
+    global _chat_observability
+    global _chat_telemetry_patch_users
+    global _original_chat_get_response
+    global _patched_chat_get_response
+    global _original_get_span_attributes
+    global _patched_get_span_attributes
+
+    with _chat_telemetry_patch_lock:
+        if not _chat_telemetry_patch_users:
+            return
+        _chat_telemetry_patch_users -= 1
+        if _chat_telemetry_patch_users:
+            return
+
+        if (
+            _chat_telemetry_layer is not None
+            and getattr(_chat_telemetry_layer, "get_response", None)
+            is _patched_chat_get_response
+        ):
+            _chat_telemetry_layer.get_response = _original_chat_get_response
+        if (
+            _chat_observability is not None
+            and getattr(_chat_observability, "_get_span_attributes", None)
+            is _patched_get_span_attributes
+        ):
+            _chat_observability._get_span_attributes = _original_get_span_attributes
+        _chat_telemetry_layer = None
+        _chat_observability = None
+        _original_chat_get_response = None
+        _patched_chat_get_response = None
+        _original_get_span_attributes = None
+        _patched_get_span_attributes = None
 
 
 def _active_span_processors(tracer_provider: Any) -> tuple[Any, tuple[Any, ...] | None]:
@@ -61,6 +194,62 @@ def _unregister_processor(
     )
 
 
+def _acquire_shared_processor(tracer_provider: Any) -> AgentFrameworkSpanProcessor:
+    """Register one normalizer per process-wide tracer provider."""
+    global _shared_processor
+    global _shared_processor_provider
+    global _shared_processor_users
+
+    with _processor_registration_lock:
+        if _shared_processor_users:
+            if tracer_provider is not _shared_processor_provider:
+                raise RuntimeError(
+                    "Microsoft Agent Framework instrumentation cannot switch tracer "
+                    "providers while active"
+                )
+            _shared_processor_users += 1
+            assert _shared_processor is not None
+            return _shared_processor
+
+        processor = AgentFrameworkSpanProcessor()
+        _register_processor(tracer_provider=tracer_provider, processor=processor)
+        _shared_processor_provider = tracer_provider
+        _shared_processor = processor
+        _shared_processor_users = 1
+        return processor
+
+
+def _release_shared_processor(
+    tracer_provider: Any,
+    processor: AgentFrameworkSpanProcessor,
+) -> None:
+    """Release a shared normalizer and unregister it after the final user."""
+    global _shared_processor
+    global _shared_processor_provider
+    global _shared_processor_users
+
+    with _processor_registration_lock:
+        if (
+            not _shared_processor_users
+            or tracer_provider is not _shared_processor_provider
+            or processor is not _shared_processor
+        ):
+            return
+
+        _shared_processor_users -= 1
+        if _shared_processor_users:
+            return
+
+        try:
+            _unregister_processor(
+                tracer_provider=tracer_provider,
+                processor=processor,
+            )
+        finally:
+            _shared_processor_provider = None
+            _shared_processor = None
+
+
 class MicrosoftAgentFrameworkInstrumentor:
     """Respan instrumentor for Microsoft Agent Framework native OTEL spans."""
 
@@ -69,7 +258,9 @@ class MicrosoftAgentFrameworkInstrumentor:
     def __init__(self, *, capture_content: bool = True) -> None:
         self._capture_content = capture_content
         self._processor: AgentFrameworkSpanProcessor | None = None
+        self._tracer_provider: Any = None
         self._is_instrumented = False
+        self._chat_tool_capture_patched = False
 
     @staticmethod
     def _is_respan_tracing_enabled() -> bool:
@@ -78,7 +269,7 @@ class MicrosoftAgentFrameworkInstrumentor:
             return True
         return bool(getattr(tracer, "is_enabled", True))
 
-    def _enable_agent_framework_observability(self) -> bool:
+    def _enable_agent_framework_observability(self) -> Any | None:
         try:
             observability = importlib.import_module("agent_framework.observability")
         except ImportError as exc:
@@ -87,7 +278,7 @@ class MicrosoftAgentFrameworkInstrumentor:
                 "missing dependency: %s",
                 exc,
             )
-            return False
+            return None
 
         settings = getattr(observability, "OBSERVABILITY_SETTINGS", None)
         if bool(getattr(settings, "is_user_disabled", False)):
@@ -95,13 +286,13 @@ class MicrosoftAgentFrameworkInstrumentor:
                 "Microsoft Agent Framework instrumentation skipped because "
                 "Agent Framework observability is user-disabled"
             )
-            return False
+            return None
 
         enable_instrumentation = getattr(observability, "enable_instrumentation", None)
         if callable(enable_instrumentation):
             try:
                 enable_instrumentation(enable_sensitive_data=self._capture_content)
-                return True
+                return observability
             except TypeError:
                 enable_instrumentation()
 
@@ -115,7 +306,7 @@ class MicrosoftAgentFrameworkInstrumentor:
                 enable_sensitive_telemetry()
             elif settings is not None and hasattr(settings, "enable_sensitive_data"):
                 settings.enable_sensitive_data = True
-        return True
+        return observability
 
     def activate(self) -> None:
         """Activate Respan normalization for Microsoft Agent Framework spans."""
@@ -129,16 +320,21 @@ class MicrosoftAgentFrameworkInstrumentor:
             )
             return
 
-        if not self._enable_agent_framework_observability():
+        observability = self._enable_agent_framework_observability()
+        if observability is None:
             return
 
-        if self._processor is None:
-            self._processor = AgentFrameworkSpanProcessor()
+        self._chat_tool_capture_patched = _patch_chat_tool_capture(observability)
 
-        _register_processor(
-            tracer_provider=trace.get_tracer_provider(),
-            processor=self._processor,
-        )
+        tracer_provider = trace.get_tracer_provider()
+        try:
+            self._processor = _acquire_shared_processor(tracer_provider)
+            self._tracer_provider = tracer_provider
+        except Exception:
+            if self._chat_tool_capture_patched:
+                _unpatch_chat_tool_capture()
+                self._chat_tool_capture_patched = False
+            raise
         self._is_instrumented = True
         logger.info("Microsoft Agent Framework instrumentation activated")
 
@@ -147,10 +343,19 @@ class MicrosoftAgentFrameworkInstrumentor:
         if not self._is_instrumented:
             return
 
-        if self._processor is not None:
-            _unregister_processor(
-                tracer_provider=trace.get_tracer_provider(),
-                processor=self._processor,
-            )
-        self._is_instrumented = False
+        try:
+            if self._processor is not None and self._tracer_provider is not None:
+                _release_shared_processor(
+                    tracer_provider=self._tracer_provider,
+                    processor=self._processor,
+                )
+        finally:
+            try:
+                if self._chat_tool_capture_patched:
+                    _unpatch_chat_tool_capture()
+                    self._chat_tool_capture_patched = False
+            finally:
+                self._processor = None
+                self._tracer_provider = None
+                self._is_instrumented = False
         logger.info("Microsoft Agent Framework instrumentation deactivated")

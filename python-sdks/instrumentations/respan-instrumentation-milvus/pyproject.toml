@@ -17,6 +17,11 @@ pymilvus = ">=2.4.1,<4.0.0"
 opentelemetry-semantic-conventions-ai = ">=0.4.1"
 wrapt = ">=1.16.0"
 
+[tool.poetry.group.dev.dependencies]
+milvus-lite = "3.2.0"
+pymilvus = "3.0.1"
+pytest = ">=8.4.0,<10.0.0"
+
 [tool.poetry.plugins."respan.instrumentations"]
 milvus = "respan_instrumentation_milvus:MilvusInstrumentor"
 
