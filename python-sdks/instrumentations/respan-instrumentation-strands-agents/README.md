@@ -12,6 +12,9 @@ require OpenInference at runtime.
 pip install respan-instrumentation-strands-agents
 ```
 
+Strands Agents `1.20.0` or newer is required because that release includes the
+native `tools_config` telemetry surface used for canonical chat tool schemas.
+
 ## Quickstart
 
 ```python
@@ -50,10 +53,12 @@ agent = Agent(
     system_prompt="You are a concise weather assistant.",
 )
 
-result = agent("What is the weather in Seattle?")
-print(result)
-
-respan.flush()
+try:
+    result = agent("What is the weather in Seattle?")
+    print(result)
+finally:
+    respan.flush()
+    respan.shutdown()
 ```
 
 ## Notes
@@ -63,5 +68,7 @@ respan.flush()
 - The instrumentor can refresh an already-created Strands tracer singleton when
   possible, which helps when an agent was constructed before activation.
 - Tool definitions are enabled by default via Strands' `gen_ai_tool_definitions`
-  semantic-convention opt-in and are exported as canonical `llm.request.functions`
-  attributes.
+  semantic-convention opt-in. They are moved from the common-only agent span to
+  canonical `llm.request.functions` on each model/chat span.
+- Agent spans remain common-only by contract; model, provider, and usage fields
+  belong to the child chat spans.

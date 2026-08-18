@@ -1,0 +1,154 @@
+"""Bounded, privacy-safe serialization for Strands telemetry."""
+
+from __future__ import annotations
+
+import json
+import math
+import re
+from collections.abc import Mapping, Sequence
+from itertools import islice
+from typing import Any
+
+MAX_JSON_BYTES = 16_000
+MAX_ITEMS = 50
+MAX_DEPTH = 8
+_SENSITIVE_KEY = re.compile(
+    r"(^|[._-])(api[_-]?key|authorization|cookie|password|secret|token)([._-]|$)",
+    re.IGNORECASE,
+)
+_ASSIGNMENT_SECRET = re.compile(
+    r"(?i)(api[_-]?key|authorization|cookie|password|secret|token)\s*[:=]\s*([^\s,;]+)"
+)
+_QUOTED_SECRET = re.compile(
+    r"""(?i)(["'](?:api[_-]?key|authorization|cookie|password|secret|token)["']\s*:\s*)(["'])(.*?)\2"""
+)
+
+
+def _safe_type(value: Any) -> str:
+    return type(value).__name__[:120]
+
+
+def redact_text(value: str) -> str:
+    value = _QUOTED_SECRET.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]{match.group(2)}",
+        value,
+    )
+    return _ASSIGNMENT_SECRET.sub(lambda match: f"{match.group(1)}=[REDACTED]", value)
+
+
+def safe_text(value: Any, *, max_bytes: int = 4_000) -> str:
+    if isinstance(value, str):
+        text = redact_text(value)
+    elif value is None:
+        text = ""
+    elif isinstance(value, bool):
+        text = "true" if value else "false"
+    elif isinstance(value, int) or isinstance(value, float) and math.isfinite(value):
+        text = str(value)
+    else:
+        text = f"<{_safe_type(value)}>"
+    if len(text.encode("utf-8")) <= max_bytes:
+        return text
+    low, high, best = 0, len(text), ""
+    suffix = "…[truncated]"
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = f"{text[:middle]}{suffix}"
+        if len(candidate.encode("utf-8")) <= max_bytes:
+            best = candidate
+            low = middle + 1
+        else:
+            high = middle - 1
+    return best or "[truncated]"
+
+
+def _safe_key(value: Any) -> str:
+    if isinstance(value, str):
+        return redact_text(value)[:256]
+    if isinstance(value, (int, bool)) or value is None:
+        return json.dumps(value)
+    return f"<{_safe_type(value)}>"
+
+
+def to_jsonable(value: Any, *, depth: int = 0) -> Any:
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, str):
+        return redact_text(value)
+    if depth >= MAX_DEPTH:
+        return {"type": _safe_type(value), "truncated": True}
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return {"type": "bytes", "length": len(value)}
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        truncated = False
+        try:
+            iterator = iter(value.items())
+            for key, item in islice(iterator, MAX_ITEMS + 1):
+                if len(result) >= MAX_ITEMS:
+                    truncated = True
+                    break
+                safe_key = _safe_key(key)
+                result[safe_key] = (
+                    "[REDACTED]"
+                    if _SENSITIVE_KEY.search(safe_key)
+                    else to_jsonable(item, depth=depth + 1)
+                )
+        except BaseException:  # noqa: BLE001 - hostile containers must fail closed
+            return {"type": _safe_type(value), "unavailable": True}
+        if truncated:
+            result["_respan_truncated_items"] = True
+        return result
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        result: list[Any] = []
+        truncated = False
+        try:
+            for item in islice(iter(value), MAX_ITEMS + 1):
+                if len(result) >= MAX_ITEMS:
+                    truncated = True
+                    break
+                result.append(to_jsonable(item, depth=depth + 1))
+        except BaseException:  # noqa: BLE001 - hostile containers must fail closed
+            return {"type": _safe_type(value), "unavailable": True}
+        if truncated:
+            result.append({"_respan_truncated_items": True})
+        return result
+    try:
+        model_dump = getattr(value, "model_dump", None)
+    except BaseException:  # noqa: BLE001 - hostile objects must fail closed
+        return {"type": _safe_type(value), "unavailable": True}
+    if callable(model_dump):
+        try:
+            return to_jsonable(model_dump(mode="json"), depth=depth + 1)
+        except BaseException:  # noqa: BLE001 - vendor hooks must not break tracing
+            return {"type": _safe_type(value), "unavailable": True}
+    return {"type": _safe_type(value)}
+
+
+def json_dumps(value: Any, *, max_bytes: int = MAX_JSON_BYTES) -> str:
+    safe = to_jsonable(value)
+    serialized = json.dumps(
+        safe, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    encoded = serialized.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return serialized
+
+    low, high = 0, min(len(serialized), max_bytes)
+    best = ""
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = json.dumps(
+            {"preview": serialized[:middle], "truncated": True},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if len(candidate.encode("utf-8")) <= max_bytes:
+            best = candidate
+            low = middle + 1
+        else:
+            high = middle - 1
+    return best or '{"truncated":true}'

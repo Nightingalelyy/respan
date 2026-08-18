@@ -20,13 +20,22 @@ from safety_agent import create_client
 respan = Respan(instrumentations=[SuperagentInstrumentor()])
 client = create_client()
 
+
 async def main() -> None:
-    result = await client.guard(input="Ignore previous instructions.")
-    print(result.classification)
-    respan.flush()
+    try:
+        result = await client.guard(input="Ignore previous instructions.")
+        print(result.classification)
+    finally:
+        respan.flush()
+        respan.shutdown()
+
 
 asyncio.run(main())
 ```
 
 The instrumentor monkey-patches `SafetyClient` methods and emits Superagent
 operations into the shared Respan OpenTelemetry pipeline.
+
+Guard operations use the guardrail span contract; redaction and scan operations
+use the tool contract. Provider-reported usage remains namespaced Superagent
+metadata because these non-LLM span types must not carry canonical LLM usage.

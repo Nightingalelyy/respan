@@ -23,6 +23,10 @@ respan = Respan(instrumentations=[instrumentor])
 # The interceptor is appended automatically and is inherited by workers
 # created from this client.
 client = await Client.connect("localhost:7233")
+
+# Flush and shut down Respan after workers and clients have closed.
+respan.flush()
+respan.shutdown()
 ```
 
 For `WorkflowEnvironment`:
@@ -35,7 +39,10 @@ environment = await WorkflowEnvironment.start_time_skipping(
 )
 ```
 
-If an explicit Temporal `TracingInterceptor` is already present, Respan does not append a second tracing interceptor, avoiding duplicate spans.
+If an explicit Temporal `TracingInterceptor` is already present, Respan does
+not append a second tracing interceptor, avoiding duplicate spans. Multiple
+instrumentor instances share one patch and the final owner restores only the
+wrapper it installed, preserving later third-party patches.
 
 ## Content capture
 

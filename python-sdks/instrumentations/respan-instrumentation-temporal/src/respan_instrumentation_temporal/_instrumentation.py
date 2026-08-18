@@ -3,21 +3,24 @@
 from __future__ import annotations
 
 import importlib
-import json
+import importlib.metadata
 import logging
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from contextlib import contextmanager
+from threading import RLock
 from typing import Any
 
-from opentelemetry import trace
-from opentelemetry.instrumentation.utils import unwrap
+from opentelemetry import baggage, trace
+from opentelemetry import context as otel_context
 from opentelemetry.semconv_ai import SpanAttributes
 from opentelemetry.trace import Status, StatusCode
+from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE, RESPAN_TRACE_GROUP_ID
+from respan_tracing.core.tracer import RespanTracer
+from respan_tracing.utils.span_factory import read_propagated_attributes
+
 from respan_instrumentation_temporal._constants import (
     MAX_ATTRIBUTE_CHARS,
-    MAX_COLLECTION_ITEMS,
-    MAX_SERIALIZATION_DEPTH,
     TASK_LOG_TYPE,
     TEMPORAL_CAPTURED_INPUT,
     TEMPORAL_CLIENT_CONNECT_TARGET,
@@ -28,9 +31,11 @@ from respan_instrumentation_temporal._constants import (
     WORKFLOW_LOG_TYPE,
     WORKFLOW_OPERATION_PREFIXES,
 )
-from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
-from respan_tracing.core.tracer import RespanTracer
-from wrapt import wrap_function_wrapper
+from respan_instrumentation_temporal._serialization import (
+    json_dumps,
+    safe_baggage_value,
+    safe_error_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,72 +43,45 @@ _CAMEL_BOUNDARY_1 = re.compile(r"(.)([A-Z][a-z]+)")
 _CAMEL_BOUNDARY_2 = re.compile(r"([a-z0-9])([A-Z])")
 _SAFE_DETAIL = re.compile(r"[^a-zA-Z0-9_.-]+")
 _MISSING = object()
+_INTERNAL_WORKFLOW_ID = "__respan_temporal_workflow_id__"
+_CLIENT_CONNECT_ATTRIBUTE = TEMPORAL_CLIENT_CONNECT_TARGET.rsplit(".", 1)[-1]
+_RESPAN_BAGGAGE_PREFIX = "respan."
 
 
-def _to_jsonable(value: Any, *, depth: int = 0) -> Any:
-    if depth > MAX_SERIALIZATION_DEPTH:
-        return repr(value)
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, bytes):
-        return {"type": "bytes", "length": len(value)}
-    if isinstance(value, Mapping):
-        items = list(value.items())
-        payload = {
-            str(key): _to_jsonable(item, depth=depth + 1)
-            for key, item in items[:MAX_COLLECTION_ITEMS]
-            if str(key).lower() not in {"headers", "rpc_metadata"}
-        }
-        if len(items) > MAX_COLLECTION_ITEMS:
-            payload["_respan_truncated_items"] = len(items) - MAX_COLLECTION_ITEMS
-        return payload
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        items = list(value)
-        payload = [
-            _to_jsonable(item, depth=depth + 1) for item in items[:MAX_COLLECTION_ITEMS]
-        ]
-        if len(items) > MAX_COLLECTION_ITEMS:
-            payload.append(
-                {"_respan_truncated_items": len(items) - MAX_COLLECTION_ITEMS}
+def _instrumentation_version() -> str | None:
+    try:
+        return importlib.metadata.version("respan-instrumentation-temporal")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _context_with_respan_baggage(context: Any) -> Any:
+    propagated = read_propagated_attributes()
+    if not propagated:
+        return context
+    result = context if context is not None else otel_context.get_current()
+    for key, value in propagated.items():
+        if isinstance(key, str) and key.startswith(_RESPAN_BAGGAGE_PREFIX):
+            result = baggage.set_baggage(
+                key,
+                safe_baggage_value(key, value),
+                context=result,
             )
-        return payload
-    model_dump = getattr(value, "model_dump", None)
-    if callable(model_dump):
-        try:
-            return _to_jsonable(model_dump(mode="json"), depth=depth + 1)
-        except TypeError:
-            return _to_jsonable(model_dump(), depth=depth + 1)
-        except Exception:
-            return repr(value)
-    if hasattr(value, "__dict__"):
-        return {
-            key: _to_jsonable(item, depth=depth + 1)
-            for key, item in vars(value).items()
-            if not key.startswith("_")
-            and key.lower() not in {"headers", "rpc_metadata"}
-            and not callable(item)
-        }
-    return repr(value)
+    return result
+
+
+def _apply_respan_baggage(attrs: dict[str, Any], context: Any) -> None:
+    try:
+        values = baggage.get_all(context=context)
+    except BaseException:  # noqa: BLE001 - propagation must remain fail-open
+        return
+    for key, value in values.items():
+        if isinstance(key, str) and key.startswith(_RESPAN_BAGGAGE_PREFIX):
+            attrs.setdefault(key, safe_baggage_value(key, value))
 
 
 def _json_dumps(value: Any, *, max_chars: int = MAX_ATTRIBUTE_CHARS) -> str:
-    serialized = json.dumps(
-        _to_jsonable(value),
-        default=str,
-        ensure_ascii=False,
-        sort_keys=True,
-    )
-    if len(serialized) <= max_chars:
-        return serialized
-    return json.dumps(
-        {
-            "truncated": True,
-            "original_characters": len(serialized),
-            "preview": serialized[:max_chars],
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    )
+    return json_dumps(value, max_bytes=max_chars)
 
 
 def _snake_case(value: str) -> str:
@@ -160,6 +138,7 @@ def _canonical_attributes(
         for key in tuple(source)
         if key in TEMPORAL_RAW_ATTRIBUTE_KEYS
     }
+    workflow_id = temporal_attributes.get("temporalWorkflowID")
     operation, detail = _span_parts(name)
     safe_detail = _safe_detail(detail)
     operation_name = _snake_case(operation)
@@ -182,8 +161,12 @@ def _canonical_attributes(
             input_payload["input"] = captured_input
 
     source[RESPAN_LOG_TYPE] = log_type
+    if isinstance(workflow_id, str) and workflow_id:
+        source[_INTERNAL_WORKFLOW_ID] = workflow_id
     source[SpanAttributes.TRACELOOP_ENTITY_NAME] = entity_name
     source[SpanAttributes.TRACELOOP_ENTITY_PATH] = entity_name
+    if log_type == WORKFLOW_LOG_TYPE and safe_detail:
+        source[RESPAN_TRACE_GROUP_ID] = safe_detail
     source[SpanAttributes.TRACELOOP_ENTITY_INPUT] = _json_dumps(
         input_payload, max_chars=max_attribute_chars
     )
@@ -213,9 +196,7 @@ def _set_error_output(
     max_chars: int,
     record_exception: bool,
 ) -> None:
-    message = str(exc) if capture_content else type(exc).__name__
-    if capture_content and record_exception and isinstance(exc, Exception):
-        span.record_exception(exc)
+    message = safe_error_message(exc, capture_content=capture_content)
     span.set_status(Status(StatusCode.ERROR, message))
     span.set_attribute("status_code", 500)
     span.set_attribute("error.message", message)
@@ -235,12 +216,19 @@ def _set_error_output(
 
 class _CanonicalSpanProxy:
     def __init__(
-        self, span: Any, *, capture_content: bool, max_attribute_chars: int
+        self,
+        span: Any,
+        *,
+        capture_content: bool,
+        max_attribute_chars: int,
+        on_end: Any = None,
     ) -> None:
         self._span = span
         self._capture_content = capture_content
         self._max_attribute_chars = max_attribute_chars
         self._has_error = False
+        self._on_end = on_end
+        self._ended = False
 
     def record_exception(self, exception: Exception, *args: Any, **kwargs: Any) -> None:
         self._has_error = True
@@ -251,17 +239,22 @@ class _CanonicalSpanProxy:
             max_chars=self._max_attribute_chars,
             record_exception=False,
         )
-        if self._capture_content:
-            self._span.record_exception(exception, *args, **kwargs)
 
     def end(self, *args: Any, **kwargs: Any) -> None:
+        if self._ended:
+            return
+        self._ended = True
         if not self._has_error:
             _set_success_output(
                 self._span,
                 capture_content=self._capture_content,
                 max_chars=self._max_attribute_chars,
             )
-        self._span.end(*args, **kwargs)
+        try:
+            self._span.end(*args, **kwargs)
+        finally:
+            if self._on_end is not None:
+                self._on_end()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._span, name)
@@ -274,16 +267,57 @@ class _CanonicalTracer:
         self._tracer = tracer
         self._capture_content = capture_content
         self._max_attribute_chars = max_attribute_chars
+        self._workflow_groups: dict[int, str] = {}
+        self._workflow_contexts: dict[str, Any] = {}
+
+    def _apply_parent_and_group(
+        self, name: str, attrs: dict[str, Any], context: Any
+    ) -> tuple[Any, str | None]:
+        _apply_respan_baggage(attrs, context)
+        workflow_id = attrs.pop(_INTERNAL_WORKFLOW_ID, None)
+        parent = trace.get_current_span(context)
+        parent_context = parent.get_span_context()
+        if not parent_context.is_valid and isinstance(workflow_id, str):
+            fallback_context = self._workflow_contexts.get(workflow_id)
+            if fallback_context is not None:
+                context = trace.set_span_in_context(
+                    trace.NonRecordingSpan(fallback_context)
+                )
+                parent_context = fallback_context
+        if not parent_context.is_valid:
+            attrs[SpanAttributes.TRACELOOP_ENTITY_PATH] = ""
+        group = attrs.get(RESPAN_TRACE_GROUP_ID)
+        if not group and parent_context.is_valid:
+            group = self._workflow_groups.get(parent_context.trace_id)
+            if group:
+                attrs[RESPAN_TRACE_GROUP_ID] = group
+        return context, workflow_id if isinstance(workflow_id, str) else None
 
     @contextmanager
     def start_as_current_span(self, name: str, *args: Any, **kwargs: Any):
-        kwargs["attributes"] = _canonical_attributes(
+        attrs = _canonical_attributes(
             name,
             kwargs.get("attributes"),
             capture_content=self._capture_content,
             max_attribute_chars=self._max_attribute_chars,
         )
+        context, workflow_id = self._apply_parent_and_group(
+            name, attrs, kwargs.get("context")
+        )
+        if context is not None:
+            kwargs["context"] = context
+        kwargs["attributes"] = attrs
         with self._tracer.start_as_current_span(name, *args, **kwargs) as span:
+            span_context = span.get_span_context()
+            group = attrs.get(RESPAN_TRACE_GROUP_ID)
+            if group and span_context.is_valid:
+                self._workflow_groups[span_context.trace_id] = group
+            if (
+                workflow_id
+                and span_context.is_valid
+                and name.startswith(("StartWorkflow:", "StartActivity:"))
+            ):
+                self._workflow_contexts[workflow_id] = span_context
             try:
                 yield span
             except BaseException as exc:
@@ -301,19 +335,42 @@ class _CanonicalTracer:
                     capture_content=self._capture_content,
                     max_chars=self._max_attribute_chars,
                 )
+            finally:
+                if workflow_id and name.startswith("CompleteWorkflow:"):
+                    self._workflow_contexts.pop(workflow_id, None)
 
     def start_span(self, name: str, *args: Any, **kwargs: Any) -> _CanonicalSpanProxy:
-        kwargs["attributes"] = _canonical_attributes(
+        attrs = _canonical_attributes(
             name,
             kwargs.get("attributes"),
             capture_content=self._capture_content,
             max_attribute_chars=self._max_attribute_chars,
         )
+        context, workflow_id = self._apply_parent_and_group(
+            name, attrs, kwargs.get("context")
+        )
+        if context is not None:
+            kwargs["context"] = context
+        kwargs["attributes"] = attrs
         span = self._tracer.start_span(name, *args, **kwargs)
+        span_context = span.get_span_context()
+        group = attrs.get(RESPAN_TRACE_GROUP_ID)
+        if group and span_context.is_valid:
+            self._workflow_groups[span_context.trace_id] = group
+        if (
+            workflow_id
+            and span_context.is_valid
+            and name.startswith(("StartWorkflow:", "StartActivity:"))
+        ):
+            self._workflow_contexts[workflow_id] = span_context
+        on_end = None
+        if workflow_id and name.startswith("CompleteWorkflow:"):
+            on_end = lambda: self._workflow_contexts.pop(workflow_id, None)
         return _CanonicalSpanProxy(
             span,
             capture_content=self._capture_content,
             max_attribute_chars=self._max_attribute_chars,
+            on_end=on_end,
         )
 
     def __getattr__(self, name: str) -> Any:
@@ -355,6 +412,7 @@ def _build_interceptor(
                     captured.update(_extract_temporal_input(input_with_ctx))
                 if captured:
                     enriched[TEMPORAL_CAPTURED_INPUT] = captured
+            context = _context_with_respan_baggage(context)
             with super()._start_as_current_span(
                 name,
                 attributes=enriched,
@@ -378,7 +436,12 @@ class TemporalInstrumentor:
     name = TEMPORAL_INSTRUMENTATION_NAME
     _patches_applied = False
     _activation_count = 0
-    _patched_targets: list[tuple[str, str]] = []
+    _lock = RLock()
+    _shared_config: tuple[bool, bool, int] | None = None
+    _client_class: type[Any] | None = None
+    _original_connect_descriptor_holder: tuple[Any, ...] = ()
+    _installed_connect_function: Any = None
+    _patch_generation = 0
 
     def __init__(
         self,
@@ -405,10 +468,13 @@ class TemporalInstrumentor:
         if self._interceptor is not None:
             return self._interceptor
         otel_module = importlib.import_module(TEMPORAL_OTEL_MODULE)
-        self._base_interceptor_class = getattr(otel_module, "TracingInterceptor")
+        self._base_interceptor_class = otel_module.TracingInterceptor
         self._interceptor = _build_interceptor(
             self._base_interceptor_class,
-            tracer=trace.get_tracer(__name__),
+            tracer=trace.get_tracer(
+                TEMPORAL_INSTRUMENTATION_NAME,
+                _instrumentation_version(),
+            ),
             capture_content=self._capture_content,
             max_attribute_chars=self._max_attribute_chars,
             always_create_workflow_spans=self._always_create_workflow_spans,
@@ -442,75 +508,103 @@ class TemporalInstrumentor:
     def activate(self) -> None:
         """Patch `Client.connect` to inject the Respan Temporal interceptor."""
         cls = type(self)
-        if self._is_instrumented:
-            return
         if not self._is_respan_tracing_enabled():
             logger.info(
                 "Temporal instrumentation skipped because Respan tracing is disabled"
             )
             return
-        if cls._patches_applied:
-            cls._activation_count += 1
-            self._is_instrumented = True
-            return
-        try:
-            client_module = importlib.import_module(TEMPORAL_CLIENT_MODULE)
-            client_class = getattr(client_module, "Client", None)
-            if client_class is None or not hasattr(client_class, "connect"):
-                logger.warning("Temporal Client.connect is unavailable")
+        with cls._lock:
+            if self._is_instrumented:
                 return
-            self._ensure_interceptor()
+            config = (
+                self._capture_content,
+                self._always_create_workflow_spans,
+                self._max_attribute_chars,
+            )
+            if cls._patches_applied:
+                if cls._shared_config != config:
+                    raise ValueError(
+                        "Temporal instrumentation is already active with different settings"
+                    )
+                cls._activation_count += 1
+                self._is_instrumented = True
+                return
+            try:
+                client_module = importlib.import_module(TEMPORAL_CLIENT_MODULE)
+                client_class = getattr(client_module, "Client", None)
+                if client_class is None or not hasattr(client_class, "connect"):
+                    logger.warning("Temporal Client.connect is unavailable")
+                    return
+                self._ensure_interceptor()
 
-            async def traced_connect(
-                wrapped: Any,
-                instance: Any,
-                args: tuple[Any, ...],
-                kwargs: dict[str, Any],
-            ) -> Any:
-                return await self._connect(wrapped, args, kwargs)
+                original_descriptor = client_class.__dict__.get(
+                    _CLIENT_CONNECT_ATTRIBUTE
+                )
+                original_connect = getattr(client_class, _CLIENT_CONNECT_ATTRIBUTE)
+                cls._patch_generation += 1
+                generation = cls._patch_generation
 
-            wrap_function_wrapper(
-                TEMPORAL_CLIENT_MODULE,
-                TEMPORAL_CLIENT_CONNECT_TARGET,
-                traced_connect,
-            )
-            cls._patched_targets.append(
-                (TEMPORAL_CLIENT_MODULE, TEMPORAL_CLIENT_CONNECT_TARGET)
-            )
-        except ImportError as exc:
-            logger.warning(
-                "Failed to activate Temporal instrumentation - missing dependency: %s",
-                exc,
-            )
-            return
-        except Exception:
-            logger.exception("Failed to activate Temporal instrumentation")
-            self.deactivate()
-            return
-        cls._patches_applied = True
-        cls._activation_count = 1
-        self._is_instrumented = True
-        logger.info("Temporal instrumentation activated")
+                async def traced_connect(
+                    client_cls: type[Any], *args: Any, **kwargs: Any
+                ) -> Any:
+                    if (
+                        type(self)._activation_count == 0
+                        or type(self)._patch_generation != generation
+                    ):
+                        return await original_connect(*args, **kwargs)
+                    return await self._connect(original_connect, args, kwargs)
+
+                installed_descriptor = classmethod(traced_connect)
+                setattr(
+                    client_class,
+                    _CLIENT_CONNECT_ATTRIBUTE,
+                    installed_descriptor,
+                )
+                cls._client_class = client_class
+                cls._original_connect_descriptor_holder = (original_descriptor,)
+                cls._installed_connect_function = traced_connect
+            except ImportError as exc:
+                logger.warning(
+                    "Failed to activate Temporal instrumentation - missing dependency: %s",
+                    exc,
+                )
+                return
+            except Exception:
+                logger.exception("Failed to activate Temporal instrumentation")
+                return
+            cls._patches_applied = True
+            cls._activation_count = 1
+            cls._shared_config = config
+            self._is_instrumented = True
+            logger.info("Temporal instrumentation activated")
 
     def deactivate(self) -> None:
         """Restore `Client.connect`; existing clients retain their interceptor."""
         cls = type(self)
-        if not self._is_instrumented:
-            if cls._patches_applied or not cls._patched_targets:
+        with cls._lock:
+            if not self._is_instrumented:
                 return
-        else:
             self._is_instrumented = False
             cls._activation_count = max(cls._activation_count - 1, 0)
             if cls._activation_count:
                 return
-        for module_path, target in reversed(cls._patched_targets):
-            try:
-                unwrap(module_path, target)
-            except Exception:
-                logger.debug(
-                    "Failed to unwrap %s.%s", module_path, target, exc_info=True
+            if (
+                cls._client_class is not None
+                and getattr(
+                    cls._client_class.__dict__.get(_CLIENT_CONNECT_ATTRIBUTE),
+                    "__func__",
+                    None,
                 )
-        cls._patched_targets.clear()
-        cls._patches_applied = False
-        cls._activation_count = 0
-        logger.info("Temporal instrumentation deactivated")
+                is cls._installed_connect_function
+            ):
+                setattr(
+                    cls._client_class,
+                    _CLIENT_CONNECT_ATTRIBUTE,
+                    cls._original_connect_descriptor_holder[0],
+                )
+            cls._client_class = None
+            cls._original_connect_descriptor_holder = ()
+            cls._installed_connect_function = None
+            cls._patches_applied = False
+            cls._shared_config = None
+            logger.info("Temporal instrumentation deactivated")

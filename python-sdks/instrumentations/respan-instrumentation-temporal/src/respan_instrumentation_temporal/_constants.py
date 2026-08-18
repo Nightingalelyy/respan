@@ -2,7 +2,6 @@
 
 from respan_sdk.constants.llm_logging import LOG_TYPE_TASK, LOG_TYPE_WORKFLOW
 
-
 TEMPORAL_INSTRUMENTATION_NAME = "temporal"
 TEMPORAL_CLIENT_MODULE = "temporalio.client"
 TEMPORAL_CLIENT_CONNECT_TARGET = "Client.connect"
