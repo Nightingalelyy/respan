@@ -7,7 +7,6 @@ import time
 from typing import Any
 
 from opentelemetry import trace
-
 from respan_sdk.utils.data_processing.id_processing import (
     format_span_id,
     format_trace_id,
@@ -21,7 +20,7 @@ def _current_trace_parent_ids() -> tuple[str | None, str | None]:
     try:
         current_span = trace.get_current_span()
         span_context = current_span.get_span_context()
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None, None
 
     trace_id = getattr(span_context, "trace_id", 0) or 0
@@ -46,6 +45,7 @@ def emit_writer_span(
         if error_message:
             span_attrs["error.message"] = error_message
             status_code = status_code if status_code >= 400 else 500
+            span_attrs.setdefault("status_code", status_code)
 
         trace_id, parent_id = _current_trace_parent_ids()
         span = build_readable_span(
@@ -59,5 +59,5 @@ def emit_writer_span(
             status_code=status_code,
         )
         inject_span(span=span)
-    except Exception:
+    except BaseException:
         logger.debug("Failed to emit Writer span", exc_info=True)

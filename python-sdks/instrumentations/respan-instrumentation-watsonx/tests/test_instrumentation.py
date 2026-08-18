@@ -8,23 +8,23 @@ from typing import Any
 
 import pytest
 from opentelemetry import context as context_api
+from opentelemetry import trace
 from opentelemetry.semconv_ai import SpanAttributes as TLSpanAttributes
-
-from respan_instrumentation_watsonx import WatsonxInstrumentor
-from respan_instrumentation_watsonx import _instrumentation
+from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
+from respan_instrumentation_watsonx import WatsonxInstrumentor, _instrumentation
 from respan_instrumentation_watsonx._constants import (
-    AEMBEDDINGS_GENERATE_METHOD_NAME,
     AEMBED_DOCUMENTS_METHOD_NAME,
     AEMBED_QUERY_METHOD_NAME,
+    AEMBEDDINGS_GENERATE_METHOD_NAME,
     AGENERATE_METHOD_NAME,
     AGENERATE_STREAM_METHOD_NAME,
     CHAT_METHOD_NAME,
     CHAT_STREAM_METHOD_NAME,
+    EMBED_DOCUMENTS_METHOD_NAME,
+    EMBED_QUERY_METHOD_NAME,
     EMBEDDINGS_CLASS_NAME,
     EMBEDDINGS_GENERATE_METHOD_NAME,
     EMBEDDINGS_MODULE,
-    EMBED_DOCUMENTS_METHOD_NAME,
-    EMBED_QUERY_METHOD_NAME,
     GENERATE_METHOD_NAME,
     GENERATE_TEXT_METHOD_NAME,
     GENERATE_TEXT_STREAM_METHOD_NAME,
@@ -36,7 +36,11 @@ from respan_instrumentation_watsonx._otel_emitter import (
     build_embedding_attrs,
     build_text_attrs,
 )
-from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT, LOG_TYPE_EMBEDDING, LOG_TYPE_TEXT
+from respan_sdk.constants.llm_logging import (
+    LOG_TYPE_CHAT,
+    LOG_TYPE_EMBEDDING,
+    LOG_TYPE_TEXT,
+)
 from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
 
 FORBIDDEN_ALIASES = {
@@ -64,6 +68,9 @@ class Obj:
 @pytest.fixture(autouse=True)
 def reset_instrumentation_globals() -> None:
     _instrumentation._original_methods.clear()
+    _instrumentation._installed_methods.clear()
+    _instrumentation._activation_count = 0
+    _instrumentation._activation_installing = False
 
 
 @pytest.fixture()
@@ -100,7 +107,9 @@ def fake_watsonx(monkeypatch: pytest.MonkeyPatch) -> tuple[type[Any], type[Any]]
             yield "stream "
             yield "text"
 
-        async def agenerate(self, prompt: str | None = None, **kwargs: Any) -> dict[str, Any]:
+        async def agenerate(
+            self, prompt: str | None = None, **kwargs: Any
+        ) -> dict[str, Any]:
             return {
                 "results": [
                     {
@@ -138,16 +147,24 @@ def fake_watsonx(monkeypatch: pytest.MonkeyPatch) -> tuple[type[Any], type[Any]]
                         }
                     }
                 ],
-                "usage": {"prompt_tokens": 9, "completion_tokens": 7, "total_tokens": 16},
+                "usage": {
+                    "prompt_tokens": 9,
+                    "completion_tokens": 7,
+                    "total_tokens": 16,
+                },
             }
 
         def chat_stream(self, messages: list[dict[str, Any]], **kwargs: Any):
             yield {"choices": [{"delta": {"content": "hello "}}]}
             yield {"choices": [{"delta": {"content": "world"}}]}
 
-        async def achat(self, messages: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]:
+        async def achat(
+            self, messages: list[dict[str, Any]], **kwargs: Any
+        ) -> dict[str, Any]:
             return {
-                "choices": [{"message": {"role": "assistant", "content": "async chat"}}],
+                "choices": [
+                    {"message": {"role": "assistant", "content": "async chat"}}
+                ],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 2},
             }
 
@@ -179,7 +196,9 @@ def fake_watsonx(monkeypatch: pytest.MonkeyPatch) -> tuple[type[Any], type[Any]]
         async def agenerate(self, inputs: list[str], **kwargs: Any) -> dict[str, Any]:
             return {"results": [{"embedding": [0.1, 0.2], "input": inputs[0]}]}
 
-        async def aembed_documents(self, texts: list[str], **kwargs: Any) -> list[list[float]]:
+        async def aembed_documents(
+            self, texts: list[str], **kwargs: Any
+        ) -> list[list[float]]:
             return [[0.1, 0.2], [0.3, 0.4]]
 
         async def aembed_query(self, text: str, **kwargs: Any) -> list[float]:
@@ -191,9 +210,9 @@ def fake_watsonx(monkeypatch: pytest.MonkeyPatch) -> tuple[type[Any], type[Any]]
     embeddings_module = ModuleType(EMBEDDINGS_MODULE)
     setattr(inference_module, MODEL_INFERENCE_CLASS_NAME, ModelInference)
     setattr(embeddings_module, EMBEDDINGS_CLASS_NAME, Embeddings)
-    setattr(foundation_models_module, "inference", inference_module)
-    setattr(foundation_models_module, "embeddings", embeddings_module)
-    setattr(ibm_module, "foundation_models", foundation_models_module)
+    foundation_models_module.inference = inference_module
+    foundation_models_module.embeddings = embeddings_module
+    ibm_module.foundation_models = foundation_models_module
 
     monkeypatch.setitem(sys.modules, "ibm_watsonx_ai", ibm_module)
     monkeypatch.setitem(
@@ -225,10 +244,13 @@ def test_activate_patches_text_generation_and_emits_text_span(
     assert len(captured_spans) == 1
     attrs = captured_spans[0].attributes
     assert attrs[RESPAN_LOG_TYPE] == LOG_TYPE_TEXT
-    assert attrs[TLSpanAttributes.LLM_REQUEST_TYPE] == "completion"
+    assert attrs[TLSpanAttributes.LLM_REQUEST_TYPE] == "chat"
+    assert attrs["gen_ai.provider.name"] == "ibm"
     assert attrs[TLSpanAttributes.LLM_REQUEST_MODEL] == "ibm/granite-3-8b-instruct"
     assert attrs[f"{TLSpanAttributes.LLM_PROMPTS}.0.content"] == "Say hello"
-    assert attrs[f"{TLSpanAttributes.LLM_COMPLETIONS}.0.content"] == "generated: Say hello"
+    assert (
+        attrs[f"{TLSpanAttributes.LLM_COMPLETIONS}.0.content"] == "generated: Say hello"
+    )
     assert attrs[TLSpanAttributes.LLM_USAGE_PROMPT_TOKENS] == 3
     assert attrs[TLSpanAttributes.LLM_USAGE_COMPLETION_TOKENS] == 4
     assert FORBIDDEN_ALIASES.isdisjoint(attrs)
@@ -252,6 +274,7 @@ def test_stream_emits_one_text_span_after_iterator_is_consumed(
         captured_spans[0].attributes[f"{TLSpanAttributes.LLM_COMPLETIONS}.0.content"]
         == "stream text"
     )
+    assert captured_spans[0].attributes[TLSpanAttributes.LLM_IS_STREAMING] is True
 
     instrumentor.deactivate()
 
@@ -276,14 +299,15 @@ def test_chat_span_maps_tools_tool_calls_and_avoids_aliases(
     attrs = captured_spans[0].attributes
     assert attrs[RESPAN_LOG_TYPE] == LOG_TYPE_CHAT
     assert attrs[TLSpanAttributes.LLM_REQUEST_TYPE] == "chat"
-    assert json.loads(attrs[TLSpanAttributes.LLM_REQUEST_FUNCTIONS])[0]["function"][
-        "name"
-    ] == "get_weather"
-    assert json.loads(
-        attrs[f"{TLSpanAttributes.LLM_COMPLETIONS}.0.tool_calls"]
-    )[0]["function"] == {
+    assert (
+        json.loads(attrs[TLSpanAttributes.LLM_REQUEST_FUNCTIONS])[0]["function"]["name"]
+        == "get_weather"
+    )
+    assert json.loads(attrs[f"{TLSpanAttributes.LLM_COMPLETIONS}.0.tool_calls"])[0][
+        "function"
+    ] == {
         "name": "get_weather",
-        "arguments": '{"city": "Tokyo"}',
+        "arguments": '{"city":"Tokyo"}',
     }
     assert attrs[f"{TLSpanAttributes.LLM_COMPLETIONS}.0.content"] == (
         "The weather is sunny."
@@ -327,13 +351,14 @@ def test_async_model_methods_emit_spans(
             ]
             == "async chat stream"
         )
+        assert captured_spans[1].attributes[TLSpanAttributes.LLM_IS_STREAMING] is True
 
         instrumentor.deactivate()
 
     asyncio.run(run())
 
 
-def test_embedding_methods_emit_embedding_span_without_vectors(
+def test_embedding_methods_emit_embedding_span_with_full_vectors(
     fake_watsonx: tuple[type[Any], type[Any]],
     captured_spans: list[Any],
 ) -> None:
@@ -348,12 +373,13 @@ def test_embedding_methods_emit_embedding_span_without_vectors(
     assert attrs[RESPAN_LOG_TYPE] == LOG_TYPE_EMBEDDING
     assert attrs[TLSpanAttributes.LLM_REQUEST_TYPE] == "embedding"
     assert attrs[TLSpanAttributes.LLM_REQUEST_MODEL] == "ibm/slate-125m-english-rtrvr"
-    assert attrs[f"{TLSpanAttributes.LLM_PROMPTS}.0.content"] == '["first", "second"]'
-    assert json.loads(attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == {
-        "vector_count": 2,
-        "dimension": 2,
-    }
-    assert "embedding" not in attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT]
+    assert json.loads(attrs[f"{TLSpanAttributes.LLM_PROMPTS}.0.content"]) == [
+        "first",
+        "second",
+    ]
+    output = json.loads(attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT])
+    assert output["results"][0]["embedding"] == [0.1, 0.2]
+    assert output["results"][1]["embedding"] == [0.3, 0.4]
     assert FORBIDDEN_ALIASES.isdisjoint(attrs)
 
     instrumentor.deactivate()
@@ -373,10 +399,10 @@ def test_async_embedding_methods_emit_spans(
 
         assert len(captured_spans) == 2
         assert captured_spans[0].attributes[RESPAN_LOG_TYPE] == LOG_TYPE_EMBEDDING
-        assert json.loads(captured_spans[1].attributes["traceloop.entity.output"]) == {
-            "vector_count": 2,
-            "dimension": 2,
-        }
+        assert json.loads(captured_spans[1].attributes["traceloop.entity.output"]) == [
+            [0.1, 0.2],
+            [0.3, 0.4],
+        ]
 
         instrumentor.deactivate()
 
@@ -444,7 +470,7 @@ def test_error_path_emits_failed_span(
     assert len(captured_spans) == 1
     span = captured_spans[0]
     assert span.status.status_code.name == "ERROR"
-    assert span.attributes["error.message"] == "boom"
+    assert span.attributes["error.message"] == "RuntimeError: boom"
     assert (
         span.attributes[TLSpanAttributes.LLM_REQUEST_MODEL]
         == "ibm/granite-3-8b-instruct"
@@ -458,7 +484,9 @@ def test_deactivate_restores_original_methods(
 ) -> None:
     ModelInference, Embeddings = fake_watsonx
     original_methods = {
-        (ModelInference, GENERATE_METHOD_NAME): getattr(ModelInference, GENERATE_METHOD_NAME),
+        (ModelInference, GENERATE_METHOD_NAME): getattr(
+            ModelInference, GENERATE_METHOD_NAME
+        ),
         (ModelInference, GENERATE_TEXT_METHOD_NAME): getattr(
             ModelInference,
             GENERATE_TEXT_METHOD_NAME,
@@ -488,7 +516,9 @@ def test_deactivate_restores_original_methods(
             Embeddings,
             EMBED_DOCUMENTS_METHOD_NAME,
         ),
-        (Embeddings, EMBED_QUERY_METHOD_NAME): getattr(Embeddings, EMBED_QUERY_METHOD_NAME),
+        (Embeddings, EMBED_QUERY_METHOD_NAME): getattr(
+            Embeddings, EMBED_QUERY_METHOD_NAME
+        ),
         (Embeddings, AEMBEDDINGS_GENERATE_METHOD_NAME): getattr(
             Embeddings,
             AEMBEDDINGS_GENERATE_METHOD_NAME,
@@ -497,18 +527,90 @@ def test_deactivate_restores_original_methods(
             Embeddings,
             AEMBED_DOCUMENTS_METHOD_NAME,
         ),
-        (Embeddings, AEMBED_QUERY_METHOD_NAME): getattr(Embeddings, AEMBED_QUERY_METHOD_NAME),
+        (Embeddings, AEMBED_QUERY_METHOD_NAME): getattr(
+            Embeddings, AEMBED_QUERY_METHOD_NAME
+        ),
     }
 
     instrumentor = WatsonxInstrumentor()
     instrumentor.activate()
-    assert getattr(ModelInference, GENERATE_METHOD_NAME) is not original_methods[
-        (ModelInference, GENERATE_METHOD_NAME)
-    ]
-    assert getattr(Embeddings, EMBED_QUERY_METHOD_NAME) is not original_methods[
-        (Embeddings, EMBED_QUERY_METHOD_NAME)
-    ]
+    assert (
+        getattr(ModelInference, GENERATE_METHOD_NAME)
+        is not original_methods[(ModelInference, GENERATE_METHOD_NAME)]
+    )
+    assert (
+        getattr(Embeddings, EMBED_QUERY_METHOD_NAME)
+        is not original_methods[(Embeddings, EMBED_QUERY_METHOD_NAME)]
+    )
 
     instrumentor.deactivate()
     for (target_class, method_name), original in original_methods.items():
         assert getattr(target_class, method_name) is original
+
+
+def test_two_instances_keep_watsonx_patched_until_final_deactivate(
+    fake_watsonx: tuple[type[Any], type[Any]],
+    captured_spans: list[Any],
+) -> None:
+    ModelInference, _ = fake_watsonx
+    original = ModelInference.generate
+    first = WatsonxInstrumentor()
+    second = WatsonxInstrumentor()
+
+    first.activate()
+    second.activate()
+    first.deactivate()
+    ModelInference().generate("still active")
+    assert len(captured_spans) == 1
+    assert ModelInference.generate is not original
+
+    second.deactivate()
+    assert ModelInference.generate is original
+
+
+def test_large_embedding_preserves_every_numeric_dimension() -> None:
+    vector = [index / 10_000 for index in range(5_000)]
+    attrs = build_embedding_attrs(
+        instance=Obj(model_id="ibm/slate"),
+        request_kwargs={"text": "full vector"},
+        response={"results": [{"embedding": vector}]},
+    )
+
+    output = json.loads(attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT])
+    assert output["results"][0]["embedding"] == vector
+
+
+def test_stream_keeps_call_time_parent_when_consumed_outside_context(
+    fake_watsonx: tuple[type[Any], type[Any]],
+    captured_spans: list[Any],
+) -> None:
+    ModelInference, _ = fake_watsonx
+    instrumentor = WatsonxInstrumentor()
+    instrumentor.activate()
+    parent_span_id = 0x1234
+    parent = NonRecordingSpan(
+        SpanContext(
+            trace_id=0x1234567890ABCDEF1234567890ABCDEF,
+            span_id=parent_span_id,
+            is_remote=False,
+            trace_flags=TraceFlags(TraceFlags.SAMPLED),
+            trace_state=None,
+        )
+    )
+    token = context_api.attach(trace.set_span_in_context(parent))
+    try:
+        stream = ModelInference().generate_text_stream(prompt="parent")
+    finally:
+        context_api.detach(token)
+
+    list(stream)
+    assert captured_spans[0].parent.span_id == parent_span_id
+
+
+def test_watsonx_stream_retention_is_bounded_and_keeps_terminal_chunk() -> None:
+    chunks: list[Any] = []
+    for index in range(_instrumentation._MAX_STREAM_CHUNKS + 20):
+        _instrumentation._append_stream_chunk(chunks, {"index": index})
+
+    assert len(chunks) == _instrumentation._MAX_STREAM_CHUNKS
+    assert chunks[-1] == {"index": _instrumentation._MAX_STREAM_CHUNKS + 19}

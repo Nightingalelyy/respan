@@ -11,6 +11,17 @@ from opentelemetry import trace
 from opentelemetry.semconv._incubating.attributes import gen_ai_attributes
 from opentelemetry.semconv_ai import LLMRequestTypeValues
 from opentelemetry.semconv_ai import SpanAttributes as TLSpanAttributes
+from respan_sdk.constants.llm_logging import (
+    LOG_TYPE_CHAT,
+    LOG_TYPE_EMBEDDING,
+    LOG_TYPE_TEXT,
+)
+from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
+from respan_sdk.utils.data_processing.id_processing import (
+    format_span_id,
+    format_trace_id,
+)
+from respan_tracing.utils.span_factory import build_readable_span, inject_span
 
 from respan_instrumentation_watsonx._constants import (
     ASSISTANT_ROLE,
@@ -22,11 +33,14 @@ from respan_instrumentation_watsonx._constants import (
     TOTAL_TOKENS_KEY,
     WATSONX_CHAT_SPAN_NAME,
     WATSONX_EMBEDDING_SPAN_NAME,
+    WATSONX_PROVIDER_NAME,
     WATSONX_SYSTEM_NAME,
     WATSONX_TEXT_SPAN_NAME,
 )
+from respan_instrumentation_watsonx._serialization import embedding_json_dumps
 from respan_instrumentation_watsonx._translator import (
     embedding_dimension,
+    embedding_output,
     embedding_vector_count,
     extract_chat_tool_calls,
     extract_usage,
@@ -41,14 +55,6 @@ from respan_instrumentation_watsonx._translator import (
     safe_json,
     to_attr_value,
 )
-from respan_sdk.constants.llm_logging import (
-    LOG_TYPE_CHAT,
-    LOG_TYPE_EMBEDDING,
-    LOG_TYPE_TEXT,
-)
-from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
-from respan_sdk.utils.data_processing.id_processing import format_span_id, format_trace_id
-from respan_tracing.utils.span_factory import build_readable_span, inject_span
 
 logger = logging.getLogger(__name__)
 
@@ -61,11 +67,11 @@ def _request_type_value(name: str, fallback: str) -> str:
     return getattr(value, "value", fallback)
 
 
-def _current_trace_parent_ids() -> tuple[str | None, str | None]:
+def current_trace_parent_ids() -> tuple[str | None, str | None]:
     try:
         current_span = trace.get_current_span()
         span_context = current_span.get_span_context()
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None, None
     trace_id = getattr(span_context, "trace_id", 0) or 0
     span_id = getattr(span_context, "span_id", 0) or 0
@@ -74,12 +80,19 @@ def _current_trace_parent_ids() -> tuple[str | None, str | None]:
     return format_trace_id(trace_id=trace_id), format_span_id(span_id=span_id)
 
 
-def _base_attrs(*, span_name: str, log_type: str, request_type: str) -> dict[str, Any]:
+def _base_attrs(
+    *,
+    span_name: str,
+    log_type: str,
+    request_type: str,
+    parent_id: str | None = None,
+) -> dict[str, Any]:
     attrs = {
         TLSpanAttributes.LLM_SYSTEM: WATSONX_SYSTEM_NAME,
+        gen_ai_attributes.GEN_AI_PROVIDER_NAME: WATSONX_PROVIDER_NAME,
         TLSpanAttributes.LLM_REQUEST_TYPE: request_type,
         TLSpanAttributes.TRACELOOP_ENTITY_NAME: span_name,
-        TLSpanAttributes.TRACELOOP_ENTITY_PATH: span_name,
+        TLSpanAttributes.TRACELOOP_ENTITY_PATH: span_name if parent_id else "",
         RESPAN_LOG_TYPE: log_type,
     }
     workflow_name = context_api.get_value(TLSpanAttributes.TRACELOOP_ENTITY_NAME)
@@ -88,10 +101,12 @@ def _base_attrs(*, span_name: str, log_type: str, request_type: str) -> dict[str
     return attrs
 
 
-def _set_model(attrs: dict[str, Any], instance: Any, request_kwargs: dict[str, Any]) -> None:
+def _set_model(
+    attrs: dict[str, Any], instance: Any, request_kwargs: dict[str, Any]
+) -> None:
     model = request_kwargs.get(MODEL_ID_KEY) or model_id_from_instance(instance)
     if model:
-        attrs[TLSpanAttributes.LLM_REQUEST_MODEL] = str(model)
+        attrs[TLSpanAttributes.LLM_REQUEST_MODEL] = to_attr_value(model)
 
 
 def _set_prompt_attrs(attrs: dict[str, Any], messages: list[dict[str, Any]]) -> None:
@@ -129,12 +144,17 @@ def build_text_attrs(
     instance: Any,
     request_kwargs: dict[str, Any],
     response_or_chunks: Any = None,
+    is_streaming: bool = False,
+    parent_id: str | None = None,
 ) -> dict[str, Any]:
     attrs = _base_attrs(
         span_name=WATSONX_TEXT_SPAN_NAME,
         log_type=LOG_TYPE_TEXT,
-        request_type=_request_type_value("COMPLETION", "completion"),
+        request_type=_request_type_value("CHAT", "chat"),
+        parent_id=parent_id,
     )
+    if is_streaming:
+        attrs[TLSpanAttributes.LLM_IS_STREAMING] = True
     _set_model(attrs=attrs, instance=instance, request_kwargs=request_kwargs)
     messages = normalize_text_prompts(request_kwargs.get("prompt"))
     attrs[TLSpanAttributes.TRACELOOP_ENTITY_INPUT] = format_input_messages(messages)
@@ -152,12 +172,17 @@ def build_chat_attrs(
     instance: Any,
     request_kwargs: dict[str, Any],
     response_or_chunks: Any = None,
+    is_streaming: bool = False,
+    parent_id: str | None = None,
 ) -> dict[str, Any]:
     attrs = _base_attrs(
         span_name=WATSONX_CHAT_SPAN_NAME,
         log_type=LOG_TYPE_CHAT,
         request_type=_request_type_value("CHAT", "chat"),
+        parent_id=parent_id,
     )
+    if is_streaming:
+        attrs[TLSpanAttributes.LLM_IS_STREAMING] = True
     _set_model(attrs=attrs, instance=instance, request_kwargs=request_kwargs)
     messages = normalize_chat_messages(request_kwargs.get("messages"))
     attrs[TLSpanAttributes.TRACELOOP_ENTITY_INPUT] = format_input_messages(messages)
@@ -185,11 +210,13 @@ def build_embedding_attrs(
     instance: Any,
     request_kwargs: dict[str, Any],
     response: Any = None,
+    parent_id: str | None = None,
 ) -> dict[str, Any]:
     attrs = _base_attrs(
         span_name=WATSONX_EMBEDDING_SPAN_NAME,
         log_type=LOG_TYPE_EMBEDDING,
         request_type=_request_type_value("EMBEDDING", "embedding"),
+        parent_id=parent_id,
     )
     _set_model(attrs=attrs, instance=instance, request_kwargs=request_kwargs)
     inputs = normalize_embedding_inputs(
@@ -201,13 +228,11 @@ def build_embedding_attrs(
     attrs[f"{_GEN_AI_PROMPT_PREFIX}0.content"] = safe_json(inputs)
 
     if response is not None:
-        summary = {
-            "vector_count": embedding_vector_count(response),
-            "dimension": embedding_dimension(response),
-        }
-        attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safe_json(
-            {key: value for key, value in summary.items() if value is not None}
+        attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = embedding_json_dumps(
+            embedding_output(response)
         )
+        attrs["watsonx.embedding.vector_count"] = embedding_vector_count(response) or 0
+        attrs["watsonx.embedding.dimension"] = embedding_dimension(response) or 0
         _set_usage_attrs(attrs=attrs, response_or_chunks=response)
     return attrs
 
@@ -219,12 +244,15 @@ def emit_span(
     start_ns: int,
     error_message: str | None = None,
     status_code: int = 200,
+    trace_id: str | None = None,
+    parent_id: str | None = None,
 ) -> None:
     try:
         if error_message:
             attrs["error.message"] = error_message
             attrs.setdefault("status_code", status_code if status_code >= 400 else 500)
-        trace_id, parent_id = _current_trace_parent_ids()
+        if trace_id is None and parent_id is None:
+            trace_id, parent_id = current_trace_parent_ids()
         span = build_readable_span(
             name=span_name,
             trace_id=trace_id,
@@ -236,7 +264,7 @@ def emit_span(
             status_code=status_code,
         )
         inject_span(span=span)
-    except Exception:
+    except BaseException:
         logger.debug("Failed to emit Watsonx span", exc_info=True)
 
 
@@ -248,18 +276,29 @@ def emit_text_span(
     response_or_chunks: Any = None,
     error_message: str | None = None,
     status_code: int = 200,
+    is_streaming: bool = False,
+    trace_id: str | None = None,
+    parent_id: str | None = None,
 ) -> None:
-    emit_span(
-        span_name=WATSONX_TEXT_SPAN_NAME,
-        attrs=build_text_attrs(
+    try:
+        attrs = build_text_attrs(
             instance=instance,
             request_kwargs=request_kwargs,
             response_or_chunks=response_or_chunks,
-        ),
-        start_ns=start_ns,
-        error_message=error_message,
-        status_code=status_code,
-    )
+            is_streaming=is_streaming,
+            parent_id=parent_id,
+        )
+        emit_span(
+            span_name=WATSONX_TEXT_SPAN_NAME,
+            attrs=attrs,
+            start_ns=start_ns,
+            error_message=error_message,
+            status_code=status_code,
+            trace_id=trace_id,
+            parent_id=parent_id,
+        )
+    except BaseException:
+        logger.debug("Failed to build Watsonx text span", exc_info=True)
 
 
 def emit_chat_span(
@@ -270,18 +309,29 @@ def emit_chat_span(
     response_or_chunks: Any = None,
     error_message: str | None = None,
     status_code: int = 200,
+    is_streaming: bool = False,
+    trace_id: str | None = None,
+    parent_id: str | None = None,
 ) -> None:
-    emit_span(
-        span_name=WATSONX_CHAT_SPAN_NAME,
-        attrs=build_chat_attrs(
+    try:
+        attrs = build_chat_attrs(
             instance=instance,
             request_kwargs=request_kwargs,
             response_or_chunks=response_or_chunks,
-        ),
-        start_ns=start_ns,
-        error_message=error_message,
-        status_code=status_code,
-    )
+            is_streaming=is_streaming,
+            parent_id=parent_id,
+        )
+        emit_span(
+            span_name=WATSONX_CHAT_SPAN_NAME,
+            attrs=attrs,
+            start_ns=start_ns,
+            error_message=error_message,
+            status_code=status_code,
+            trace_id=trace_id,
+            parent_id=parent_id,
+        )
+    except BaseException:
+        logger.debug("Failed to build Watsonx chat span", exc_info=True)
 
 
 def emit_embedding_span(
@@ -292,15 +342,24 @@ def emit_embedding_span(
     response: Any = None,
     error_message: str | None = None,
     status_code: int = 200,
+    trace_id: str | None = None,
+    parent_id: str | None = None,
 ) -> None:
-    emit_span(
-        span_name=WATSONX_EMBEDDING_SPAN_NAME,
-        attrs=build_embedding_attrs(
+    try:
+        attrs = build_embedding_attrs(
             instance=instance,
             request_kwargs=request_kwargs,
             response=response,
-        ),
-        start_ns=start_ns,
-        error_message=error_message,
-        status_code=status_code,
-    )
+            parent_id=parent_id,
+        )
+        emit_span(
+            span_name=WATSONX_EMBEDDING_SPAN_NAME,
+            attrs=attrs,
+            start_ns=start_ns,
+            error_message=error_message,
+            status_code=status_code,
+            trace_id=trace_id,
+            parent_id=parent_id,
+        )
+    except BaseException:
+        logger.debug("Failed to build Watsonx embedding span", exc_info=True)

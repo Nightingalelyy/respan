@@ -4,11 +4,12 @@ from contextlib import contextmanager
 from types import ModuleType
 
 import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.semconv_ai import SpanAttributes
 from opentelemetry.trace import StatusCode
-
-from respan_instrumentation_weaviate import WeaviateInstrumentor
-from respan_instrumentation_weaviate import _instrumentation
+from respan_instrumentation_weaviate import WeaviateInstrumentor, _instrumentation
 from respan_instrumentation_weaviate._constants import (
     MAX_ATTRIBUTE_CHARS,
     MAX_PREVIEW_ITEMS,
@@ -67,7 +68,6 @@ def _install_fake_weaviate(monkeypatch):
         def delete(self, name):
             if name == "missing":
                 raise RuntimeError("collection missing")
-            return None
 
     class _DataCollection:
         name = "Docs"
@@ -141,19 +141,23 @@ def reset_instrumentor():
     WeaviateInstrumentor._patches_applied = False
     WeaviateInstrumentor._activation_count = 0
     WeaviateInstrumentor._patched_targets = []
+    WeaviateInstrumentor._installed_targets = {}
+    WeaviateInstrumentor._capture_content_config = None
     yield
     for target, method in reversed(WeaviateInstrumentor._patched_targets):
         _instrumentation.unwrap(target, method)
     WeaviateInstrumentor._patches_applied = False
     WeaviateInstrumentor._activation_count = 0
     WeaviateInstrumentor._patched_targets = []
+    WeaviateInstrumentor._installed_targets = {}
+    WeaviateInstrumentor._capture_content_config = None
 
 
 def _assert_contract(span):
     attrs = span.attributes
     assert attrs[RESPAN_LOG_TYPE] == "task"
     assert attrs[SpanAttributes.TRACELOOP_ENTITY_NAME]
-    assert attrs[SpanAttributes.TRACELOOP_ENTITY_PATH]
+    assert isinstance(attrs[SpanAttributes.TRACELOOP_ENTITY_PATH], str)
     for banned_alias in (
         "tools",
         "tool_calls",
@@ -178,7 +182,9 @@ def test_package_exports_weaviate_instrumentor():
 def test_collection_data_and_query_operations_emit_spans(monkeypatch):
     Collections, Data, _, Query = _install_fake_weaviate(monkeypatch)
     tracer = _FakeTracer()
-    monkeypatch.setattr(_instrumentation.trace, "get_tracer", lambda _: tracer)
+    monkeypatch.setattr(
+        _instrumentation.trace, "get_tracer", lambda *_args, **_kwargs: tracer
+    )
     instrumentor = WeaviateInstrumentor()
     instrumentor.activate()
 
@@ -212,7 +218,9 @@ def test_collection_data_and_query_operations_emit_spans(monkeypatch):
 async def test_async_data_operation_is_awaited(monkeypatch):
     _, _, AsyncData, _ = _install_fake_weaviate(monkeypatch)
     tracer = _FakeTracer()
-    monkeypatch.setattr(_instrumentation.trace, "get_tracer", lambda _: tracer)
+    monkeypatch.setattr(
+        _instrumentation.trace, "get_tracer", lambda *_args, **_kwargs: tracer
+    )
     instrumentor = WeaviateInstrumentor()
     instrumentor.instrument()
 
@@ -230,7 +238,9 @@ async def test_async_data_operation_is_awaited(monkeypatch):
 def test_error_status_and_content_control(monkeypatch):
     Collections, _, _, _ = _install_fake_weaviate(monkeypatch)
     tracer = _FakeTracer()
-    monkeypatch.setattr(_instrumentation.trace, "get_tracer", lambda _: tracer)
+    monkeypatch.setattr(
+        _instrumentation.trace, "get_tracer", lambda *_args, **_kwargs: tracer
+    )
     instrumentor = WeaviateInstrumentor(capture_content=False)
     instrumentor.activate()
 
@@ -241,7 +251,7 @@ def test_error_status_and_content_control(monkeypatch):
     assert span.status.status_code is StatusCode.ERROR
     assert span.exceptions
     assert span.attributes["status_code"] == 500
-    assert span.attributes["error.message"] == "collection missing"
+    assert span.attributes["error.message"] == "RuntimeError: collection missing"
     assert SpanAttributes.TRACELOOP_ENTITY_INPUT not in span.attributes
     assert SpanAttributes.TRACELOOP_ENTITY_OUTPUT not in span.attributes
     _assert_contract(span)
@@ -251,7 +261,9 @@ def test_error_status_and_content_control(monkeypatch):
 def test_full_vectors_survive_canonical_input_and_output(monkeypatch):
     _, _, _, Query = _install_fake_weaviate(monkeypatch)
     tracer = _FakeTracer()
-    monkeypatch.setattr(_instrumentation.trace, "get_tracer", lambda _: tracer)
+    monkeypatch.setattr(
+        _instrumentation.trace, "get_tracer", lambda *_args, **_kwargs: tracer
+    )
     instrumentor = WeaviateInstrumentor()
     instrumentor.activate()
     vector = [0.125] * (MAX_ATTRIBUTE_CHARS + 17)
@@ -280,7 +292,9 @@ def test_full_vectors_survive_canonical_input_and_output(monkeypatch):
 def test_lifecycle_is_idempotent_and_reference_counted(monkeypatch):
     Collections, _, _, _ = _install_fake_weaviate(monkeypatch)
     tracer = _FakeTracer()
-    monkeypatch.setattr(_instrumentation.trace, "get_tracer", lambda _: tracer)
+    monkeypatch.setattr(
+        _instrumentation.trace, "get_tracer", lambda *_args, **_kwargs: tracer
+    )
     first = WeaviateInstrumentor()
     second = WeaviateInstrumentor()
     first.activate()
@@ -301,7 +315,9 @@ def test_real_dynamic_batch_runtime_target_is_patched_and_unwrapped(monkeypatch)
     from weaviate.collections.batch.collection import _BatchCollection
 
     tracer = _FakeTracer()
-    monkeypatch.setattr(_instrumentation.trace, "get_tracer", lambda _: tracer)
+    monkeypatch.setattr(
+        _instrumentation.trace, "get_tracer", lambda *_args, **_kwargs: tracer
+    )
     monkeypatch.setattr(
         _instrumentation,
         "WEAVIATE_PATCH_SPECS",
@@ -362,3 +378,64 @@ def test_real_dynamic_batch_runtime_target_is_patched_and_unwrapped(monkeypatch)
     assert _BatchCollection.flush is original_flush
     batch.flush()
     assert len(tracer.spans) == 4
+
+
+def test_provider_status_and_nested_credentials_are_preserved_safely(monkeypatch):
+    Collections, Data, _, _ = _install_fake_weaviate(monkeypatch)
+    tracer = _FakeTracer()
+    monkeypatch.setattr(
+        _instrumentation.trace, "get_tracer", lambda *_args, **_kwargs: tracer
+    )
+
+    class ProviderError(RuntimeError):
+        status_code = 429
+
+    def fail_delete(self, name):
+        raise ProviderError("rate limited api_key=plain-secret")
+
+    monkeypatch.setattr(Collections, "delete", fail_delete)
+    instrumentor = WeaviateInstrumentor()
+    instrumentor.activate()
+
+    Data().insert(
+        {
+            "text": "safe",
+            "api_key": "plain-secret",
+            "nested": {"client_secret": "nested-secret"},
+        }
+    )
+    with pytest.raises(ProviderError):
+        Collections().delete("Docs")
+
+    serialized = json.dumps([span.attributes for span in tracer.spans])
+    assert "plain-secret" not in serialized
+    assert "nested-secret" not in serialized
+    assert tracer.spans[-1].attributes["status_code"] == 429
+
+
+def test_real_otel_export_has_scope_parent_and_nested_entity_path(monkeypatch):
+    Collections, _, _, _ = _install_fake_weaviate(monkeypatch)
+    provider = TracerProvider()
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(
+        _instrumentation.trace,
+        "get_tracer",
+        lambda *args, **kwargs: provider.get_tracer(*args, **kwargs),
+    )
+    instrumentor = WeaviateInstrumentor()
+    instrumentor.activate()
+
+    with provider.get_tracer("test-root").start_as_current_span("root") as root:
+        Collections().exists("Docs")
+        root_span_id = root.get_span_context().span_id
+
+    spans = exporter.get_finished_spans()
+    client = next(span for span in spans if span.name == "weaviate.collections.exists")
+    assert client.parent.span_id == root_span_id
+    assert client.instrumentation_scope.name == "respan-instrumentation-weaviate"
+    assert client.instrumentation_scope.version == "0.1.0"
+    assert (
+        client.attributes[SpanAttributes.TRACELOOP_ENTITY_PATH]
+        == "weaviate.collections.exists"
+    )

@@ -35,7 +35,8 @@ completion = client.chat.chat(
 )
 
 print(completion.choices[0].message.content)
-respan.flush()
+client.close()
+respan.shutdown()
 ```
 
 ## Notes
@@ -46,3 +47,7 @@ respan.flush()
   calls are traced.
 - Writer-specific SDK field names stay local to this package; emitted spans use
   canonical GenAI/LLM and Respan-owned attribute constants.
+- Streamed chat, completion, graph, and application calls carry
+  `llm.is_streaming=true` and finalize on completion, early close, or error.
+- Close `Writer`/`AsyncWriter` before calling `respan.shutdown()` in an outer
+  `finally` block.
