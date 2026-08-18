@@ -18,9 +18,9 @@ from opentelemetry.semconv_ai import SpanAttributes
 from respan_sdk.constants.llm_logging import (
     LOG_TYPE_AGENT,
     LOG_TYPE_CHAT,
-    LOG_TYPE_COMPLETION,
     LOG_TYPE_CUSTOM,
     LOG_TYPE_TASK,
+    LOG_TYPE_TEXT,
     LOG_TYPE_TOOL,
     LOG_TYPE_WORKFLOW,
     LogMethodChoices,
@@ -1144,7 +1144,7 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
         metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
-        extra_attrs: dict[str, Any] = {LLM_REQUEST_TYPE: LOG_TYPE_COMPLETION}
+        extra_attrs: dict[str, Any] = {LLM_REQUEST_TYPE: LOG_TYPE_CHAT}
         model = _extract_model(serialized, metadata=metadata)
         _set_if_present(extra_attrs, LLM_REQUEST_MODEL, model)
         for index, prompt in enumerate(prompts or []):
@@ -1159,8 +1159,8 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
             run_id=run_id,
             parent_run_id=parent_run_id,
             name=_extract_name(serialized, LLM_FALLBACK_NAME),
-            log_type=LOG_TYPE_COMPLETION,
-            span_kind=LOG_TYPE_COMPLETION,
+            log_type=LOG_TYPE_TEXT,
+            span_kind=LOG_TYPE_TEXT,
             input_value=prompts,
             serialized=serialized,
             tags=tags,

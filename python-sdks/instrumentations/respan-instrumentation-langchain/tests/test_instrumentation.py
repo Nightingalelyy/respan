@@ -322,8 +322,8 @@ def test_llm_start_new_tokens_and_end_emit_completion_span(monkeypatch):
     handler.on_llm_end(response, run_id=run_id)
 
     attrs = captured[0].attributes
-    assert attrs[RESPAN_LOG_TYPE] == "completion"
-    assert attrs[LLM_REQUEST_TYPE] == "completion"
+    assert attrs[RESPAN_LOG_TYPE] == "text"
+    assert attrs[LLM_REQUEST_TYPE] == "chat"
     assert attrs[LLM_REQUEST_MODEL] == "text-davinci"
     assert attrs[SpanAttributes.LLM_IS_STREAMING] is True
     assert (
