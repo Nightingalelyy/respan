@@ -10,6 +10,18 @@ from opentelemetry import context as context_api
 from opentelemetry import trace
 from opentelemetry.semconv._incubating.attributes import gen_ai_attributes
 from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
+from respan_sdk.constants.llm_logging import (
+    LOG_TYPE_CHAT,
+    LOG_TYPE_EMBEDDING,
+    LOG_TYPE_TASK,
+    LOG_TYPE_TEXT,
+)
+from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
+from respan_sdk.utils.data_processing.id_processing import (
+    format_span_id,
+    format_trace_id,
+)
+from respan_tracing.utils.span_factory import build_readable_span, inject_span
 
 from respan_instrumentation_aleph_alpha._constants import (
     ALEPH_ALPHA_SYSTEM_NAME,
@@ -43,15 +55,6 @@ from respan_instrumentation_aleph_alpha._translator import (
     tools_from_payload,
     usage_from_response,
 )
-from respan_sdk.constants.llm_logging import (
-    LOG_TYPE_CHAT,
-    LOG_TYPE_EMBEDDING,
-    LOG_TYPE_TASK,
-    LOG_TYPE_TEXT,
-)
-from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
-from respan_sdk.utils.data_processing.id_processing import format_span_id, format_trace_id
-from respan_tracing.utils.span_factory import build_readable_span, inject_span
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +111,7 @@ def _base_attrs(operation: str) -> dict[str, Any]:
         request_type = None
     else:
         log_type = LOG_TYPE_TEXT
-        request_type = LLMRequestTypeValues.COMPLETION.value
+        request_type = LLMRequestTypeValues.CHAT.value
 
     span_name = _span_name(operation=operation)
     attrs: dict[str, Any] = {
@@ -283,7 +286,9 @@ def build_aleph_alpha_attrs(
     _set_request_attrs(attrs=attrs, payload=payload)
 
     if operation in (OPERATION_CHAT, OPERATION_CHAT_STREAM):
-        _set_chat_attrs(attrs=attrs, payload=payload, response_or_items=response_or_items)
+        _set_chat_attrs(
+            attrs=attrs, payload=payload, response_or_items=response_or_items
+        )
     elif operation in (OPERATION_COMPLETE, OPERATION_COMPLETE_STREAM):
         _set_completion_attrs(
             attrs=attrs,

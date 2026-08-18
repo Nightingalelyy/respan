@@ -9,9 +9,7 @@ from typing import Any
 import pytest
 from opentelemetry import context as context_api
 from opentelemetry.semconv_ai import SpanAttributes
-
-from respan_instrumentation_aleph_alpha import AlephAlphaInstrumentor
-from respan_instrumentation_aleph_alpha import _instrumentation
+from respan_instrumentation_aleph_alpha import AlephAlphaInstrumentor, _instrumentation
 from respan_instrumentation_aleph_alpha._constants import (
     ALEPH_ALPHA_CLIENT_MODULE,
     ASYNC_CLIENT_CLASS_NAME,
@@ -37,11 +35,7 @@ class Obj:
             setattr(self, key, value)
 
     def to_json(self) -> dict[str, Any]:
-        return {
-            key: value
-            for key, value in self.__dict__.items()
-            if value is not None
-        }
+        return {key: value for key, value in self.__dict__.items() if value is not None}
 
 
 class FakeRequest(Obj):
@@ -128,7 +122,7 @@ def fake_aleph_alpha(monkeypatch: pytest.MonkeyPatch) -> tuple[type[Any], type[A
     client_module = ModuleType(ALEPH_ALPHA_CLIENT_MODULE)
     setattr(client_module, CLIENT_CLASS_NAME, Client)
     setattr(client_module, ASYNC_CLIENT_CLASS_NAME, AsyncClient)
-    setattr(root_module, "aleph_alpha_client", client_module)
+    root_module.aleph_alpha_client = client_module
 
     monkeypatch.setitem(sys.modules, "aleph_alpha_client", root_module)
     monkeypatch.setitem(sys.modules, ALEPH_ALPHA_CLIENT_MODULE, client_module)
@@ -200,6 +194,7 @@ def test_activate_patches_sync_completion_chat_and_embedding(
 
     completion_attrs = captured_spans[0]._attributes
     assert completion_attrs[RESPAN_LOG_TYPE] == LOG_TYPE_TEXT
+    assert completion_attrs[SpanAttributes.LLM_REQUEST_TYPE] == "chat"
     assert completion_attrs[SpanAttributes.LLM_REQUEST_MODEL] == "pharia-1"
     assert completion_attrs["gen_ai.prompt.0.content"] == "Complete this"
     assert completion_attrs["gen_ai.completion.0.content"] == "Completed text."
@@ -213,15 +208,22 @@ def test_activate_patches_sync_completion_chat_and_embedding(
         '[{"id": "history_1", "type": "function", "function": '
         '{"name": "lookup", "arguments": "{}"}}]'
     )
-    assert json.loads(chat_attrs[SpanAttributes.LLM_REQUEST_FUNCTIONS])[0]["function"][
-        "name"
-    ] == "lookup"
-    assert json.loads(chat_attrs["gen_ai.completion.0.tool_calls"])[0]["function"][
-        "name"
-    ] == "lookup"
-    assert json.loads(chat_attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT])[
-        "tool_calls"
-    ][0]["function"]["name"] == "lookup"
+    assert (
+        json.loads(chat_attrs[SpanAttributes.LLM_REQUEST_FUNCTIONS])[0]["function"][
+            "name"
+        ]
+        == "lookup"
+    )
+    assert (
+        json.loads(chat_attrs["gen_ai.completion.0.tool_calls"])[0]["function"]["name"]
+        == "lookup"
+    )
+    assert (
+        json.loads(chat_attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT])["tool_calls"][0][
+            "function"
+        ]["name"]
+        == "lookup"
+    )
     assert "tools" not in chat_attrs
     assert "tool_calls" not in chat_attrs
     assert "respan.span.tools" not in chat_attrs
@@ -233,13 +235,17 @@ def test_activate_patches_sync_completion_chat_and_embedding(
     assert embedding_attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] == "Embed this"
     assert embedding_attrs["gen_ai.prompt.0.role"] == "user"
     assert embedding_attrs["gen_ai.prompt.0.content"] == "Embed this"
-    embedding_summary = json.loads(embedding_attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT])
+    embedding_summary = json.loads(
+        embedding_attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
+    )
     assert embedding_summary == {
         "model": "luminous-base",
         "embedding_count": 1,
         "dimensions": 3,
     }
-    assert json.loads(embedding_attrs["gen_ai.completion.0.content"]) == embedding_summary
+    assert (
+        json.loads(embedding_attrs["gen_ai.completion.0.content"]) == embedding_summary
+    )
     assert "ai.embedding" not in embedding_attrs
     assert "0.1" not in embedding_attrs["gen_ai.completion.0.content"]
 
@@ -255,7 +261,9 @@ def test_async_methods_and_streaming_emit_spans(
         instrumentor = AlephAlphaInstrumentor()
         instrumentor.activate()
 
-        complete_response = await AsyncClient().complete(completion_request(), "pharia-1")
+        complete_response = await AsyncClient().complete(
+            completion_request(), "pharia-1"
+        )
         chat_response = await AsyncClient().chat(chat_request(), "pharia-1-chat")
         completion_chunks = [
             item
@@ -280,11 +288,15 @@ def test_async_methods_and_streaming_emit_spans(
         assert captured_spans[2]._attributes["gen_ai.completion.0.content"] == (
             "stream done"
         )
-        assert captured_spans[2]._attributes[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] == 7
+        assert (
+            captured_spans[2]._attributes[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] == 7
+        )
         assert captured_spans[3]._attributes["gen_ai.completion.0.content"] == (
             "streamed chat"
         )
-        assert captured_spans[3]._attributes[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] == 12
+        assert (
+            captured_spans[3]._attributes[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] == 12
+        )
 
         instrumentor.deactivate()
 
@@ -320,7 +332,9 @@ def test_active_workflow_name_is_attached_to_injected_span() -> None:
 
 
 @pytest.mark.parametrize("operation", [OPERATION_EVALUATE, OPERATION_EXPLAIN])
-def test_analytical_operations_are_tasks_without_completion_usage(operation: str) -> None:
+def test_analytical_operations_are_tasks_without_completion_usage(
+    operation: str,
+) -> None:
     attrs = build_aleph_alpha_attrs(
         operation=operation,
         request=FakeRequest(
@@ -337,9 +351,9 @@ def test_analytical_operations_are_tasks_without_completion_usage(operation: str
     )
 
     assert attrs[RESPAN_LOG_TYPE] == LOG_TYPE_TASK
-    assert json.loads(attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT])[
-        "result"
-    ] == {"log_probability": -1.25}
+    assert json.loads(attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT])["result"] == {
+        "log_probability": -1.25
+    }
     assert SpanAttributes.LLM_SYSTEM not in attrs
     assert SpanAttributes.LLM_REQUEST_TYPE not in attrs
     assert SpanAttributes.LLM_REQUEST_MODEL not in attrs
