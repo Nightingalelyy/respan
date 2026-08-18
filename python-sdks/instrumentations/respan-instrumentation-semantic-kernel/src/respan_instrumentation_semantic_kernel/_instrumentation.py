@@ -5,9 +5,11 @@ from __future__ import annotations
 import importlib
 import logging
 import os
+import threading
 from typing import Any
 
 from opentelemetry import trace
+from respan_tracing.core.tracer import RespanTracer
 
 from respan_instrumentation_semantic_kernel._constants import (
     SEMANTIC_KERNEL_ENABLE_OTEL_DIAGNOSTICS_ENV,
@@ -23,11 +25,14 @@ from respan_instrumentation_semantic_kernel._processor import (
     insert_span_processor_before_export,
     remove_span_processor,
 )
-from respan_tracing.core.tracer import RespanTracer
 
 logger = logging.getLogger(__name__)
 
 _UNSET = object()
+_RUNTIME_LOCK = threading.RLock()
+_RUNTIME_COUNT = 0
+_RUNTIME_CONFIG: bool | None = None
+_RUNTIME_OWNER: SemanticKernelInstrumentor | None = None
 
 
 class SemanticKernelInstrumentor:
@@ -54,6 +59,8 @@ class SemanticKernelInstrumentor:
 
     def activate(self) -> None:
         """Activate Semantic Kernel diagnostics and Respan span normalization."""
+        global _RUNTIME_CONFIG, _RUNTIME_COUNT, _RUNTIME_OWNER
+
         if self._is_instrumented:
             return
 
@@ -72,33 +79,65 @@ class SemanticKernelInstrumentor:
             )
             return
 
-        tracer_provider = trace.get_tracer_provider()
-        try:
-            self._enable_semantic_kernel_diagnostics()
-            self._processor = SemanticKernelSpanProcessor()
-            insert_span_processor_before_export(tracer_provider, self._processor)
-            self._install_log_handler()
-            self._is_instrumented = True
-            logger.info("Semantic Kernel instrumentation activated")
-        except Exception:
-            if self._processor is not None:
-                remove_span_processor(tracer_provider, self._processor)
-            self._processor = None
-            self._remove_log_handler()
-            self._restore_semantic_kernel_diagnostics()
-            self._is_instrumented = False
-            logger.exception("Failed to activate Semantic Kernel instrumentation")
+        with _RUNTIME_LOCK:
+            if self._is_instrumented:
+                return
+            if _RUNTIME_COUNT:
+                if _RUNTIME_CONFIG != self._capture_content:
+                    raise ValueError(
+                        "Semantic Kernel instrumentation is already active with "
+                        "a different capture_content setting"
+                    )
+                _RUNTIME_COUNT += 1
+                self._is_instrumented = True
+                return
+
+            tracer_provider = trace.get_tracer_provider()
+            try:
+                self._enable_semantic_kernel_diagnostics()
+                self._processor = SemanticKernelSpanProcessor(
+                    capture_content=self._capture_content
+                )
+                insert_span_processor_before_export(tracer_provider, self._processor)
+                if self._capture_content:
+                    self._install_log_handler()
+                self._is_instrumented = True
+                _RUNTIME_CONFIG = self._capture_content
+                _RUNTIME_COUNT = 1
+                _RUNTIME_OWNER = self
+                logger.info("Semantic Kernel instrumentation activated")
+            except Exception:
+                if self._processor is not None:
+                    remove_span_processor(tracer_provider, self._processor)
+                self._processor = None
+                self._remove_log_handler()
+                self._restore_semantic_kernel_diagnostics()
+                self._is_instrumented = False
+                logger.exception("Failed to activate Semantic Kernel instrumentation")
 
     def deactivate(self) -> None:
         """Deactivate the instrumentation and restore local diagnostics settings."""
-        tracer_provider = trace.get_tracer_provider()
-        if self._processor is not None:
-            remove_span_processor(tracer_provider, self._processor)
-        self._processor = None
-        self._remove_log_handler()
-        self._restore_semantic_kernel_diagnostics()
-        self._is_instrumented = False
-        logger.info("Semantic Kernel instrumentation deactivated")
+        global _RUNTIME_CONFIG, _RUNTIME_COUNT, _RUNTIME_OWNER
+
+        with _RUNTIME_LOCK:
+            if not self._is_instrumented:
+                return
+            self._is_instrumented = False
+            _RUNTIME_COUNT = max(_RUNTIME_COUNT - 1, 0)
+            if _RUNTIME_COUNT:
+                return
+
+            owner = _RUNTIME_OWNER
+            if owner is not None:
+                tracer_provider = trace.get_tracer_provider()
+                if owner._processor is not None:
+                    remove_span_processor(tracer_provider, owner._processor)
+                owner._processor = None
+                owner._remove_log_handler()
+                owner._restore_semantic_kernel_diagnostics()
+            _RUNTIME_OWNER = None
+            _RUNTIME_CONFIG = None
+            logger.info("Semantic Kernel instrumentation deactivated")
 
     def _enable_semantic_kernel_diagnostics(self) -> None:
         self._set_env(SEMANTIC_KERNEL_ENABLE_OTEL_DIAGNOSTICS_ENV, "true")

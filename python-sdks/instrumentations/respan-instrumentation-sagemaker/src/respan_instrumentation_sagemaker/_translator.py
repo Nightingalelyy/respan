@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import io
 import json
-from collections.abc import Iterable, Mapping
+import math
+import re
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,8 +22,8 @@ from respan_instrumentation_sagemaker._constants import (
     DESCRIPTION_KEY,
     ENDPOINT_NAME_KEY,
     FUNCTION_KEY,
-    FUNCTIONS_KEY,
     FUNCTION_TOOL_TYPE,
+    FUNCTIONS_KEY,
     GENERATED_TEXT_KEY,
     INPUT_KEY,
     INPUT_LOCATION_KEY,
@@ -43,13 +45,25 @@ from respan_instrumentation_sagemaker._constants import (
     TARGET_MODEL_KEY,
     TEXT_KEY,
     TOOL_CALLS_KEY,
-    TOOLS_KEY,
     TOOL_ROLE,
+    TOOLS_KEY,
     TYPE_KEY,
     USAGE_KEY,
     USER_ROLE,
 )
-from respan_sdk.utils.serialization import serialize_value
+
+_MAX_ITEMS = 50
+_MAX_DEPTH = 8
+_MAX_JSON_BYTES = 16_000
+_SENSITIVE_KEY = re.compile(
+    r"(?:^|[._-])(api[_-]?key|authorization|password|secret|token)(?:$|[._-])",
+    re.IGNORECASE,
+)
+_ASSIGNMENT_SECRET = re.compile(
+    r"(?i)((?:['\"]?)(?:[a-z0-9_-]*[_-])?"
+    r"(?:api[_-]?key|authorization|password|secret|token)"
+    r"(?:['\"]?)\s*[:=]\s*)(?:['\"]?)[^,;)\s}]+(?:['\"]?)"
+)
 
 
 @dataclass(frozen=True)
@@ -70,6 +84,42 @@ class SageMakerResponse:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=dict)
     raw_payload: Any = None
+
+
+class SageMakerStreamAccumulator:
+    """Incrementally retain only bounded semantic stream state."""
+
+    def __init__(self) -> None:
+        self._content = ""
+        self._tool_calls: list[dict[str, Any]] = []
+        self._usage: dict[str, int] = {}
+
+    def add_event(self, event: Any) -> None:
+        if not isinstance(event, Mapping):
+            return
+        payload = _parse_payload_part(event)
+        if payload is None:
+            return
+        if isinstance(payload, Mapping):
+            _merge_usage(
+                self._usage,
+                _usage_from_mapping(payload.get(USAGE_KEY) or payload),
+            )
+            if len(self._tool_calls) < _MAX_ITEMS:
+                remaining = _MAX_ITEMS - len(self._tool_calls)
+                self._tool_calls.extend(
+                    _extract_tool_calls_from_content(payload)[:remaining]
+                )
+        text = _extract_stream_text(payload)
+        if text:
+            self._content = redact_text(self._content + text, limit=_MAX_JSON_BYTES)
+
+    def response(self) -> SageMakerResponse:
+        return SageMakerResponse(
+            content=self._content,
+            tool_calls=list(self._tool_calls),
+            usage=dict(self._usage),
+        )
 
 
 class ReplayableBody:
@@ -108,7 +158,7 @@ class ReplayableBody:
             close()
         self._stream.close()
 
-    def __iter__(self) -> Iterable[bytes]:
+    def __iter__(self) -> Iterator[bytes]:
         return self.iter_chunks()
 
     def __getattr__(self, name: str) -> Any:
@@ -118,15 +168,74 @@ class ReplayableBody:
 
 
 def safe_json(value: Any) -> str:
-    try:
-        return json.dumps(serialize_value(value=value), default=str)
-    except Exception:
-        return str(value)
+    converted = _jsonable(value)
+    encoded = json.dumps(converted, ensure_ascii=False, sort_keys=True)
+    if len(encoded.encode("utf-8")) <= _MAX_JSON_BYTES:
+        return encoded
+
+    preview = encoded.encode("utf-8")[: _MAX_JSON_BYTES - 80].decode(
+        "utf-8", errors="ignore"
+    )
+    while True:
+        bounded = json.dumps(
+            {"preview": preview, "truncated": True},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if len(bounded.encode("utf-8")) <= _MAX_JSON_BYTES:
+            return bounded
+        preview = preview[:-64]
+
+
+def redact_text(value: str, *, limit: int = _MAX_JSON_BYTES) -> str:
+    normalized = "".join(ch if ch >= " " or ch in "\n\t" else " " for ch in value)
+    normalized = _ASSIGNMENT_SECRET.sub(r"\1[REDACTED]", normalized)
+    encoded = normalized.encode("utf-8")
+    if len(encoded) <= limit:
+        return normalized
+    return encoded[: limit - 16].decode("utf-8", errors="ignore") + "...[truncated]"
+
+
+def _jsonable(value: Any, *, depth: int = 0) -> Any:
+    if value is None or isinstance(value, bool | int):
+        return value
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, bytes | bytearray):
+        return {"type": "bytes", "length": len(value)}
+    if depth >= _MAX_DEPTH:
+        return {"type": type(value).__name__, "truncated": True}
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        iterator = iter(value.items())
+        for index, item in enumerate(iterator):
+            if index >= _MAX_ITEMS:
+                result["__truncated__"] = True
+                break
+            key, nested = item
+            key_text = key if isinstance(key, str) else f"<{type(key).__name__}>"
+            result[key_text] = (
+                "[REDACTED]"
+                if _SENSITIVE_KEY.search(key_text)
+                else _jsonable(nested, depth=depth + 1)
+            )
+        return result
+    if isinstance(value, (list, tuple)):
+        result = []
+        for index, item in enumerate(value):
+            if index >= _MAX_ITEMS:
+                result.append({"truncated": True})
+                break
+            result.append(_jsonable(item, depth=depth + 1))
+        return result
+    return {"type": type(value).__name__}
 
 
 def to_json_attr(value: Any) -> str:
     if isinstance(value, str):
-        return value
+        return redact_text(value)
     return safe_json(value=value)
 
 
@@ -177,7 +286,7 @@ def _load_json(value: Any) -> Any:
             return value
     if isinstance(value, Mapping | list):
         return value
-    return serialize_value(value=value)
+    return _jsonable(value)
 
 
 def _read_body_bytes(body: Any) -> bytes | None:
@@ -239,7 +348,7 @@ def _normalize_text_content(content: Any) -> Any:
             return _normalize_tool_call(content)
         if "json" in content:
             return content["json"]
-        return serialize_value(value=content)
+        return _jsonable(content)
     if isinstance(content, list | tuple):
         normalized = [
             item
@@ -251,7 +360,7 @@ def _normalize_text_content(content: Any) -> Any:
         if all(isinstance(item, str) for item in normalized):
             return "\n".join(normalized)
         return normalized
-    return serialize_value(value=content)
+    return _jsonable(content)
 
 
 def _normalize_message(
@@ -268,9 +377,20 @@ def _normalize_message(
         ROLE_KEY: _normalize_role(role),
         CONTENT_KEY: _normalize_text_content(content),
     }
-    tool_calls = _extract_tool_calls_from_content(content)
+    direct_tool_calls = _field(message, TOOL_CALLS_KEY)
+    tool_calls = _extract_tool_calls_from_content(
+        {TOOL_CALLS_KEY: direct_tool_calls}
+        if isinstance(direct_tool_calls, list)
+        else content
+    )
     if tool_calls and normalized[ROLE_KEY] == ASSISTANT_ROLE:
         normalized[TOOL_CALLS_KEY] = tool_calls
+    tool_call_id = _field(message, "tool_call_id")
+    if normalized[ROLE_KEY] == TOOL_ROLE and isinstance(tool_call_id, str):
+        normalized[CONTENT_KEY] = {
+            "tool_call_id": tool_call_id,
+            "content": normalized[CONTENT_KEY],
+        }
     return normalized
 
 
@@ -293,7 +413,9 @@ def _prompt_message(value: Any) -> list[dict[str, Any]]:
 
 def _normalize_prompt_from_payload(body: Any) -> tuple[str, list[dict[str, Any]]]:
     if isinstance(body, list):
-        if body and all(isinstance(item, Mapping) and ROLE_KEY in item for item in body):
+        if body and all(
+            isinstance(item, Mapping) and ROLE_KEY in item for item in body
+        ):
             return (
                 LLMRequestTypeValues.CHAT.value,
                 [_normalize_message(message) for message in body],
@@ -376,7 +498,10 @@ def _normalize_tool_call(block: Mapping[str, Any]) -> dict[str, Any]:
         arguments = block.get("arguments") or block.get(INPUT_KEY) or {}
 
     return {
-        "id": block.get("id") or block.get("tool_call_id") or block.get("toolUseId") or "",
+        "id": block.get("id")
+        or block.get("tool_call_id")
+        or block.get("toolUseId")
+        or "",
         TYPE_KEY: block.get(TYPE_KEY, FUNCTION_TOOL_TYPE),
         FUNCTION_KEY: {
             NAME_KEY: name,
@@ -426,7 +551,8 @@ def parse_sagemaker_request(
         return SageMakerRequest(
             operation_name=operation_name,
             endpoint_name=endpoint_name if isinstance(endpoint_name, str) else None,
-            model_id=custom_model or (target_model if isinstance(target_model, str) else None),
+            model_id=custom_model
+            or (target_model if isinstance(target_model, str) else None),
             request_type=LLMRequestTypeValues.CHAT.value,
             messages=messages,
             raw_payload=raw_payload,
@@ -438,7 +564,9 @@ def parse_sagemaker_request(
         request_type = LLMRequestTypeValues.CHAT.value
 
     body_model = body.get(MODEL_KEY) if isinstance(body, Mapping) else None
-    model_id = custom_model or (target_model if isinstance(target_model, str) else body_model)
+    model_id = custom_model or (
+        target_model if isinstance(target_model, str) else body_model
+    )
 
     return SageMakerRequest(
         operation_name=operation_name,
@@ -479,13 +607,17 @@ def _usage_from_mapping(value: Any) -> dict[str, int]:
     details = value.get("details")
     if isinstance(details, Mapping):
         nested = _usage_from_mapping(details)
-        prompt_tokens = prompt_tokens if prompt_tokens is not None else nested.get("input_tokens")
+        prompt_tokens = (
+            prompt_tokens if prompt_tokens is not None else nested.get("input_tokens")
+        )
         completion_tokens = (
             completion_tokens
             if completion_tokens is not None
             else nested.get("output_tokens")
         )
-        total_tokens = total_tokens if total_tokens is not None else nested.get("total_tokens")
+        total_tokens = (
+            total_tokens if total_tokens is not None else nested.get("total_tokens")
+        )
 
     result: dict[str, int] = {}
     if prompt_tokens is not None:
@@ -513,7 +645,13 @@ def _extract_text_from_response_content(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, Mapping):
-        for key in (GENERATED_TEXT_KEY, TEXT_KEY, CONTENT_KEY, "outputText", "generation"):
+        for key in (
+            GENERATED_TEXT_KEY,
+            TEXT_KEY,
+            CONTENT_KEY,
+            "outputText",
+            "generation",
+        ):
             value = content.get(key)
             if isinstance(value, str):
                 return value
@@ -530,7 +668,9 @@ def _extract_text_from_response_content(content: Any) -> str:
     return ""
 
 
-def _response_from_openai_choice(payload: Mapping[str, Any]) -> SageMakerResponse | None:
+def _response_from_openai_choice(
+    payload: Mapping[str, Any],
+) -> SageMakerResponse | None:
     choices = payload.get(CHOICES_KEY)
     if not isinstance(choices, list) or not choices:
         return None
@@ -549,9 +689,9 @@ def _response_from_openai_choice(payload: Mapping[str, Any]) -> SageMakerRespons
                 tool_call
                 for raw_tool_call in tool_calls
                 if isinstance(raw_tool_call, Mapping)
-                if (tool_call := _normalize_tool_call(raw_tool_call)).get(
-                    FUNCTION_KEY, {}
-                ).get(NAME_KEY)
+                if (tool_call := _normalize_tool_call(raw_tool_call))
+                .get(FUNCTION_KEY, {})
+                .get(NAME_KEY)
             ]
             if isinstance(tool_calls, list)
             else [],
@@ -570,7 +710,13 @@ def _response_from_openai_choice(payload: Mapping[str, Any]) -> SageMakerRespons
 
 
 def _response_from_generated_payload(payload: Mapping[str, Any]) -> SageMakerResponse:
-    for key in (GENERATED_TEXT_KEY, "generated_texts", "generation", "outputText", "completion"):
+    for key in (
+        GENERATED_TEXT_KEY,
+        "generated_texts",
+        "generation",
+        "outputText",
+        "completion",
+    ):
         value = payload.get(key)
         if isinstance(value, str):
             return SageMakerResponse(
@@ -666,34 +812,12 @@ def _extract_stream_text(payload: Any) -> str:
     return ""
 
 
-def parse_sagemaker_stream_response(*, events: list[Any]) -> SageMakerResponse:
-    text_parts: list[str] = []
-    tool_calls: list[dict[str, Any]] = []
-    usage: dict[str, int] = {}
-    raw_payloads: list[Any] = []
-
+def parse_sagemaker_stream_response(
+    *, events: Iterable[Any] | SageMakerStreamAccumulator
+) -> SageMakerResponse:
+    if isinstance(events, SageMakerStreamAccumulator):
+        return events.response()
+    accumulator = SageMakerStreamAccumulator()
     for event in events:
-        if not isinstance(event, Mapping):
-            raw_payloads.append(serialize_value(value=event))
-            continue
-        raw_payloads.append(serialize_value(value=event))
-
-        payload = _parse_payload_part(event)
-        if payload is None:
-            continue
-        raw_payloads.append(payload)
-        if isinstance(payload, Mapping):
-            _merge_usage(usage, _usage_from_mapping(payload.get(USAGE_KEY) or payload))
-            extracted_tool_calls = _extract_tool_calls_from_content(payload)
-            if extracted_tool_calls:
-                tool_calls.extend(extracted_tool_calls)
-        text = _extract_stream_text(payload)
-        if text:
-            text_parts.append(text)
-
-    return SageMakerResponse(
-        content="".join(text_parts),
-        tool_calls=tool_calls,
-        usage=usage,
-        raw_payload=raw_payloads,
-    )
+        accumulator.add_event(event)
+    return accumulator.response()

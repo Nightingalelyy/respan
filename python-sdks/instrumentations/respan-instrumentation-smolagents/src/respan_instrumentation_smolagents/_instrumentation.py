@@ -2,12 +2,14 @@
 
 import importlib
 import logging
+import threading
 from typing import Any
 
 from opentelemetry import trace
-
 from respan_instrumentation_openinference import OpenInferenceInstrumentor
 from respan_instrumentation_openinference._translator import OpenInferenceTranslator
+from respan_tracing.core.tracer import RespanTracer
+
 from respan_instrumentation_smolagents._constants import (
     OPENINFERENCE_SMOLAGENTS_MODULE,
     SMOLAGENTS_INSTRUMENTATION_NAME,
@@ -16,9 +18,15 @@ from respan_instrumentation_smolagents._processor import (
     SmolagentsSpanContentProcessor,
     SmolagentsSpanContractProcessor,
 )
-from respan_tracing.core.tracer import RespanTracer
 
 logger = logging.getLogger(__name__)
+
+_RUNTIME_LOCK = threading.RLock()
+_RUNTIME_COUNT = 0
+_RUNTIME_CONFIG: dict[str, Any] | None = None
+_RUNTIME_DELEGATE: Any = None
+_RUNTIME_CONTENT_PROCESSOR: SmolagentsSpanContentProcessor | None = None
+_RUNTIME_CONTRACT_PROCESSOR: SmolagentsSpanContractProcessor | None = None
 
 
 def _load_openinference_smolagents_class() -> type:
@@ -150,6 +158,9 @@ class SmolagentsInstrumentor:
 
     def activate(self) -> None:
         """Instrument smolagents through OpenInference and Respan's translator."""
+        global _RUNTIME_CONFIG, _RUNTIME_CONTRACT_PROCESSOR
+        global _RUNTIME_CONTENT_PROCESSOR, _RUNTIME_COUNT, _RUNTIME_DELEGATE
+
         if self._is_instrumented:
             return
 
@@ -168,47 +179,89 @@ class SmolagentsInstrumentor:
             )
             return
 
-        try:
-            self._delegate = OpenInferenceInstrumentor(
-                smolagents_instrumentor_class,
-                **self._instrumentor_kwargs,
-            )
-            self._delegate.activate()
-            _register_processor_before_translator(
-                tracer_provider=trace.get_tracer_provider(),
-                processor=self._content_processor,
-            )
-            _register_processor_after_translator(
-                tracer_provider=trace.get_tracer_provider(),
-                processor=self._contract_processor,
-            )
-            self._is_instrumented = True
-            logger.info("smolagents instrumentation activated")
-        except Exception:
-            if self._delegate is not None:
-                try:
-                    self._delegate.deactivate()
-                except Exception:
-                    logger.exception("Failed to clean up smolagents instrumentation")
-            self._delegate = None
-            self._is_instrumented = False
-            logger.exception("Failed to activate smolagents instrumentation")
+        with _RUNTIME_LOCK:
+            if self._is_instrumented:
+                return
+            if _RUNTIME_COUNT:
+                if _RUNTIME_CONFIG != self._instrumentor_kwargs:
+                    raise ValueError(
+                        "smolagents instrumentation is already active with different options"
+                    )
+                _RUNTIME_COUNT += 1
+                self._delegate = _RUNTIME_DELEGATE
+                self._content_processor = _RUNTIME_CONTENT_PROCESSOR
+                self._contract_processor = _RUNTIME_CONTRACT_PROCESSOR
+                self._is_instrumented = True
+                return
+
+            tracer_provider = trace.get_tracer_provider()
+            content_registered = False
+            contract_registered = False
+            try:
+                self._delegate = OpenInferenceInstrumentor(
+                    smolagents_instrumentor_class,
+                    **self._instrumentor_kwargs,
+                )
+                self._delegate.activate()
+                _register_processor_before_translator(
+                    tracer_provider=tracer_provider,
+                    processor=self._content_processor,
+                )
+                content_registered = True
+                _register_processor_after_translator(
+                    tracer_provider=tracer_provider,
+                    processor=self._contract_processor,
+                )
+                contract_registered = True
+                self._is_instrumented = True
+                _RUNTIME_CONFIG = dict(self._instrumentor_kwargs)
+                _RUNTIME_COUNT = 1
+                _RUNTIME_DELEGATE = self._delegate
+                _RUNTIME_CONTENT_PROCESSOR = self._content_processor
+                _RUNTIME_CONTRACT_PROCESSOR = self._contract_processor
+                logger.info("smolagents instrumentation activated")
+            except Exception:
+                if contract_registered:
+                    _unregister_processor(tracer_provider, self._contract_processor)
+                if content_registered:
+                    _unregister_processor(tracer_provider, self._content_processor)
+                if self._delegate is not None:
+                    try:
+                        self._delegate.deactivate()
+                    except Exception:
+                        logger.exception(
+                            "Failed to clean up smolagents instrumentation"
+                        )
+                self._delegate = None
+                self._is_instrumented = False
+                logger.exception("Failed to activate smolagents instrumentation")
 
     def deactivate(self) -> None:
         """Deactivate the instrumentation."""
-        _unregister_processor(
-            tracer_provider=trace.get_tracer_provider(),
-            processor=self._contract_processor,
-        )
-        _unregister_processor(
-            tracer_provider=trace.get_tracer_provider(),
-            processor=self._content_processor,
-        )
-        if self._is_instrumented and self._delegate is not None:
-            try:
-                self._delegate.deactivate()
-            except Exception:
-                logger.exception("Failed to deactivate smolagents instrumentation")
-        self._delegate = None
-        self._is_instrumented = False
-        logger.info("smolagents instrumentation deactivated")
+        global _RUNTIME_CONFIG, _RUNTIME_CONTRACT_PROCESSOR
+        global _RUNTIME_CONTENT_PROCESSOR, _RUNTIME_COUNT, _RUNTIME_DELEGATE
+
+        with _RUNTIME_LOCK:
+            if not self._is_instrumented:
+                return
+            self._is_instrumented = False
+            _RUNTIME_COUNT = max(_RUNTIME_COUNT - 1, 0)
+            if _RUNTIME_COUNT:
+                return
+
+            tracer_provider = trace.get_tracer_provider()
+            if _RUNTIME_CONTRACT_PROCESSOR is not None:
+                _unregister_processor(tracer_provider, _RUNTIME_CONTRACT_PROCESSOR)
+            if _RUNTIME_CONTENT_PROCESSOR is not None:
+                _unregister_processor(tracer_provider, _RUNTIME_CONTENT_PROCESSOR)
+            if _RUNTIME_DELEGATE is not None:
+                try:
+                    _RUNTIME_DELEGATE.deactivate()
+                except Exception:
+                    logger.exception("Failed to deactivate smolagents instrumentation")
+            _RUNTIME_DELEGATE = None
+            _RUNTIME_CONTENT_PROCESSOR = None
+            _RUNTIME_CONTRACT_PROCESSOR = None
+            _RUNTIME_CONFIG = None
+            self._delegate = None
+            logger.info("smolagents instrumentation deactivated")

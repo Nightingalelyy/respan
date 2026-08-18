@@ -12,23 +12,24 @@ from opentelemetry.semconv._incubating.attributes import (
 )
 from opentelemetry.semconv_ai import LLMRequestTypeValues
 from opentelemetry.semconv_ai import SpanAttributes as TLSpanAttributes
-
-from respan_instrumentation_sagemaker import SageMakerInstrumentor
-from respan_instrumentation_sagemaker import _instrumentation
+from respan_instrumentation_sagemaker import SageMakerInstrumentor, _instrumentation
 from respan_instrumentation_sagemaker._constants import (
     INVOKE_ENDPOINT_ASYNC_OPERATION,
     INVOKE_ENDPOINT_OPERATION,
     INVOKE_ENDPOINT_STREAM_OPERATION,
 )
 from respan_instrumentation_sagemaker._otel_emitter import build_sagemaker_attrs
-from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT
+from respan_instrumentation_sagemaker._translator import (
+    SageMakerStreamAccumulator,
+    parse_sagemaker_stream_response,
+)
+from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT, LOG_TYPE_TASK
 from respan_sdk.constants.span_attributes import (
     RESPAN_LOG_TYPE,
     RESPAN_SPAN_HANDOFFS,
     RESPAN_SPAN_TOOL_CALLS,
     RESPAN_SPAN_TOOLS,
 )
-
 
 OFF_CONTRACT_ALIASES = {
     "model",
@@ -61,6 +62,8 @@ class _OneShotBody:
 @pytest.fixture(autouse=True)
 def reset_instrumentation_globals() -> None:
     _instrumentation._original_make_api_call = None
+    _instrumentation._patched_make_api_call = None
+    _instrumentation._activation_count = 0
 
 
 @pytest.fixture()
@@ -172,8 +175,8 @@ def fake_botocore(monkeypatch: pytest.MonkeyPatch) -> type[Any]:
 
     botocore_module = ModuleType("botocore")
     client_module = ModuleType("botocore.client")
-    setattr(client_module, "BaseClient", BaseClient)
-    setattr(botocore_module, "client", client_module)
+    client_module.BaseClient = BaseClient
+    botocore_module.client = client_module
     monkeypatch.setitem(sys.modules, "botocore", botocore_module)
     monkeypatch.setitem(sys.modules, "botocore.client", client_module)
     return BaseClient
@@ -209,11 +212,9 @@ def test_invoke_endpoint_emits_text_span_and_preserves_response_body(
     attrs = captured_spans[0]._attributes
     assert attrs[RESPAN_LOG_TYPE] == LOG_TYPE_CHAT
     assert attrs[TLSpanAttributes.LLM_SYSTEM] == "sagemaker"
+    assert attrs[GenAIAttributes.GEN_AI_PROVIDER_NAME] == "sagemaker"
     assert attrs[TLSpanAttributes.LLM_REQUEST_MODEL] == "gpt-4o-mini"
-    assert (
-        attrs[TLSpanAttributes.LLM_REQUEST_TYPE]
-        == LLMRequestTypeValues.CHAT.value
-    )
+    assert attrs[TLSpanAttributes.LLM_REQUEST_TYPE] == LLMRequestTypeValues.CHAT.value
     assert attrs[f"{TLSpanAttributes.LLM_PROMPTS}.0.role"] == "user"
     assert (
         attrs[f"{TLSpanAttributes.LLM_PROMPTS}.0.content"]
@@ -221,8 +222,7 @@ def test_invoke_endpoint_emits_text_span_and_preserves_response_body(
     )
     assert attrs[f"{TLSpanAttributes.LLM_COMPLETIONS}.0.role"] == "assistant"
     assert (
-        attrs[f"{TLSpanAttributes.LLM_COMPLETIONS}.0.content"]
-        == "Hello from SageMaker"
+        attrs[f"{TLSpanAttributes.LLM_COMPLETIONS}.0.content"] == "Hello from SageMaker"
     )
     assert attrs[GenAIAttributes.GEN_AI_USAGE_INPUT_TOKENS] == 5
     assert attrs[GenAIAttributes.GEN_AI_USAGE_OUTPUT_TOKENS] == 4
@@ -316,12 +316,13 @@ def test_stream_emits_span_after_stream_is_consumed(
     assert attrs[GenAIAttributes.GEN_AI_USAGE_INPUT_TOKENS] == 2
     assert attrs[GenAIAttributes.GEN_AI_USAGE_OUTPUT_TOKENS] == 3
     assert attrs[TLSpanAttributes.LLM_USAGE_TOTAL_TOKENS] == 5
+    assert attrs[TLSpanAttributes.LLM_IS_STREAMING] is True
     assert not OFF_CONTRACT_ALIASES.intersection(attrs)
 
     instrumentor.deactivate()
 
 
-def test_async_endpoint_emits_text_span_with_output_location(
+def test_async_endpoint_emits_lifecycle_task_without_llm_semantics(
     fake_botocore: type[Any],
     captured_spans: list[Any],
 ) -> None:
@@ -340,15 +341,24 @@ def test_async_endpoint_emits_text_span_with_output_location(
     )
 
     attrs = captured_spans[0]._attributes
-    assert attrs[RESPAN_LOG_TYPE] == LOG_TYPE_CHAT
-    assert attrs[TLSpanAttributes.LLM_REQUEST_MODEL] == "gpt-4o-mini"
-    assert (
-        attrs[f"{TLSpanAttributes.LLM_PROMPTS}.0.content"]
-        == "s3://bucket/input.json"
+    assert attrs[RESPAN_LOG_TYPE] == LOG_TYPE_TASK
+    assert attrs[TLSpanAttributes.TRACELOOP_ENTITY_NAME] == (
+        "sagemaker.invoke_endpoint_async"
     )
-    assert (
-        attrs[f"{TLSpanAttributes.LLM_COMPLETIONS}.0.content"]
-        == "s3://bucket/output.json"
+    assert json.loads(attrs[TLSpanAttributes.TRACELOOP_ENTITY_INPUT]) == {
+        "endpoint_name": "async-endpoint",
+        "input_location": "s3://bucket/input.json",
+    }
+    assert json.loads(attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == {
+        "inference_id": "inference-123",
+        "output_location": "s3://bucket/output.json",
+        "state": "submitted",
+    }
+    assert TLSpanAttributes.LLM_REQUEST_MODEL not in attrs
+    assert TLSpanAttributes.LLM_REQUEST_TYPE not in attrs
+    assert not any(key.startswith(f"{TLSpanAttributes.LLM_PROMPTS}.") for key in attrs)
+    assert not any(
+        key.startswith(f"{TLSpanAttributes.LLM_COMPLETIONS}.") for key in attrs
     )
     assert not OFF_CONTRACT_ALIASES.intersection(attrs)
 
@@ -394,4 +404,104 @@ def test_active_workflow_name_is_attached_to_span() -> None:
     finally:
         context_api.detach(token)
 
-    assert attrs[TLSpanAttributes.TRACELOOP_WORKFLOW_NAME] == "sagemaker_invoke_endpoint"
+    assert (
+        attrs[TLSpanAttributes.TRACELOOP_WORKFLOW_NAME] == "sagemaker_invoke_endpoint"
+    )
+
+
+def test_historical_tool_call_and_result_linkage_is_preserved() -> None:
+    attrs = build_sagemaker_attrs(
+        operation_name=INVOKE_ENDPOINT_OPERATION,
+        api_params={
+            "EndpointName": "chat-endpoint",
+            "Body": json.dumps(
+                {
+                    "messages": [
+                        {"role": "user", "content": "weather"},
+                        {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call_weather",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "get_weather",
+                                        "arguments": '{"city":"Tokyo"}',
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": "call_weather",
+                            "content": "sunny",
+                        },
+                    ]
+                }
+            ).encode(),
+        },
+        response_payload={
+            "choices": [{"message": {"role": "assistant", "content": "done"}}]
+        },
+    )
+
+    assert (
+        json.loads(attrs[f"{TLSpanAttributes.LLM_PROMPTS}.1.tool_calls"])[0]["id"]
+        == "call_weather"
+    )
+    assert json.loads(attrs[f"{TLSpanAttributes.LLM_PROMPTS}.2.content"]) == {
+        "content": "sunny",
+        "tool_call_id": "call_weather",
+    }
+
+
+def test_multiple_instrumentors_share_patch_until_final_deactivation(
+    fake_botocore: type[Any],
+) -> None:
+    original = fake_botocore._make_api_call
+    first = SageMakerInstrumentor()
+    second = SageMakerInstrumentor()
+
+    first.activate()
+    patched = fake_botocore._make_api_call
+    second.activate()
+    assert fake_botocore._make_api_call is patched
+
+    first.deactivate()
+    assert fake_botocore._make_api_call is patched
+    second.deactivate()
+    assert fake_botocore._make_api_call is original
+
+
+def test_stream_accumulator_is_bounded_and_redacts_direct_content() -> None:
+    accumulator = SageMakerStreamAccumulator()
+    for index in range(1_000):
+        text = "😀" * 40
+        if index == 700:
+            text += ' api_key="plain-stream-secret"'
+        accumulator.add_event(
+            {
+                "PayloadPart": {
+                    "Bytes": json.dumps(
+                        {
+                            "token": {"text": text},
+                            "usage": {
+                                "input_tokens": 8,
+                                "generated_tokens": index + 1,
+                            },
+                        }
+                    ).encode()
+                }
+            }
+        )
+
+    response = parse_sagemaker_stream_response(events=accumulator)
+    assert len(response.content.encode("utf-8")) <= 16_000
+    assert "plain-stream-secret" not in response.content
+    assert response.usage == {
+        "input_tokens": 8,
+        "output_tokens": 1_000,
+        "total_tokens": 1_008,
+    }
+    assert not hasattr(accumulator, "_events")
