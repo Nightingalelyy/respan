@@ -2,15 +2,14 @@ import json
 import logging
 import sys
 from types import ModuleType, SimpleNamespace
+from typing import ClassVar
 
 import pytest
 from opentelemetry.semconv._incubating.attributes import (
     gen_ai_attributes as GenAIAttributes,
 )
 from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
-
-from respan_instrumentation_cohere import CohereInstrumentor
-from respan_instrumentation_cohere import _instrumentation
+from respan_instrumentation_cohere import CohereInstrumentor, _instrumentation
 from respan_instrumentation_cohere._instrumentation import OTEL_COHERE_MODULE
 from respan_instrumentation_cohere._processor import (
     COHERE_SCOPE_NAME,
@@ -49,7 +48,7 @@ class FakeSpan:
 
 def _install_fake_modules(monkeypatch):
     class FakeOTELCohereInstrumentor:
-        created = []
+        created: ClassVar[list["FakeOTELCohereInstrumentor"]] = []
 
         def __init__(self, **kwargs):
             self.constructor_kwargs = kwargs
@@ -367,6 +366,24 @@ def test_processor_maps_embedding_and_rerank_log_types():
     assert rerank_span._attributes[RESPAN_LOG_TYPE] == "task"
 
 
+def test_processor_maps_text_completion_to_text_log_with_chat_request_type():
+    span = FakeSpan(
+        {
+            SpanAttributes.LLM_SYSTEM: "Cohere",
+            SpanAttributes.LLM_REQUEST_TYPE: LLMRequestTypeValues.COMPLETION.value,
+        },
+        name="cohere.completion",
+    )
+
+    CohereSpanProcessor().on_end(span)
+
+    assert span._attributes[RESPAN_LOG_TYPE] == "text"
+    assert (
+        span._attributes[SpanAttributes.LLM_REQUEST_TYPE]
+        == LLMRequestTypeValues.CHAT.value
+    )
+
+
 def test_rerank_content_patch_preserves_structured_input_and_output():
     calls = []
 
@@ -421,17 +438,13 @@ def test_rerank_content_patch_preserves_structured_input_and_output():
             response,
         )
 
-        assert json.loads(
-            span.attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT]
-        ) == {
+        assert json.loads(span.attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT]) == {
             "model": "rerank-v3.5",
             "query": "best document",
             "documents": ["first document", "second document"],
             "top_n": 1,
         }
-        assert json.loads(
-            span.attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
-        ) == {
+        assert json.loads(span.attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == {
             "id": "rerank-1",
             "results": [
                 {
