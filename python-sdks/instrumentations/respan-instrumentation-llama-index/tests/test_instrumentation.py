@@ -22,9 +22,9 @@ from respan_instrumentation_llama_index._serialization import extract_usage
 from respan_sdk.constants.llm_logging import (
     LOG_TYPE_AGENT,
     LOG_TYPE_CHAT,
-    LOG_TYPE_COMPLETION,
     LOG_TYPE_EMBEDDING,
     LOG_TYPE_TASK,
+    LOG_TYPE_TEXT,
     LOG_TYPE_TOOL,
     LOG_TYPE_WORKFLOW,
 )
@@ -674,8 +674,8 @@ def test_completion_events_emit_text_span(span_exporter):
     )
     attributes = text_span.attributes
 
-    assert attributes[RESPAN_LOG_TYPE] == LOG_TYPE_COMPLETION
-    assert attributes[SpanAttributes.LLM_REQUEST_TYPE] == "completion"
+    assert attributes[RESPAN_LOG_TYPE] == LOG_TYPE_TEXT
+    assert attributes[SpanAttributes.LLM_REQUEST_TYPE] == "chat"
     assert (
         attributes[f"{SpanAttributes.LLM_PROMPTS}.0.content"]
         == "Complete this sentence"

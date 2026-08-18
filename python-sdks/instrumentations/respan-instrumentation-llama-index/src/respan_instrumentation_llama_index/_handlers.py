@@ -20,9 +20,9 @@ from respan_sdk.constants import ERROR_MESSAGE_ATTR
 from respan_sdk.constants.llm_logging import (
     LOG_TYPE_AGENT,
     LOG_TYPE_CHAT,
-    LOG_TYPE_COMPLETION,
     LOG_TYPE_EMBEDDING,
     LOG_TYPE_TASK,
+    LOG_TYPE_TEXT,
     LOG_TYPE_TOOL,
     LOG_TYPE_WORKFLOW,
     LogMethodChoices,
@@ -349,8 +349,8 @@ class RespanLlamaIndexEventHandler(BaseEventHandler):
         prompt = getattr(event, "prompt", "")
         attributes = _llm_base_attributes(
             entity_name=LLAMA_INDEX_COMPLETION_SPAN_NAME,
-            log_type=LOG_TYPE_COMPLETION,
-            request_type=LLMRequestTypeValues.COMPLETION.value,
+            log_type=LOG_TYPE_TEXT,
+            request_type=LLMRequestTypeValues.CHAT.value,
             model_dict=model_dict,
         )
         if self.capture_content:
