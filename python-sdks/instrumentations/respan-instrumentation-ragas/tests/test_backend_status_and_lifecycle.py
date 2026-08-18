@@ -3,12 +3,11 @@ from __future__ import annotations
 import json
 
 import pytest
+import respan_instrumentation_ragas._instrumentation as instrumentation
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.semconv_ai import SpanAttributes
-
-import respan_instrumentation_ragas._instrumentation as instrumentation
 from respan_instrumentation_ragas import RagasInstrumentor
 
 
@@ -21,6 +20,8 @@ def _exporter(monkeypatch) -> InMemorySpanExporter:
         "get_tracer",
         lambda *args, **kwargs: provider.get_tracer("test.ragas.status"),
     )
+    monkeypatch.setattr(instrumentation, "_ENABLED", True)
+    monkeypatch.setattr(instrumentation, "_CAPTURE_CONTENT", True)
     return exporter
 
 

@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+
 import pytest
+import respan_instrumentation_ragas._instrumentation as instrumentation
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.semconv_ai import SpanAttributes
 from ragas.metrics.collections import ExactMatch, StringPresence
-
-import respan_instrumentation_ragas._instrumentation as instrumentation
 from respan_instrumentation_ragas import RagasInstrumentor
 
 

@@ -4,9 +4,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
-
-from respan_instrumentation_replicate import ReplicateInstrumentor
-from respan_instrumentation_replicate import _instrumentation
+from respan_instrumentation_replicate import ReplicateInstrumentor, _instrumentation
 from respan_instrumentation_replicate._constants import (
     OFF_CONTRACT_ALIASES,
     RESPAN_PARAMS_KEY,
@@ -27,8 +25,11 @@ from respan_tracing.core.tracer import RespanTracer
 
 
 @pytest.fixture(autouse=True)
-def reset_tracer():
+def reset_tracer(monkeypatch):
     RespanTracer.reset_instance()
+    monkeypatch.setattr(_instrumentation, "_REFCOUNT", 0)
+    monkeypatch.setattr(_instrumentation, "_ENABLED", False)
+    monkeypatch.setattr(_instrumentation, "_PATCHES", [])
     yield
     RespanTracer.reset_instance()
 
@@ -51,7 +52,7 @@ def test_build_model_call_span_data_uses_canonical_attrs_only():
     assert span_name == "replicate.run"
     assert attrs[RESPAN_LOG_TYPE] == LOG_TYPE_TEXT
     assert attrs[SpanAttributes.LLM_SYSTEM] == "replicate"
-    assert attrs[SpanAttributes.LLM_REQUEST_TYPE] == LLMRequestTypeValues.COMPLETION.value
+    assert attrs[SpanAttributes.LLM_REQUEST_TYPE] == LLMRequestTypeValues.CHAT.value
     assert attrs[SpanAttributes.LLM_REQUEST_MODEL] == "meta/meta-llama-3-8b-instruct"
     assert attrs[f"{SpanAttributes.LLM_PROMPTS}.0.role"] == "user"
     assert attrs[f"{SpanAttributes.LLM_PROMPTS}.0.content"] == "Say hi"
@@ -96,7 +97,9 @@ def test_model_from_prediction_does_not_duplicate_prefixed_version():
         model="owner/model",
         version="owner/model:version-id",
     )
-    assert model_from_ref_or_prediction(prediction=prediction) == "owner/model:version-id"
+    assert (
+        model_from_ref_or_prediction(prediction=prediction) == "owner/model:version-id"
+    )
 
 
 def _install_fake_replicate_modules(monkeypatch):
@@ -230,8 +233,14 @@ def test_instrumentor_patches_run_and_stream(monkeypatch):
 
     assert len(fake.emitted_spans) == 3
     assert fake.emitted_spans[0].name == "replicate.run"
-    assert fake.emitted_spans[0].attributes[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"] == "hello world"
-    assert fake.emitted_spans[1].attributes[SpanAttributes.LLM_REQUEST_MODEL] == "gpt-4o-mini"
+    assert (
+        fake.emitted_spans[0].attributes[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"]
+        == "hello world"
+    )
+    assert (
+        fake.emitted_spans[1].attributes[SpanAttributes.LLM_REQUEST_MODEL]
+        == "gpt-4o-mini"
+    )
     assert fake.emitted_spans[2].name == "replicate.stream"
     assert fake.emitted_spans[2].attributes[SpanAttributes.LLM_IS_STREAMING] is True
 
@@ -266,8 +275,14 @@ def test_instrumentor_patches_async_run_and_prediction_create(monkeypatch):
         "replicate.predictions.create",
         "replicate.prediction.wait",
     ]
-    assert fake.emitted_spans[1].attributes[SpanAttributes.LLM_REQUEST_MODEL] == "gpt-4o-mini"
-    assert fake.emitted_spans[2].attributes[SpanAttributes.LLM_REQUEST_MODEL] == "gpt-4o-mini"
+    assert (
+        fake.emitted_spans[1].attributes[SpanAttributes.LLM_REQUEST_MODEL]
+        == "gpt-4o-mini"
+    )
+    wait_attrs = fake.emitted_spans[2].attributes
+    assert wait_attrs[RESPAN_LOG_TYPE] == "task"
+    assert SpanAttributes.LLM_REQUEST_MODEL not in wait_attrs
+    assert SpanAttributes.LLM_SYSTEM not in wait_attrs
 
 
 def test_activate_skips_when_respan_tracing_is_disabled(monkeypatch, caplog):
@@ -279,7 +294,10 @@ def test_activate_skips_when_respan_tracing_is_disabled(monkeypatch, caplog):
         instrumentor.activate()
 
     assert instrumentor._is_instrumented is False
-    assert "Replicate instrumentation skipped because Respan tracing is disabled" in caplog.text
+    assert (
+        "Replicate instrumentation skipped because Respan tracing is disabled"
+        in caplog.text
+    )
     assert fake.client_class().run("owner/model", input={"prompt": "hi"}) == [
         "hello",
         " world",

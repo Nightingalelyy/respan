@@ -28,6 +28,7 @@ respan = Respan(
 
 greeter = restate.Service("Greeter")
 
+
 @greeter.handler()
 async def greet(ctx: restate.Context, name: str) -> str:
     return f"Hello, {name}!"

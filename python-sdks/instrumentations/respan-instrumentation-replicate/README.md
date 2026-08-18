@@ -33,7 +33,11 @@ def run_prediction() -> str:
         "meta/meta-llama-3-8b-instruct",
         input={"prompt": "Reply with one concise sentence about tracing."},
     )
-    return "".join(str(chunk) for chunk in output) if not isinstance(output, str) else output
+    return (
+        "".join(str(chunk) for chunk in output)
+        if not isinstance(output, str)
+        else output
+    )
 
 
 print(run_prediction())
