@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from collections import Counter
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -15,14 +13,6 @@ from uuid import uuid4
 from opentelemetry import trace
 from opentelemetry.semconv_ai import SpanAttributes
 from opentelemetry.trace import SpanKind
-from respan_instrumentation_pytest._constants import (
-    ENV_EXAMPLE_RUN_ID,
-    MAX_ATTRIBUTE_CHARS,
-    MAX_COLLECTION_ITEMS,
-    MAX_SERIALIZATION_DEPTH,
-    PYTEST_INSTRUMENTATION_NAME,
-    WORKFLOW_LOG_TYPE,
-)
 from respan_sdk.constants.span_attributes import (
     RESPAN_LOG_TYPE,
     RESPAN_METADATA,
@@ -31,63 +21,32 @@ from respan_sdk.constants.span_attributes import (
 )
 from respan_tracing import RespanTelemetry
 from respan_tracing.core.tracer import RespanTracer
+from respan_tracing.exporters import propagate_attributes
+
+from respan_instrumentation_pytest._constants import (
+    ENV_EXAMPLE_RUN_ID,
+    MAX_ATTRIBUTE_CHARS,
+    PYTEST_INSTRUMENTATION_NAME,
+    WORKFLOW_LOG_TYPE,
+)
+from respan_instrumentation_pytest._serialization import (
+    json_dumps as _json_dumps,
+)
+from respan_instrumentation_pytest._serialization import (
+    safe_text,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def _to_jsonable(value: Any, *, depth: int = 0) -> Any:
-    if depth > MAX_SERIALIZATION_DEPTH:
-        return repr(value)
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, bytes):
-        return {"type": "bytes", "length": len(value)}
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, Mapping):
-        items = list(value.items())
-        payload = {
-            str(key): _to_jsonable(item, depth=depth + 1)
-            for key, item in items[:MAX_COLLECTION_ITEMS]
-        }
-        if len(items) > MAX_COLLECTION_ITEMS:
-            payload["_respan_truncated_items"] = len(items) - MAX_COLLECTION_ITEMS
-        return payload
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        items = list(value)
-        payload = [
-            _to_jsonable(item, depth=depth + 1) for item in items[:MAX_COLLECTION_ITEMS]
-        ]
-        if len(items) > MAX_COLLECTION_ITEMS:
-            payload.append(
-                {"_respan_truncated_items": len(items) - MAX_COLLECTION_ITEMS}
-            )
-        return payload
-    return repr(value)
-
-
-def _json_dumps(value: Any, *, max_chars: int = MAX_ATTRIBUTE_CHARS) -> str:
-    serialized = json.dumps(
-        _to_jsonable(value),
-        default=str,
-        ensure_ascii=False,
-        sort_keys=True,
-    )
-    if len(serialized) <= max_chars:
-        return serialized
-    return json.dumps(
-        {
-            "truncated": True,
-            "original_characters": len(serialized),
-            "preview": serialized[:max_chars],
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    )
-
-
 def _safe_name(value: str) -> str:
-    return "_".join(value.strip().split())[:160] or "pytest_session"
+    return "_".join(safe_text(value).strip().split())[:160] or "pytest_session"
+
+
+def _safe_rootpath(value: Any) -> str:
+    if isinstance(value, Path):
+        return safe_text(value.name or ".")
+    return safe_text(value)
 
 
 @dataclass
@@ -122,6 +81,7 @@ class PytestInstrumentor:
         self._is_instrumented = False
         self._session_span: Any = None
         self._session_context_manager: Any = None
+        self._propagation_context_manager: Any = None
         self._session: Any = None
         self._test_states: dict[str, _TestState] = {}
         self._outcome_counts: Counter[str] = Counter()
@@ -164,11 +124,14 @@ class PytestInstrumentor:
         self._session_context_manager = None
         self._session_span = None
         self._session = None
+        self._exit_propagation()
         if self._telemetry is not None:
             try:
                 self._telemetry.flush()
             except Exception:
                 logger.debug("Failed to flush Pytest telemetry", exc_info=True)
+            RespanTracer.reset_instance()
+            self._telemetry = None
         self._is_instrumented = False
         logger.info("Pytest instrumentation deactivated")
 
@@ -178,16 +141,6 @@ class PytestInstrumentor:
         rootpath = getattr(config, "rootpath", Path.cwd())
         root_name = Path(rootpath).name or "tests"
         return _safe_name(f"pytest_{root_name}_workflow")
-
-    def _metadata(self, *, worker_id: str | None = None) -> str:
-        metadata = {
-            "integration": "pytest",
-            "workflow_name": self._workflow_name,
-            "example_run_id": self._run_id,
-        }
-        if worker_id:
-            metadata["worker_id"] = worker_id
-        return _json_dumps(metadata, max_chars=self._max_attribute_chars)
 
     def _set_common_attributes(
         self,
@@ -204,11 +157,47 @@ class PytestInstrumentor:
         span.set_attribute(SpanAttributes.TRACELOOP_ENTITY_PATH, entity_path)
         span.set_attribute(
             SpanAttributes.TRACELOOP_ENTITY_INPUT,
-            _json_dumps(input_payload, max_chars=self._max_attribute_chars),
+            _json_dumps(input_payload, max_bytes=self._max_attribute_chars),
         )
-        if self._workflow_name:
-            span.set_attribute(RESPAN_TRACE_GROUP_ID, self._workflow_name)
-        span.set_attribute(RESPAN_METADATA, self._metadata(worker_id=worker_id))
+        workflow_name = self._workflow_name or "pytest"
+        span.set_attribute(RESPAN_TRACE_GROUP_ID, workflow_name)
+        span.set_attribute(SpanAttributes.TRACELOOP_WORKFLOW_NAME, workflow_name)
+        metadata = self._run_metadata(worker_id)
+        span.set_attribute(
+            RESPAN_METADATA,
+            _json_dumps(metadata, max_bytes=self._max_attribute_chars),
+        )
+        for key, value in metadata.items():
+            span.set_attribute(f"{RESPAN_METADATA}.{key}", safe_text(value))
+
+    def _run_metadata(self, worker_id: str | None = None) -> dict[str, str]:
+        workflow_name = self._workflow_name or "pytest"
+        metadata = {
+            "integration": "pytest",
+            "workflow_name": workflow_name,
+            "example_run_id": self._run_id,
+            "run_id": self._run_id,
+        }
+        if worker_id:
+            metadata["worker_id"] = worker_id
+        return metadata
+
+    def _enter_propagation(self, worker_id: str | None = None) -> None:
+        if self._propagation_context_manager is not None:
+            return
+        self._propagation_context_manager = propagate_attributes(
+            group_identifier=self._workflow_name,
+            metadata=self._run_metadata(worker_id),
+        )
+        self._propagation_context_manager.__enter__()
+
+    def _exit_propagation(self) -> None:
+        if self._propagation_context_manager is None:
+            return
+        try:
+            self._propagation_context_manager.__exit__(None, None, None)
+        finally:
+            self._propagation_context_manager = None
 
     def pytest_sessionstart(self, session: Any) -> None:
         if not self._is_instrumented or self._session_span is not None:
@@ -217,6 +206,7 @@ class PytestInstrumentor:
             self._session = session
             self._workflow_name = self._resolved_workflow_name(session.config)
             worker_id = os.getenv("PYTEST_XDIST_WORKER")
+            self._enter_propagation(worker_id)
             self._session_context_manager = self._tracer.start_as_current_span(
                 "pytest.session", kind=SpanKind.INTERNAL
             )
@@ -227,7 +217,7 @@ class PytestInstrumentor:
                 entity_name=self._workflow_name,
                 entity_path="",
                 input_payload={
-                    "rootpath": str(getattr(session.config, "rootpath", "")),
+                    "rootpath": _safe_rootpath(getattr(session.config, "rootpath", "")),
                     "arguments": (
                         list(getattr(session.config, "args", ()) or ())
                         if self._capture_content
@@ -246,25 +236,28 @@ class PytestInstrumentor:
             logger.exception("Failed to start Pytest session span")
             self._session_context_manager = None
             self._session_span = None
+            self._exit_propagation()
 
     def pytest_collection_finish(self, session: Any) -> None:
         if self._session_span is None:
             return
         items = list(getattr(session, "items", ()) or ())
         payload: dict[str, Any] = {
-            "rootpath": str(getattr(session.config, "rootpath", "")),
+            "rootpath": _safe_rootpath(getattr(session.config, "rootpath", "")),
             "collected": len(items),
             "content_captured": self._capture_content,
         }
         if self._capture_content:
-            payload["tests"] = [getattr(item, "nodeid", str(item)) for item in items]
+            payload["tests"] = [
+                safe_text(getattr(item, "nodeid", None)) for item in items
+            ]
         self._session_span.set_attribute(
             SpanAttributes.TRACELOOP_ENTITY_INPUT,
-            _json_dumps(payload, max_chars=self._max_attribute_chars),
+            _json_dumps(payload, max_bytes=self._max_attribute_chars),
         )
 
     def _test_nodeid(self, item: Any) -> str:
-        nodeid = str(item.nodeid)
+        nodeid = safe_text(getattr(item, "nodeid", None), default="pytest.test")
         return nodeid if self._capture_content else nodeid.split("[", 1)[0]
 
     def _test_input(self, item: Any) -> dict[str, Any]:

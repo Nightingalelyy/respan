@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
+from respan_sdk.constants.llm_logging import (
+    LOG_TYPE_AGENT,
+    LOG_TYPE_CHAT,
+    LOG_TYPE_EMBEDDING,
+    LOG_TYPE_SPEECH,
+    LOG_TYPE_TASK,
+    LOG_TYPE_TOOL,
+    LOG_TYPE_TRANSCRIPTION,
+    LogMethodChoices,
+)
+from respan_sdk.constants.span_attributes import (
+    RESPAN_LOG_METHOD,
+    RESPAN_LOG_TYPE,
+)
 
 from respan_instrumentation_pydantic_ai._constants import (
     FINAL_RESULT_ATTR,
@@ -35,19 +49,11 @@ from respan_instrumentation_pydantic_ai._constants import (
     RESPAN_OVERRIDE_MODEL_ATTR,
     RESPAN_RESPONSE_FORMAT_ATTR,
 )
-from respan_sdk.constants.llm_logging import (
-    LOG_TYPE_AGENT,
-    LOG_TYPE_CHAT,
-    LOG_TYPE_EMBEDDING,
-    LOG_TYPE_SPEECH,
-    LOG_TYPE_TASK,
-    LOG_TYPE_TOOL,
-    LOG_TYPE_TRANSCRIPTION,
-    LogMethodChoices,
-)
-from respan_sdk.constants.span_attributes import (
-    RESPAN_LOG_METHOD,
-    RESPAN_LOG_TYPE,
+from respan_instrumentation_pydantic_ai._serialization import (
+    json_string,
+    json_value,
+    parse_json,
+    safe_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,13 +70,10 @@ _USAGE_LOG_TYPES = frozenset(
         LOG_TYPE_CHAT,
         LOG_TYPE_EMBEDDING,
         LOG_TYPE_SPEECH,
-        LOG_TYPE_TOOL,
         LOG_TYPE_TRANSCRIPTION,
     }
 )
-_NESTED_PROVIDER_USAGE_SUPPRESSIBLE_LOG_TYPES = frozenset(
-    _USAGE_LOG_TYPES - {LOG_TYPE_TOOL}
-)
+_NESTED_PROVIDER_USAGE_SUPPRESSIBLE_LOG_TYPES = frozenset(_USAGE_LOG_TYPES)
 _RAW_USAGE_ATTRIBUTE_NAMES = frozenset(
     {
         PYDANTIC_AI_USAGE_INPUT_TOKENS_ATTR,
@@ -100,24 +103,21 @@ _PRIMITIVE_ATTR_TYPES = (str, bool, int, float, bytes)
 
 
 def _safe_json_loads(value: Any) -> Any:
-    if not isinstance(value, str):
-        return value
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        return None
+    parsed = parse_json(value)
+    return None if parsed is value and isinstance(value, str) else parsed
 
 
 def _json_string(value: Any) -> str | None:
     if value is None:
         return None
-    if isinstance(value, str):
-        return value
-    return json.dumps(value, default=str)
+    parsed = parse_json(value)
+    return json_string(parsed)
 
 
 def _extract_request_parameters(attrs: Mapping[str, Any]) -> dict[str, Any] | None:
-    request_parameters = _safe_json_loads(attrs.get(PYDANTIC_AI_REQUEST_PARAMETERS_ATTR))
+    request_parameters = _safe_json_loads(
+        attrs.get(PYDANTIC_AI_REQUEST_PARAMETERS_ATTR)
+    )
     if isinstance(request_parameters, dict):
         return request_parameters
     return None
@@ -158,7 +158,7 @@ def _content_to_text(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
-        return value
+        return safe_text(value)
     if isinstance(value, list):
         parts = [_content_to_text(item) for item in value]
         return "\n".join(part for part in parts if part)
@@ -167,8 +167,37 @@ def _content_to_text(value: Any) -> str:
             nested = value.get(key)
             if nested not in (None, "", (), []):
                 return _content_to_text(nested)
-        return json.dumps(value, default=str)
-    return str(value)
+        return json_string(value)
+    return safe_text(value)
+
+
+def _normalize_tool_call(part: Mapping[str, Any]) -> dict[str, Any] | None:
+    name = part.get("name") or part.get("tool_name")
+    if not isinstance(name, str) or not name:
+        return None
+    call_id = part.get("id") or part.get("tool_call_id")
+    arguments = part.get("arguments", part.get("args", {}))
+    normalized: dict[str, Any] = {
+        "type": "function",
+        "function": {
+            "name": safe_text(name),
+            "arguments": json_string(parse_json(arguments)),
+        },
+    }
+    if isinstance(call_id, str) and call_id:
+        normalized["id"] = safe_text(call_id)
+    return normalized
+
+
+def _normalize_tool_result(part: Mapping[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {"result": json_value(part.get("result"))}
+    name = part.get("name") or part.get("tool_name")
+    call_id = part.get("id") or part.get("tool_call_id")
+    if isinstance(name, str) and name:
+        payload["name"] = safe_text(name)
+    if isinstance(call_id, str) and call_id:
+        payload["tool_call_id"] = safe_text(call_id)
+    return payload
 
 
 def _messages_from_parts(
@@ -176,12 +205,13 @@ def _messages_from_parts(
     default_role: str,
     *,
     allow_part_roles: bool,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     if not isinstance(parts, list):
         content = _content_to_text(parts)
         return [{"role": default_role, "content": content}] if content else []
 
-    messages = []
+    messages: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
     for part in parts:
         role = default_role
         if allow_part_roles and isinstance(part, Mapping):
@@ -192,22 +222,62 @@ def _messages_from_parts(
                 or part.get("type"),
                 default_role,
             )
+        part_type = (
+            safe_text(
+                part.get("type") or part.get("part_kind") or part.get("kind") or ""
+            ).lower()
+            if isinstance(part, Mapping)
+            else ""
+        )
+        if isinstance(part, Mapping) and part_type in {
+            "tool-call",
+            "tool_call",
+            "toolcall",
+        }:
+            tool_call = _normalize_tool_call(part)
+            if tool_call is not None:
+                if current is None or current.get("role") != "assistant":
+                    current = {"role": "assistant"}
+                    messages.append(current)
+                current.setdefault("tool_calls", []).append(tool_call)
+            continue
+        if isinstance(part, Mapping) and part_type in {
+            "tool-call-response",
+            "tool_call_response",
+            "tool-return",
+            "tool_return",
+        }:
+            messages.append(
+                {"role": "tool", "content": json_string(_normalize_tool_result(part))}
+            )
+            current = None
+            continue
         content = _content_to_text(part)
         if content:
-            messages.append({"role": role, "content": content})
+            if (
+                current is not None
+                and current.get("role") == role
+                and "content" not in current
+            ):
+                current["content"] = content
+            else:
+                current = {"role": role, "content": content}
+                messages.append(current)
     return messages
 
 
 def _message_to_chat_messages(
     message: Any,
     default_role: str,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     if not isinstance(message, Mapping):
         content = _content_to_text(message)
         return [{"role": default_role, "content": content}] if content else []
 
     explicit_role = _is_chat_role(message.get("role"))
-    role = _normalize_chat_role(message.get("role") or message.get("kind"), default_role)
+    role = _normalize_chat_role(
+        message.get("role") or message.get("kind"), default_role
+    )
     content = message.get("content")
     if content in (None, "", (), []) and "parts" in message:
         return _messages_from_parts(
@@ -223,7 +293,7 @@ def _message_to_chat_messages(
 def _normalize_chat_messages(
     messages: list[Any] | None,
     default_role: str,
-) -> list[dict[str, str]] | None:
+) -> list[dict[str, Any]] | None:
     if messages is None:
         return None
 
@@ -233,7 +303,7 @@ def _normalize_chat_messages(
     return normalized_messages or None
 
 
-def _chat_output_value(messages: list[dict[str, str]]) -> Any:
+def _chat_output_value(messages: list[dict[str, Any]]) -> Any:
     if len(messages) == 1:
         return messages[0]
     return messages
@@ -255,7 +325,7 @@ def _coerce_otel_attribute_value(value: Any) -> Any:
         return value
     if _is_homogeneous_primitive_array(value):
         return value
-    return json.dumps(value, default=str)
+    return json_string(value)
 
 
 def _extract_tool_names(attrs: Mapping[str, Any]) -> list[str] | None:
@@ -266,17 +336,19 @@ def _extract_tool_names(attrs: Mapping[str, Any]) -> list[str] | None:
     return tool_names or None
 
 
-def _normalize_tool_definition(tool_definition: Mapping[str, Any]) -> dict[str, Any] | None:
+def _normalize_tool_definition(
+    tool_definition: Mapping[str, Any],
+) -> dict[str, Any] | None:
     function_payload = tool_definition.get("function")
     if isinstance(function_payload, Mapping):
         normalized = {
             "type": tool_definition.get("type", "function"),
-            "function": {"name": function_payload.get("name")},
+            "function": {"name": safe_text(function_payload.get("name"))},
         }
         for key in ("description", "parameters", "strict"):
             value = function_payload.get(key)
             if value is not None:
-                normalized["function"][key] = value
+                normalized["function"][key] = json_value(value)
         if normalized["function"].get("name"):
             return normalized
         return None
@@ -285,15 +357,15 @@ def _normalize_tool_definition(tool_definition: Mapping[str, Any]) -> dict[str, 
     if not isinstance(tool_name, str) or not tool_name:
         return None
 
-    normalized_function: dict[str, Any] = {"name": tool_name}
+    normalized_function: dict[str, Any] = {"name": safe_text(tool_name)}
     description = tool_definition.get("description")
     if description is not None:
-        normalized_function["description"] = description
+        normalized_function["description"] = safe_text(description)
     parameters = tool_definition.get("parameters") or tool_definition.get(
         "parameters_json_schema"
     )
     if parameters is not None:
-        normalized_function["parameters"] = parameters
+        normalized_function["parameters"] = json_value(parameters)
     strict = tool_definition.get("strict")
     if strict is not None:
         normalized_function["strict"] = strict
@@ -361,7 +433,11 @@ def _extract_response_format(attrs: Mapping[str, Any]) -> dict[str, Any] | None:
 
 
 def _extract_model(attrs: Mapping[str, Any]) -> str | None:
-    for key in (SpanAttributes.LLM_REQUEST_MODEL, MODEL_NAME_ATTR, RESPAN_OVERRIDE_MODEL_ATTR):
+    for key in (
+        SpanAttributes.LLM_REQUEST_MODEL,
+        MODEL_NAME_ATTR,
+        RESPAN_OVERRIDE_MODEL_ATTR,
+    ):
         value = attrs.get(key)
         if isinstance(value, str) and value:
             return value
@@ -376,7 +452,9 @@ def _get_int_attr(attrs: Mapping[str, Any], *keys: str) -> int | None:
     return None
 
 
-def _extract_usage(attrs: Mapping[str, Any]) -> tuple[int | None, int | None, int | None]:
+def _extract_usage(
+    attrs: Mapping[str, Any],
+) -> tuple[int | None, int | None, int | None]:
     prompt_tokens = _get_int_attr(
         attrs,
         PYDANTIC_AI_USAGE_INPUT_TOKENS_ATTR,
@@ -402,18 +480,45 @@ def _extract_usage(attrs: Mapping[str, Any]) -> tuple[int | None, int | None, in
 def _set_message_attrs(
     attrs: dict[str, Any],
     prefix: str,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
 ) -> None:
     for index, message in enumerate(messages):
         message_prefix = f"{prefix}.{index}"
         _set_if_missing(attrs, f"{message_prefix}.role", message["role"])
-        _set_if_missing(attrs, f"{message_prefix}.content", message["content"])
+        content = message.get("content")
+        if content not in (None, ""):
+            _set_if_missing(attrs, f"{message_prefix}.content", content)
+        tool_calls = message.get("tool_calls")
+        if tool_calls:
+            _set_if_missing(
+                attrs,
+                f"{message_prefix}.tool_calls",
+                json_string(tool_calls),
+            )
+
+
+def _entity_path(span: ReadableSpan, entity_name: str) -> str:
+    return "" if getattr(span, "parent", None) is None else entity_name
+
+
+def _agent_content(attrs: Mapping[str, Any]) -> tuple[Any | None, Any | None]:
+    all_messages = _safe_json_loads(attrs.get("pydantic_ai.all_messages"))
+    normalized = _normalize_chat_messages(
+        all_messages if isinstance(all_messages, list) else None,
+        "user",
+    )
+    output = parse_json(attrs.get(FINAL_RESULT_ATTR))
+    if output is None and normalized and normalized[-1].get("role") == "assistant":
+        output = normalized[-1]
+    if normalized and normalized[-1].get("role") == "assistant":
+        normalized = normalized[:-1]
+    return normalized or None, output
 
 
 def _get_span_key(span: Any) -> tuple[int, int] | None:
     try:
         span_context = span.get_span_context()
-    except Exception:
+    except Exception:  # noqa: BLE001 - vendor span objects may expose hostile hooks.
         return None
 
     trace_id = getattr(span_context, "trace_id", None)
@@ -444,12 +549,10 @@ def _should_map_usage_fields(
 ) -> bool:
     if log_type not in _USAGE_LOG_TYPES:
         return False
-    if (
+    return not (
         suppress_nested_provider_usage
         and log_type in _NESTED_PROVIDER_USAGE_SUPPRESSIBLE_LOG_TYPES
-    ):
-        return False
-    return True
+    )
 
 
 def _enrich_nested_provider_span(
@@ -465,14 +568,18 @@ def _enrich_nested_provider_span(
     if log_type not in _NESTED_PROVIDER_USAGE_SUPPRESSIBLE_LOG_TYPES:
         return
 
-    _set_if_missing(attrs, RESPAN_LOG_METHOD, LogMethodChoices.TRACING_INTEGRATION.value)
+    _set_if_missing(
+        attrs, RESPAN_LOG_METHOD, LogMethodChoices.TRACING_INTEGRATION.value
+    )
     _set_if_missing(attrs, RESPAN_LOG_TYPE, log_type)
 
     prompt_tokens, completion_tokens, total_tokens = _extract_usage(attrs)
     if prompt_tokens is not None:
         _set_if_missing(attrs, SpanAttributes.LLM_USAGE_PROMPT_TOKENS, prompt_tokens)
     if completion_tokens is not None:
-        _set_if_missing(attrs, SpanAttributes.LLM_USAGE_COMPLETION_TOKENS, completion_tokens)
+        _set_if_missing(
+            attrs, SpanAttributes.LLM_USAGE_COMPLETION_TOKENS, completion_tokens
+        )
     if total_tokens is not None:
         _set_if_missing(attrs, SpanAttributes.LLM_USAGE_TOTAL_TOKENS, total_tokens)
 
@@ -542,12 +649,15 @@ def enrich_pydantic_ai_span(
     if log_type is None:
         return
 
-    _set_if_missing(attrs, RESPAN_LOG_METHOD, LogMethodChoices.TRACING_INTEGRATION.value)
+    _set_if_missing(
+        attrs, RESPAN_LOG_METHOD, LogMethodChoices.TRACING_INTEGRATION.value
+    )
     _set_if_missing(attrs, RESPAN_LOG_TYPE, log_type)
 
-    model = _extract_model(attrs)
-    if model is not None:
-        _set_if_missing(attrs, SpanAttributes.LLM_REQUEST_MODEL, model)
+    if log_type in _USAGE_LOG_TYPES:
+        model = _extract_model(attrs)
+        if model is not None:
+            _set_if_missing(attrs, SpanAttributes.LLM_REQUEST_MODEL, model)
 
     if _should_map_usage_fields(
         log_type,
@@ -555,23 +665,34 @@ def enrich_pydantic_ai_span(
     ):
         prompt_tokens, completion_tokens, total_tokens = _extract_usage(attrs)
         if prompt_tokens is not None:
-            _set_if_missing(attrs, SpanAttributes.LLM_USAGE_PROMPT_TOKENS, prompt_tokens)
+            _set_if_missing(attrs, PYDANTIC_AI_USAGE_INPUT_TOKENS_ATTR, prompt_tokens)
+            _set_if_missing(
+                attrs, SpanAttributes.LLM_USAGE_PROMPT_TOKENS, prompt_tokens
+            )
         if completion_tokens is not None:
-            _set_if_missing(attrs, SpanAttributes.LLM_USAGE_COMPLETION_TOKENS, completion_tokens)
+            _set_if_missing(
+                attrs,
+                PYDANTIC_AI_USAGE_OUTPUT_TOKENS_ATTR,
+                completion_tokens,
+            )
+            _set_if_missing(
+                attrs, SpanAttributes.LLM_USAGE_COMPLETION_TOKENS, completion_tokens
+            )
         if total_tokens is not None:
             _set_if_missing(attrs, SpanAttributes.LLM_USAGE_TOTAL_TOKENS, total_tokens)
 
-    response_format = _extract_response_format(attrs)
-    if response_format is not None:
-        attrs[RESPAN_RESPONSE_FORMAT_ATTR] = json.dumps(response_format, default=str)
+    if log_type == LOG_TYPE_CHAT:
+        response_format = _extract_response_format(attrs)
+        if response_format is not None:
+            attrs[RESPAN_RESPONSE_FORMAT_ATTR] = json_string(response_format)
 
-    tools = _extract_tools(attrs)
-    if tools is not None:
-        _set_if_missing(
-            attrs,
-            SpanAttributes.LLM_REQUEST_FUNCTIONS,
-            json.dumps(tools, default=str),
-        )
+        tools = _extract_tools(attrs)
+        if tools is not None:
+            _set_if_missing(
+                attrs,
+                SpanAttributes.LLM_REQUEST_FUNCTIONS,
+                json_string(tools),
+            )
 
     tool_name = attrs.get(PYDANTIC_AI_TOOL_NAME_ATTR)
     tool_name = tool_name if isinstance(tool_name, str) else None
@@ -582,22 +703,59 @@ def enrich_pydantic_ai_span(
 
     tool_input = _json_string(
         attrs.get(
-            PYDANTIC_AI_TOOL_CALL_ARGUMENTS_ATTR, attrs.get(PYDANTIC_AI_LEGACY_TOOL_ARGUMENTS_ATTR)
+            PYDANTIC_AI_TOOL_CALL_ARGUMENTS_ATTR,
+            attrs.get(PYDANTIC_AI_LEGACY_TOOL_ARGUMENTS_ATTR),
         )
     )
     tool_output = _json_string(
         attrs.get(
-            PYDANTIC_AI_TOOL_CALL_RESULT_ATTR, attrs.get(PYDANTIC_AI_LEGACY_TOOL_RESULT_ATTR)
+            PYDANTIC_AI_TOOL_CALL_RESULT_ATTR,
+            attrs.get(PYDANTIC_AI_LEGACY_TOOL_RESULT_ATTR),
         )
     )
 
+    if log_type in {LOG_TYPE_AGENT, LOG_TYPE_TASK, LOG_TYPE_TOOL}:
+        for key in (
+            SpanAttributes.LLM_SYSTEM,
+            SpanAttributes.LLM_REQUEST_MODEL,
+            SpanAttributes.LLM_REQUEST_FUNCTIONS,
+            SpanAttributes.LLM_USAGE_PROMPT_TOKENS,
+            SpanAttributes.LLM_USAGE_COMPLETION_TOKENS,
+            SpanAttributes.LLM_USAGE_TOTAL_TOKENS,
+            PYDANTIC_AI_USAGE_INPUT_TOKENS_ATTR,
+            PYDANTIC_AI_USAGE_OUTPUT_TOKENS_ATTR,
+            RESPAN_RESPONSE_FORMAT_ATTR,
+            "gen_ai.system_instructions",
+        ):
+            attrs.pop(key, None)
+
     if log_type == LOG_TYPE_TOOL and tool_name is not None:
         _set_if_missing(attrs, SpanAttributes.TRACELOOP_ENTITY_NAME, tool_name)
-        _set_if_missing(attrs, SpanAttributes.TRACELOOP_ENTITY_PATH, tool_name)
-        _set_if_missing(attrs, SpanAttributes.TRACELOOP_ENTITY_INPUT, tool_input)
+        _set_if_missing(
+            attrs,
+            SpanAttributes.TRACELOOP_ENTITY_PATH,
+            _entity_path(span, tool_name),
+        )
+        _set_if_missing(
+            attrs,
+            SpanAttributes.TRACELOOP_ENTITY_INPUT,
+            json_string(
+                {
+                    "name": tool_name,
+                    "arguments": parse_json(tool_input),
+                }
+            ),
+        )
         _set_if_missing(attrs, SpanAttributes.TRACELOOP_ENTITY_OUTPUT, tool_output)
 
     if log_type == LOG_TYPE_CHAT:
+        entity_name = "pydantic_ai.chat"
+        _set_if_missing(attrs, SpanAttributes.TRACELOOP_ENTITY_NAME, entity_name)
+        _set_if_missing(
+            attrs,
+            SpanAttributes.TRACELOOP_ENTITY_PATH,
+            _entity_path(span, entity_name),
+        )
         _set_if_missing(
             attrs,
             SpanAttributes.LLM_REQUEST_TYPE,
@@ -615,25 +773,46 @@ def enrich_pydantic_ai_span(
             _set_if_missing(
                 attrs,
                 SpanAttributes.TRACELOOP_ENTITY_INPUT,
-                json.dumps(input_messages, default=str),
+                json_string(input_messages),
             )
             _set_message_attrs(attrs, SpanAttributes.LLM_PROMPTS, input_messages)
         if output_messages is not None:
             _set_if_missing(
                 attrs,
                 SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
-                json.dumps(_chat_output_value(output_messages), default=str),
+                json_string(_chat_output_value(output_messages)),
             )
             _set_message_attrs(attrs, SpanAttributes.LLM_COMPLETIONS, output_messages)
 
     if log_type == LOG_TYPE_AGENT and agent_name is not None:
         _set_if_missing(attrs, SpanAttributes.TRACELOOP_ENTITY_NAME, agent_name)
-        _set_if_missing(attrs, SpanAttributes.TRACELOOP_ENTITY_PATH, agent_name)
+        _set_if_missing(
+            attrs,
+            SpanAttributes.TRACELOOP_ENTITY_PATH,
+            _entity_path(span, agent_name),
+        )
         _set_if_missing(attrs, SpanAttributes.TRACELOOP_WORKFLOW_NAME, agent_name)
+        agent_input, agent_output = _agent_content(attrs)
+        if agent_input is not None:
+            _set_if_missing(
+                attrs,
+                SpanAttributes.TRACELOOP_ENTITY_INPUT,
+                json_string(agent_input),
+            )
+        if agent_output is not None:
+            _set_if_missing(
+                attrs,
+                SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
+                json_string(agent_output),
+            )
 
     if log_type == LOG_TYPE_TASK and span.name == PYDANTIC_AI_RUNNING_TOOLS_SPAN_NAME:
         _set_if_missing(attrs, SpanAttributes.TRACELOOP_ENTITY_NAME, "running_tools")
-        _set_if_missing(attrs, SpanAttributes.TRACELOOP_ENTITY_PATH, "running_tools")
+        _set_if_missing(
+            attrs,
+            SpanAttributes.TRACELOOP_ENTITY_PATH,
+            _entity_path(span, "running_tools"),
+        )
 
     span._attributes = {
         key: _coerce_otel_attribute_value(value)
@@ -655,9 +834,8 @@ class PydanticAISpanProcessor(SpanProcessor):
         attrs = dict(getattr(span, "_attributes", None) or {})
         _enrich_nested_provider_span(span, attrs)
         span._attributes = attrs
-        if (
-            not is_pydantic_ai_span(span, attrs)
-            and _span_has_raw_usage_attributes(attrs)
+        if not is_pydantic_ai_span(span, attrs) and _span_has_raw_usage_attributes(
+            attrs
         ):
             parent_span_key = _get_parent_span_key(span)
             if parent_span_key is not None:

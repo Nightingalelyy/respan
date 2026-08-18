@@ -1,18 +1,23 @@
 import json
 import sys
+from collections import Counter
 from contextlib import contextmanager
 from types import ModuleType
 
 import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+    InMemorySpanExporter,
+)
 from opentelemetry.semconv_ai import SpanAttributes
 from opentelemetry.trace import StatusCode
-
-from respan_instrumentation_qdrant import QdrantInstrumentor
-from respan_instrumentation_qdrant import _instrumentation
+from respan_instrumentation_qdrant import QdrantInstrumentor, _instrumentation
 from respan_instrumentation_qdrant._constants import (
     MAX_ATTRIBUTE_CHARS,
     MAX_PREVIEW_ITEMS,
 )
+from respan_instrumentation_qdrant._serialization import json_dumps
 from respan_sdk.constants.span_attributes import (
     RESPAN_LOG_TYPE,
     RESPAN_SPAN_HANDOFFS,
@@ -27,6 +32,8 @@ class _FakeSpan:
         self.attributes = {}
         self.status = None
         self.exceptions = []
+        self.events = []
+        self.parent = None
 
     def set_attribute(self, key, value):
         self.attributes[key] = value
@@ -36,6 +43,9 @@ class _FakeSpan:
 
     def set_status(self, status):
         self.status = status
+
+    def add_event(self, name, attributes=None):
+        self.events.append((name, attributes or {}))
 
 
 class _FakeTracer:
@@ -82,19 +92,24 @@ def reset_instrumentor():
     QdrantInstrumentor._patches_applied = False
     QdrantInstrumentor._activation_count = 0
     QdrantInstrumentor._patched_targets = []
+    QdrantInstrumentor._capture_content_config = None
     yield
-    for target, method in reversed(QdrantInstrumentor._patched_targets):
-        _instrumentation.unwrap(target, method)
+    for patch in reversed(QdrantInstrumentor._patched_targets):
+        try:
+            _instrumentation.unwrap(patch.target, patch.attribute)
+        except Exception:  # noqa: BLE001,S110 - test cleanup must be best effort.
+            pass
     QdrantInstrumentor._patches_applied = False
     QdrantInstrumentor._activation_count = 0
     QdrantInstrumentor._patched_targets = []
+    QdrantInstrumentor._capture_content_config = None
 
 
 def _assert_contract(span):
     attrs = span.attributes
     assert attrs[RESPAN_LOG_TYPE] == "task"
     assert attrs[SpanAttributes.TRACELOOP_ENTITY_NAME]
-    assert attrs[SpanAttributes.TRACELOOP_ENTITY_PATH]
+    assert SpanAttributes.TRACELOOP_ENTITY_PATH in attrs
     for banned_alias in (
         "tools",
         "tool_calls",
@@ -119,7 +134,7 @@ def test_package_exports_qdrant_instrumentor():
 def test_sync_operations_emit_canonical_task_spans(monkeypatch):
     QdrantClient, _ = _install_fake_qdrant(monkeypatch)
     tracer = _FakeTracer()
-    monkeypatch.setattr(_instrumentation.trace, "get_tracer", lambda _: tracer)
+    monkeypatch.setattr(_instrumentation.trace, "get_tracer", lambda *_: tracer)
     instrumentor = QdrantInstrumentor()
     instrumentor.instrument()
 
@@ -144,7 +159,7 @@ def test_sync_operations_emit_canonical_task_spans(monkeypatch):
         assert SpanAttributes.TRACELOOP_ENTITY_OUTPUT in span.attributes
         assert span.status.status_code is StatusCode.OK
     assert (
-        "<redacted>"
+        "[REDACTED]"
         in tracer.spans[1].attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT]
     )
     instrumentor.uninstrument()
@@ -154,7 +169,7 @@ def test_sync_operations_emit_canonical_task_spans(monkeypatch):
 async def test_async_operations_are_awaited_and_traced(monkeypatch):
     _, AsyncQdrantClient = _install_fake_qdrant(monkeypatch)
     tracer = _FakeTracer()
-    monkeypatch.setattr(_instrumentation.trace, "get_tracer", lambda _: tracer)
+    monkeypatch.setattr(_instrumentation.trace, "get_tracer", lambda *_: tracer)
     instrumentor = QdrantInstrumentor()
     instrumentor.activate()
 
@@ -172,7 +187,7 @@ async def test_async_operations_are_awaited_and_traced(monkeypatch):
 def test_errors_are_recorded_and_reraised(monkeypatch):
     QdrantClient, _ = _install_fake_qdrant(monkeypatch)
     tracer = _FakeTracer()
-    monkeypatch.setattr(_instrumentation.trace, "get_tracer", lambda _: tracer)
+    monkeypatch.setattr(_instrumentation.trace, "get_tracer", lambda *_: tracer)
     instrumentor = QdrantInstrumentor()
     instrumentor.activate()
 
@@ -181,7 +196,8 @@ def test_errors_are_recorded_and_reraised(monkeypatch):
 
     span = tracer.spans[-1]
     assert span.status.status_code is StatusCode.ERROR
-    assert span.exceptions
+    assert not span.exceptions
+    assert span.events[0][0] == "exception"
     assert span.attributes["status_code"] == 500
     assert span.attributes["error.message"] == "collection does not exist"
     assert (
@@ -194,7 +210,7 @@ def test_errors_are_recorded_and_reraised(monkeypatch):
 def test_capture_content_false_omits_inputs_and_outputs(monkeypatch):
     QdrantClient, _ = _install_fake_qdrant(monkeypatch)
     tracer = _FakeTracer()
-    monkeypatch.setattr(_instrumentation.trace, "get_tracer", lambda _: tracer)
+    monkeypatch.setattr(_instrumentation.trace, "get_tracer", lambda *_: tracer)
     instrumentor = QdrantInstrumentor(capture_content=False)
     instrumentor.activate()
 
@@ -207,10 +223,10 @@ def test_capture_content_false_omits_inputs_and_outputs(monkeypatch):
     instrumentor.deactivate()
 
 
-def test_full_vectors_survive_canonical_input_and_output(monkeypatch):
+def test_large_vectors_are_bounded_with_stable_previews(monkeypatch):
     QdrantClient, _ = _install_fake_qdrant(monkeypatch)
     tracer = _FakeTracer()
-    monkeypatch.setattr(_instrumentation.trace, "get_tracer", lambda _: tracer)
+    monkeypatch.setattr(_instrumentation.trace, "get_tracer", lambda *_: tracer)
     instrumentor = QdrantInstrumentor()
     instrumentor.activate()
     vector = [0.125] * (MAX_ATTRIBUTE_CHARS + 17)
@@ -224,16 +240,16 @@ def test_full_vectors_survive_canonical_input_and_output(monkeypatch):
     span = tracer.spans[-1]
     entity_input = json.loads(span.attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT])
     entity_output = json.loads(span.attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT])
-    assert entity_input["points"][0]["vector"] == vector
-    assert entity_output["points"][0]["vector"] == vector
-    assert len(entity_input["points"][0]["vector"]) == len(vector)
+    assert entity_input["points"][0]["vector"]["count"] == len(vector)
+    assert len(entity_input["points"][0]["vector"]["items"]) == MAX_PREVIEW_ITEMS
+    assert entity_output["points"][0]["vector"]["count"] == len(vector)
     assert (
-        len(span.attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT])
-        > MAX_ATTRIBUTE_CHARS
+        len(span.attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT].encode("utf-8"))
+        <= MAX_ATTRIBUTE_CHARS
     )
     assert (
-        len(span.attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT])
-        > MAX_ATTRIBUTE_CHARS
+        len(span.attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT].encode("utf-8"))
+        <= MAX_ATTRIBUTE_CHARS
     )
     assert entity_input["points"][0]["payload"]["tags"]["truncated"] is True
     instrumentor.deactivate()
@@ -242,7 +258,7 @@ def test_full_vectors_survive_canonical_input_and_output(monkeypatch):
 def test_lifecycle_is_idempotent_and_reference_counted(monkeypatch):
     QdrantClient, _ = _install_fake_qdrant(monkeypatch)
     tracer = _FakeTracer()
-    monkeypatch.setattr(_instrumentation.trace, "get_tracer", lambda _: tracer)
+    monkeypatch.setattr(_instrumentation.trace, "get_tracer", lambda *_: tracer)
     first = QdrantInstrumentor()
     second = QdrantInstrumentor()
 
@@ -259,3 +275,138 @@ def test_lifecycle_is_idempotent_and_reference_counted(monkeypatch):
     second.deactivate()
     QdrantClient().query_points("docs", [0.1, 0.2, 0.3])
     assert len(tracer.spans) == 2
+
+
+def test_active_instances_reject_capture_mismatch(monkeypatch):
+    _install_fake_qdrant(monkeypatch)
+    first = QdrantInstrumentor(capture_content=True)
+    second = QdrantInstrumentor(capture_content=False)
+    first.activate()
+    with pytest.raises(ValueError, match="same capture_content"):
+        second.activate()
+    first.deactivate()
+
+
+def test_serializer_is_bounded_redacting_and_hostile_safe():
+    class Hostile:
+        def __str__(self):
+            raise AssertionError("hostile __str__ called")
+
+        def __repr__(self):
+            raise AssertionError("hostile __repr__ called")
+
+    encoded = json_dumps(
+        {
+            "api_key": "plain-secret",
+            "nested": {"client_secret": "nested-secret"},
+            "endpoint": "https://user:pass@example.test/v1?api_key=query-secret",
+            "hostile": Hostile(),
+            "unicode": "😀" * 10_000,
+        }
+    )
+    assert len(encoded.encode("utf-8")) <= MAX_ATTRIBUTE_CHARS
+    for secret in ("plain-secret", "nested-secret", "query-secret", "user:pass"):
+        assert secret not in encoded
+    assert json.loads(encoded)
+
+
+@pytest.mark.asyncio
+async def test_real_current_clients_export_sync_async_success_and_failure(monkeypatch):
+    from qdrant_client import AsyncQdrantClient, QdrantClient, models
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(
+        _instrumentation.trace,
+        "get_tracer",
+        lambda name, version=None: provider.get_tracer(name, version),
+    )
+    instrumentor = QdrantInstrumentor()
+    instrumentor.activate()
+    root_tracer = provider.get_tracer("qdrant-real-contract")
+
+    with root_tracer.start_as_current_span("sync.root") as sync_root:
+        client = QdrantClient(":memory:")
+        client.create_collection(
+            "docs",
+            vectors_config=models.VectorParams(
+                size=3,
+                distance=models.Distance.COSINE,
+            ),
+        )
+        client.upsert(
+            "docs",
+            points=[
+                models.PointStruct(
+                    id=1,
+                    vector=[0.1, 0.2, 0.3],
+                    payload={"topic": "tracing"},
+                )
+            ],
+        )
+        query = client.query_points("docs", query=[0.1, 0.2, 0.3], limit=1)
+        assert query.points[0].id == 1
+        assert client.retrieve("docs", ids=[1])[0].payload == {"topic": "tracing"}
+        assert client.scroll("docs", limit=1)[0][0].id == 1
+        with pytest.raises(ValueError, match="missing_collection"):
+            client.get_collection("missing_collection")
+        client.close()
+
+    with root_tracer.start_as_current_span("async.root") as async_root:
+        async_client = AsyncQdrantClient(":memory:")
+        await async_client.create_collection(
+            "async_docs",
+            vectors_config=models.VectorParams(
+                size=3,
+                distance=models.Distance.DOT,
+            ),
+        )
+        await async_client.upsert(
+            "async_docs",
+            points=[models.PointStruct(id=2, vector=[0.3, 0.2, 0.1])],
+        )
+        async_query = await async_client.query_points(
+            "async_docs",
+            query=[0.3, 0.2, 0.1],
+            limit=1,
+        )
+        assert async_query.points[0].id == 2
+        await async_client.close()
+
+    assert provider.force_flush()
+    spans = list(exporter.get_finished_spans())
+    qdrant_spans = [
+        span for span in spans if span.instrumentation_scope.name == "qdrant"
+    ]
+    names = Counter(span.name for span in qdrant_spans)
+    assert names == Counter(
+        {
+            "qdrant.create_collection": 2,
+            "qdrant.upsert": 2,
+            "qdrant.query_points": 2,
+            "qdrant.retrieve": 1,
+            "qdrant.scroll": 1,
+            "qdrant.get_collection": 1,
+        }
+    )
+    assert len({span.context.span_id for span in qdrant_spans}) == 9
+    sync_parent = sync_root.get_span_context().span_id
+    async_parent = async_root.get_span_context().span_id
+    assert all(
+        span.parent.span_id in {sync_parent, async_parent} for span in qdrant_spans
+    )
+    failed = next(span for span in qdrant_spans if span.name == "qdrant.get_collection")
+    assert failed.status.status_code is StatusCode.ERROR
+    assert failed.attributes["status_code"] == 500
+    assert failed.events[0].attributes["exception.type"] == "ValueError"
+    for span in qdrant_spans:
+        _assert_contract(span)
+        assert span.instrumentation_scope.version == "0.1.0"
+        assert span.attributes["db.system"] == "qdrant"
+        assert json.loads(span.attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT])
+        assert json.loads(span.attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT])
+        assert SpanAttributes.TRACELOOP_SPAN_KIND not in span.attributes
+
+    instrumentor.deactivate()
+    provider.shutdown()

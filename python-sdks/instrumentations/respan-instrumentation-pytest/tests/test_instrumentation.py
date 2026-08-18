@@ -1,12 +1,23 @@
+import json
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+    InMemorySpanExporter,
+)
 from opentelemetry.semconv_ai import SpanAttributes
 from opentelemetry.trace import StatusCode
-
 from respan_instrumentation_pytest._runtime import PytestRuntimePlugin
-from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
+from respan_instrumentation_pytest._serialization import json_dumps
+from respan_sdk.constants.span_attributes import (
+    RESPAN_LOG_TYPE,
+    RESPAN_METADATA,
+    RESPAN_TRACE_GROUP_ID,
+)
+from respan_tracing.utils.span_factory import read_propagated_attributes
 
 
 class FakeSpan:
@@ -15,6 +26,7 @@ class FakeSpan:
         self.attributes = {}
         self.status = None
         self.exceptions = []
+        self.events = []
         self.ended = False
 
     def set_attribute(self, key, value):
@@ -25,6 +37,9 @@ class FakeSpan:
 
     def record_exception(self, exc):
         self.exceptions.append(exc)
+
+    def add_event(self, name, attributes=None):
+        self.events.append((name, attributes or {}))
 
 
 class FakeTracer:
@@ -98,6 +113,10 @@ def assert_contract(attrs, log_type):
     assert SpanAttributes.TRACELOOP_ENTITY_PATH in attrs
     assert SpanAttributes.TRACELOOP_ENTITY_INPUT in attrs
     assert SpanAttributes.TRACELOOP_ENTITY_OUTPUT in attrs
+    assert attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME]
+    assert attrs[RESPAN_TRACE_GROUP_ID]
+    assert attrs[f"{RESPAN_METADATA}.integration"] == "pytest"
+    assert attrs[f"{RESPAN_METADATA}.example_run_id"]
     for banned in (
         "tools",
         "tool_calls",
@@ -121,6 +140,15 @@ def test_session_and_passing_test_emit_contract_spans():
     plugin.activate()
     session = make_session()
     plugin.pytest_sessionstart(session)
+    propagated = read_propagated_attributes()
+    assert propagated[f"{RESPAN_METADATA}.example_run_id"]
+    assert (
+        propagated[f"{RESPAN_METADATA}.run_id"]
+        == propagated[f"{RESPAN_METADATA}.example_run_id"]
+    )
+    assert propagated[f"{RESPAN_METADATA}.workflow_name"] == (
+        "checkout_pytest_workflow"
+    )
     item = make_item()
     protocol = plugin.pytest_runtest_protocol(item, None)
     next(protocol)
@@ -135,12 +163,16 @@ def test_session_and_passing_test_emit_contract_spans():
     assert_contract(test_span.attributes, "task")
     assert test_span.attributes["status_code"] == 200
     assert (
-        '"outcome": "passed"'
-        in test_span.attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
+        json.loads(test_span.attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT])[
+            "outcome"
+        ]
+        == "passed"
     )
     assert (
-        '"currency": "usd"'
-        in test_span.attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT]
+        json.loads(test_span.attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT])[
+            "parameters"
+        ]["currency"]
+        == "usd"
     )
     assert session_span.ended and test_span.ended
 
@@ -170,8 +202,15 @@ def test_failure_records_status_error_and_phase():
     assert span.status.status_code is StatusCode.ERROR
     assert span.attributes["status_code"] == 500
     assert span.attributes["error.message"] == "expected 42, got 41"
-    assert '"phase": "call"' in span.attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
+    assert (
+        json.loads(span.attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT])["error"][
+            "phase"
+        ]
+        == "call"
+    )
+    assert span.events[0][0] == "exception"
     plugin.pytest_sessionfinish(session, 1)
+    assert read_propagated_attributes() == {}
     assert tracer.spans[0].status.status_code is StatusCode.ERROR
 
 
@@ -212,3 +251,84 @@ def test_lifecycle_is_idempotent():
     plugin.deactivate()
     plugin.deactivate()
     assert not plugin._is_instrumented
+
+
+def test_serializer_is_bounded_redacting_and_hostile_safe():
+    class Hostile:
+        def __str__(self):
+            raise AssertionError("hostile __str__ called")
+
+        def __repr__(self):
+            raise AssertionError("hostile __repr__ called")
+
+    encoded = json_dumps(
+        {
+            "api_key": "plain-secret",
+            "nested": {"session_token": "nested-secret"},
+            "hostile": Hostile(),
+            "unicode": "😀" * 10_000,
+        }
+    )
+    assert len(encoded.encode("utf-8")) <= 16_000
+    assert "plain-secret" not in encoded
+    assert "nested-secret" not in encoded
+    assert json.loads(encoded)
+
+
+def test_real_otel_export_preserves_metadata_grouping_parentage_and_failure():
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    plugin = PytestRuntimePlugin(
+        tracer=provider.get_tracer("pytest-contract"),
+        workflow_name="checkout_pytest_workflow",
+    )
+    plugin.activate()
+    session = make_session()
+    plugin.pytest_sessionstart(session)
+    item = make_item()
+    protocol = plugin.pytest_runtest_protocol(item, None)
+    next(protocol)
+    add_report(plugin, item, when="setup", outcome="passed")
+    add_report(
+        plugin,
+        item,
+        when="call",
+        outcome="failed",
+        exc=AssertionError("expected 42, got 41"),
+    )
+    add_report(plugin, item, when="teardown", outcome="passed")
+    finish_protocol(protocol)
+    plugin.pytest_sessionfinish(session, 1)
+    assert provider.force_flush()
+
+    spans = list(exporter.get_finished_spans())
+    assert [span.name for span in spans] == ["pytest.test", "pytest.session"]
+    test_span, session_span = spans
+    assert test_span.parent.span_id == session_span.context.span_id
+    assert test_span.context.trace_id == session_span.context.trace_id
+    assert session_span.parent is None
+    assert (
+        json.loads(session_span.attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT])[
+            "rootpath"
+        ]
+        == "demo-suite"
+    )
+    assert len({span.context.span_id for span in spans}) == 2
+    for span in spans:
+        attrs = span.attributes
+        assert attrs[f"{RESPAN_METADATA}.integration"] == "pytest"
+        assert attrs[f"{RESPAN_METADATA}.workflow_name"] == ("checkout_pytest_workflow")
+        assert attrs[f"{RESPAN_METADATA}.example_run_id"]
+        assert (
+            attrs[f"{RESPAN_METADATA}.run_id"]
+            == attrs[f"{RESPAN_METADATA}.example_run_id"]
+        )
+        assert attrs[RESPAN_TRACE_GROUP_ID] == "checkout_pytest_workflow"
+        assert attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] == (
+            "checkout_pytest_workflow"
+        )
+        assert span.status.status_code is StatusCode.ERROR
+    assert test_span.events[0].name == "exception"
+    assert test_span.events[0].attributes["exception.type"] == "AssertionError"
+    provider.shutdown()
