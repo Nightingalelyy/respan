@@ -20,13 +20,6 @@ import {
   TraceloopSpanKindValues,
 } from "@traceloop/ai-semantic-conventions";
 import {
-  DIRECT_COMPLETION_TOKENS,
-  DIRECT_INPUT,
-  DIRECT_MODEL,
-  DIRECT_OUTPUT,
-  DIRECT_PROMPT_TOKENS,
-  DIRECT_TOOLS,
-  DIRECT_TOTAL_REQUEST_TOKENS,
   LANGCHAIN_FRAMEWORK_ATTR,
   LANGCHAIN_METADATA_ATTR,
   LANGCHAIN_PARENT_RUN_ID_ATTR,
@@ -276,7 +269,6 @@ export class RespanCallbackHandler {
     const attrs: SpanAttributesRecord = {
       [RespanSpanAttributes.RESPAN_LOG_METHOD]: RESPAN_LOG_METHOD_TS_TRACING,
       [RespanSpanAttributes.RESPAN_LOG_TYPE]: record.logType,
-      [SpanAttributes.TRACELOOP_SPAN_KIND]: record.spanKind,
       [SpanAttributes.TRACELOOP_ENTITY_NAME]: record.name,
       [SpanAttributes.TRACELOOP_ENTITY_PATH]: record.entityPath,
       [SpanAttributes.TRACELOOP_WORKFLOW_NAME]: record.workflowName,
@@ -301,9 +293,7 @@ export class RespanCallbackHandler {
       const inputString = safeJsonString(record.inputValue);
       const outputString = safeJsonString(normalizeOutputForLogging(outputValue));
       setIfPresent(attrs, SpanAttributes.TRACELOOP_ENTITY_INPUT, inputString);
-      setIfPresent(attrs, DIRECT_INPUT, inputString);
       setIfPresent(attrs, SpanAttributes.TRACELOOP_ENTITY_OUTPUT, outputString);
-      setIfPresent(attrs, DIRECT_OUTPUT, outputString);
     }
 
     Object.assign(attrs, record.extraAttributes);
@@ -511,7 +501,6 @@ export class RespanCallbackHandler {
     };
     const model = extractModel(serialized, undefined, normalizedMetadata);
     setIfPresent(extraAttributes, ATTR_GEN_AI_REQUEST_MODEL, model);
-    setIfPresent(extraAttributes, DIRECT_MODEL, model);
     for (const [index, message] of firstConversation.entries()) {
       for (const [key, value] of Object.entries(message)) {
         setIfPresent(
@@ -522,8 +511,11 @@ export class RespanCallbackHandler {
       }
     }
     const tools = extractTools({ serialized, extraParams });
-    setIfPresent(extraAttributes, RespanSpanAttributes.RESPAN_SPAN_TOOLS, tools);
-    setIfPresent(extraAttributes, DIRECT_TOOLS, tools);
+    setIfPresent(
+      extraAttributes,
+      SpanAttributes.LLM_REQUEST_FUNCTIONS,
+      tools ? safeJsonString(tools) : undefined,
+    );
 
     this._startRun({
       runId,
@@ -552,14 +544,16 @@ export class RespanCallbackHandler {
     const normalizedPrompts = Array.isArray(prompts) ? prompts : [prompts];
     const normalizedMetadata = normalizeMetadata(metadata);
     const extraAttributes: SpanAttributesRecord = {
-      [SpanAttributes.LLM_REQUEST_TYPE]: LLMRequestTypeValues.COMPLETION,
+      [SpanAttributes.LLM_REQUEST_TYPE]: LLMRequestTypeValues.CHAT,
     };
     const model = extractModel(serialized, undefined, normalizedMetadata);
     setIfPresent(extraAttributes, ATTR_GEN_AI_REQUEST_MODEL, model);
-    setIfPresent(extraAttributes, DIRECT_MODEL, model);
     const tools = extractTools({ serialized, extraParams });
-    setIfPresent(extraAttributes, RespanSpanAttributes.RESPAN_SPAN_TOOLS, tools);
-    setIfPresent(extraAttributes, DIRECT_TOOLS, tools);
+    setIfPresent(
+      extraAttributes,
+      SpanAttributes.LLM_REQUEST_FUNCTIONS,
+      tools ? safeJsonString(tools) : undefined,
+    );
     for (const [index, prompt] of normalizedPrompts.entries()) {
       extraAttributes[`${ATTR_GEN_AI_PROMPT}.${index}.role`] = "user";
       extraAttributes[`${ATTR_GEN_AI_PROMPT}.${index}.content`] = String(prompt ?? "");
@@ -570,7 +564,7 @@ export class RespanCallbackHandler {
       parentRunId,
       name: extractName(serialized, "llm", runName),
       logType: RespanLogType.TEXT,
-      spanKind: LLMRequestTypeValues.COMPLETION,
+      spanKind: LLMRequestTypeValues.CHAT,
       inputValue: normalizedPrompts,
       serialized,
       tags: normalizeTags(tags),
@@ -598,7 +592,6 @@ export class RespanCallbackHandler {
     if (record) {
       const model = extractModel(record.serialized, output, record.metadata);
       setIfPresent(extraAttributes, ATTR_GEN_AI_REQUEST_MODEL, model);
-      setIfPresent(extraAttributes, DIRECT_MODEL, model);
     }
 
     for (const [index, message] of completionMessages.entries()) {
@@ -612,17 +605,18 @@ export class RespanCallbackHandler {
     }
 
     const toolCalls = extractToolCallsFromMessages(completionMessages);
-    setIfPresent(extraAttributes, RespanSpanAttributes.RESPAN_SPAN_TOOL_CALLS, toolCalls);
+    setIfPresent(
+      extraAttributes,
+      `${ATTR_GEN_AI_COMPLETION}.0.tool_calls`,
+      toolCalls ? safeJsonString(toolCalls) : undefined,
+    );
 
     const usage = extractUsage(output);
     setIfPresent(extraAttributes, ATTR_GEN_AI_USAGE_PROMPT_TOKENS, usage.promptTokens);
     setIfPresent(extraAttributes, ATTR_GEN_AI_USAGE_INPUT_TOKENS, usage.promptTokens);
-    setIfPresent(extraAttributes, DIRECT_PROMPT_TOKENS, usage.promptTokens);
     setIfPresent(extraAttributes, ATTR_GEN_AI_USAGE_COMPLETION_TOKENS, usage.completionTokens);
     setIfPresent(extraAttributes, ATTR_GEN_AI_USAGE_OUTPUT_TOKENS, usage.completionTokens);
-    setIfPresent(extraAttributes, DIRECT_COMPLETION_TOKENS, usage.completionTokens);
     setIfPresent(extraAttributes, SpanAttributes.LLM_USAGE_TOTAL_TOKENS, usage.totalTokens);
-    setIfPresent(extraAttributes, DIRECT_TOTAL_REQUEST_TOKENS, usage.totalTokens);
 
     this._endRun({ runId, outputValue: outputPayload, extraAttributes });
   }

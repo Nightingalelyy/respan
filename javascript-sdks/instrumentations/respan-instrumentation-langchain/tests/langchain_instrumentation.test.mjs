@@ -189,7 +189,7 @@ test("createAgent root emits one agent boundary and propagates its workflow name
 
   const [toolSpan, agentSpan] = captured;
   assert.equal(agentSpan.attributes["respan.entity.log_type"], "agent");
-  assert.equal(agentSpan.attributes["traceloop.span.kind"], "agent");
+  assert.equal(agentSpan.attributes["traceloop.span.kind"], undefined);
   assert.equal(toolSpan.parentSpanContext?.spanId, agentSpan.spanContext().spanId);
   assert.equal(toolSpan.attributes["traceloop.workflow.name"], "support_agent");
   assert.equal(agentSpan.attributes["traceloop.workflow.name"], "support_agent");
@@ -232,20 +232,31 @@ test("chat model output maps messages, usage, model, tool calls, and strips JSON
   assert.equal(span.attributes["respan.entity.log_type"], "chat");
   assert.equal(span.attributes["llm.request.type"], "chat");
   assert.equal(span.attributes["gen_ai.request.model"], "gpt-4o-mini");
-  assert.equal(span.attributes.model, "gpt-4o-mini");
   assert.equal(span.attributes["gen_ai.usage.prompt_tokens"], 12);
   assert.equal(span.attributes["gen_ai.usage.completion_tokens"], 4);
-  assert.equal(span.attributes.prompt_tokens, 12);
-  assert.equal(span.attributes.completion_tokens, 4);
-  assert.equal(span.attributes.total_request_tokens, 16);
   assert.equal(span.attributes["gen_ai.prompt.0.role"], "user");
   assert.equal(
     span.attributes["gen_ai.completion.0.content"],
     '{"owner":"Security Operations Team"}',
   );
-  assert.equal(span.attributes.output.includes("```"), false);
-  assert.ok(Array.isArray(span.attributes["respan.span.tool_calls"]));
-  assert.equal(span.attributes["respan.span.tool_calls"][0].function.name, "router");
+  assert.equal(span.attributes["traceloop.entity.output"].includes("```"), false);
+  assert.equal(
+    JSON.parse(span.attributes["gen_ai.completion.0.tool_calls"])[0].function.name,
+    "router",
+  );
+  for (const alias of [
+    "traceloop.span.kind",
+    "respan.span.tools",
+    "respan.span.tool_calls",
+    "model",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_request_tokens",
+    "tools",
+    "tool_calls",
+  ]) {
+    assert.equal(span.attributes[alias], undefined);
+  }
 });
 
 test("chat model start preserves full tool definitions from LangChain extra params", () => {
@@ -284,8 +295,9 @@ test("chat model start preserves full tool definitions from LangChain extra para
   );
 
   const span = captured[0];
-  assert.deepEqual(span.attributes["respan.span.tools"], tools);
-  assert.deepEqual(span.attributes.tools, tools);
+  assert.deepEqual(JSON.parse(span.attributes["llm.request.functions"]), tools);
+  assert.equal(span.attributes["respan.span.tools"], undefined);
+  assert.equal(span.attributes.tools, undefined);
 });
 
 test("LLM streaming falls back to collected text when final output is empty", () => {
@@ -304,8 +316,8 @@ test("LLM streaming falls back to collected text when final output is empty", ()
 
   const span = captured[0];
   assert.equal(span.attributes["respan.entity.log_type"], "text");
-  assert.equal(span.attributes["llm.request.type"], "completion");
-  assert.equal(span.attributes.output, "old pond");
+  assert.equal(span.attributes["llm.request.type"], "chat");
+  assert.equal(span.attributes["traceloop.entity.output"], "old pond");
 });
 
 test("handleText streaming fallback records chain text output", () => {
@@ -318,7 +330,7 @@ test("handleText streaming fallback records chain text output", () => {
   handler.handleText("world", chainRunId);
   handler.handleChainEnd(undefined, chainRunId);
 
-  assert.equal(captured[0].attributes.output, "hello world");
+  assert.equal(captured[0].attributes["traceloop.entity.output"], "hello world");
 });
 
 test("tool and retriever callbacks map fields and errors", () => {
@@ -341,7 +353,7 @@ test("tool and retriever callbacks map fields and errors", () => {
   assert.equal(toolSpan.attributes["gen_ai.tool.call.arguments"], '{"expression":"2+2"}');
   assert.equal(toolSpan.attributes["gen_ai.tool.call.result"], '{"answer":4}');
   assert.equal(retrieverSpan.attributes["respan.entity.log_type"], "task");
-  assert.equal(retrieverSpan.attributes.output.includes("doc text"), true);
+  assert.equal(retrieverSpan.attributes["traceloop.entity.output"].includes("doc text"), true);
   assert.equal(errorSpan.status.code, 2);
   assert.equal(errorSpan.attributes["error.message"], "tool failed");
   assert.equal(errorSpan.attributes.status_code, 500);
