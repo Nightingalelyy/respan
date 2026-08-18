@@ -4,11 +4,10 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 from opentelemetry.semconv_ai import SpanAttributes as TLSpanAttributes
-
 from respan_instrumentation_watson_orchestrate_adk import (
     WatsonOrchestrateADKInstrumentor,
+    _instrumentation,
 )
-from respan_instrumentation_watson_orchestrate_adk import _instrumentation
 from respan_instrumentation_watson_orchestrate_adk._constants import (
     AGENT_BUILDER_CLIENT_MODULE,
     CPE_CLIENT_MODULE,
@@ -98,8 +97,7 @@ def test_build_chat_attrs_maps_canonical_fields_without_aliases():
     assert attrs[f"{TLSpanAttributes.LLM_PROMPTS}.0.content"] == "Summarize the ticket."
     assert attrs[f"{TLSpanAttributes.LLM_COMPLETIONS}.0.role"] == "assistant"
     assert (
-        attrs[f"{TLSpanAttributes.LLM_COMPLETIONS}.0.content"]
-        == "Ticket summarized."
+        attrs[f"{TLSpanAttributes.LLM_COMPLETIONS}.0.content"] == "Ticket summarized."
     )
     assert attrs[TLSpanAttributes.LLM_USAGE_PROMPT_TOKENS] == 12
     assert attrs[TLSpanAttributes.LLM_USAGE_COMPLETION_TOKENS] == 4
@@ -176,7 +174,9 @@ def test_activate_patches_tool_and_run_clients(monkeypatch):
             return SimpleNamespace(content={"ok": True, "kwargs": kwargs})
 
     class RunClient:
-        def create_run(self, message, agent_id=None, thread_id=None, capture_logs=False):
+        def create_run(
+            self, message, agent_id=None, thread_id=None, capture_logs=False
+        ):
             return {
                 "run_id": "run-1",
                 "thread_id": thread_id or "thread-1",
@@ -197,11 +197,14 @@ def test_activate_patches_tool_and_run_clients(monkeypatch):
     assert RunClient.create_run is not original_create_run
 
     assert PythonTool()(ticket_id="INC-7").content["ok"] is True
-    assert RunClient().create_run(
-        "hello",
-        agent_id="agent-123",
-        thread_id="thread-1",
-    )["run_id"] == "run-1"
+    assert (
+        RunClient().create_run(
+            "hello",
+            agent_id="agent-123",
+            thread_id="thread-1",
+        )["run_id"]
+        == "run-1"
+    )
 
     assert emitted[0][0] == "tool"
     assert emitted[0][1]["tool_name"] == "lookup_ticket"
@@ -244,15 +247,11 @@ def test_chat_client_failure_emits_error_span(monkeypatch):
     with pytest.raises(RuntimeError, match="provider unavailable"):
         WatsonxAIClient().generate_response("hello")
 
-    assert emitted == [
-        {
-            "method_name": "generate_response",
-            "call_kwargs": {"input": "hello"},
-            "start_ns": emitted[0]["start_ns"],
-            "error_message": "provider unavailable",
-            "instance": emitted[0]["instance"],
-        }
-    ]
+    assert len(emitted) == 1
+    assert emitted[0]["method_name"] == "generate_response"
+    assert emitted[0]["call_kwargs"] == {"input": "hello"}
+    assert emitted[0]["error_message"] == "RuntimeError: provider unavailable"
+    assert emitted[0]["status_code"] == 500
 
 
 def test_activate_is_idempotent(monkeypatch):

@@ -9,9 +9,7 @@ from typing import Any
 import pytest
 from opentelemetry import context as context_api
 from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
-
-from respan_instrumentation_together import TogetherInstrumentor
-from respan_instrumentation_together import _instrumentation
+from respan_instrumentation_together import TogetherInstrumentor, _instrumentation
 from respan_instrumentation_together._constants import (
     ASYNC_COMPLETIONS_RESOURCE_CLASS_NAME,
     ASYNC_EMBEDDINGS_RESOURCE_CLASS_NAME,
@@ -21,7 +19,6 @@ from respan_instrumentation_together._constants import (
     COMPLETIONS_RESOURCE_CLASS_NAME,
     CREATE_METHOD_NAME,
     EMBEDDINGS_RESOURCE_CLASS_NAME,
-    GENERATE_METHOD_NAME,
     IMAGES_RESOURCE_CLASS_NAME,
     RERANK_RESOURCE_CLASS_NAME,
     TOGETHER_CHAT_COMPLETIONS_MODULE,
@@ -37,7 +34,11 @@ from respan_instrumentation_together._otel_emitter import (
     build_image_attrs,
     build_rerank_attrs,
 )
-from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT, LOG_TYPE_EMBEDDING, LOG_TYPE_TEXT
+from respan_sdk.constants.llm_logging import (
+    LOG_TYPE_CHAT,
+    LOG_TYPE_EMBEDDING,
+    LOG_TYPE_TEXT,
+)
 from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
 
 
@@ -53,7 +54,9 @@ def usage(prompt_tokens: int = 3, completion_tokens: int = 4) -> SimpleNamespace
     )
 
 
-def chat_response(*, content: str = "hello", tool_calls: list[Any] | None = None) -> Any:
+def chat_response(
+    *, content: str = "hello", tool_calls: list[Any] | None = None
+) -> Any:
     return obj(
         model="openai/gpt-oss-20b",
         choices=[
@@ -112,7 +115,7 @@ class AsyncIterator:
     def __init__(self, chunks: list[Any]) -> None:
         self._chunks = iter(chunks)
 
-    def __aiter__(self) -> "AsyncIterator":
+    def __aiter__(self) -> AsyncIterator:
         return self
 
     async def __anext__(self) -> Any:
@@ -123,17 +126,10 @@ class AsyncIterator:
 
 
 @pytest.fixture(autouse=True)
-def reset_instrumentation_globals() -> None:
-    _instrumentation._original_sync_chat_create = None
-    _instrumentation._original_async_chat_create = None
-    _instrumentation._original_sync_completion_create = None
-    _instrumentation._original_async_completion_create = None
-    _instrumentation._original_sync_embedding_create = None
-    _instrumentation._original_async_embedding_create = None
-    _instrumentation._original_sync_image_generate = None
-    _instrumentation._original_async_image_generate = None
-    _instrumentation._original_sync_rerank_create = None
-    _instrumentation._original_async_rerank_create = None
+def reset_instrumentation_globals() -> Any:
+    _instrumentation._reset_runtime_for_tests()
+    yield
+    _instrumentation._reset_runtime_for_tests()
 
 
 @pytest.fixture()
@@ -149,19 +145,27 @@ def captured_spans(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
 @pytest.fixture()
 def fake_together_modules(monkeypatch: pytest.MonkeyPatch) -> dict[str, type[Any]]:
     class ChatCompletionsResource:
-        def create(self, *, model: str, messages: Any, tools: Any = None, stream: bool = False) -> Any:
+        def create(
+            self, *, model: str, messages: Any, tools: Any = None, stream: bool = False
+        ) -> Any:
             if stream:
                 return iter(
                     [
                         obj(
                             choices=[
-                                obj(delta=obj(role="assistant", content="hello "), finish_reason=None)
+                                obj(
+                                    delta=obj(role="assistant", content="hello "),
+                                    finish_reason=None,
+                                )
                             ],
                             usage=None,
                         ),
                         obj(
                             choices=[
-                                obj(delta=obj(role="assistant", content="stream"), finish_reason="stop")
+                                obj(
+                                    delta=obj(role="assistant", content="stream"),
+                                    finish_reason="stop",
+                                )
                             ],
                             usage=usage(8, 9),
                         ),
@@ -170,12 +174,21 @@ def fake_together_modules(monkeypatch: pytest.MonkeyPatch) -> dict[str, type[Any
             return chat_response(content=f"{model}: {messages[0]['content']}")
 
     class AsyncChatCompletionsResource:
-        async def create(self, *, model: str, messages: Any, stream: bool = False) -> Any:
+        async def create(
+            self, *, model: str, messages: Any, stream: bool = False
+        ) -> Any:
             if stream:
                 return AsyncIterator(
                     [
-                        obj(choices=[obj(delta=obj(role="assistant", content="async "))]),
-                        obj(choices=[obj(delta=obj(role="assistant", content="stream"))], usage=usage(10, 11)),
+                        obj(
+                            choices=[obj(delta=obj(role="assistant", content="async "))]
+                        ),
+                        obj(
+                            choices=[
+                                obj(delta=obj(role="assistant", content="stream"))
+                            ],
+                            usage=usage(10, 11),
+                        ),
                     ]
                 )
             return chat_response(content=f"async {messages[0]['content']}")
@@ -205,11 +218,15 @@ def fake_together_modules(monkeypatch: pytest.MonkeyPatch) -> dict[str, type[Any
             return image_response()
 
     class RerankResource:
-        def create(self, *, documents: Any, model: str, query: str, **kwargs: Any) -> Any:
+        def create(
+            self, *, documents: Any, model: str, query: str, **kwargs: Any
+        ) -> Any:
             return rerank_response()
 
     class AsyncRerankResource:
-        async def create(self, *, documents: Any, model: str, query: str, **kwargs: Any) -> Any:
+        async def create(
+            self, *, documents: Any, model: str, query: str, **kwargs: Any
+        ) -> Any:
             return rerank_response()
 
     modules = {
@@ -289,8 +306,16 @@ def test_build_chat_attrs_uses_canonical_fields_without_aliases() -> None:
     assert attrs[SpanAttributes.LLM_REQUEST_TYPE] == LLMRequestTypeValues.CHAT.value
     assert attrs[SpanAttributes.LLM_REQUEST_MODEL] == "openai/gpt-oss-20b"
     assert attrs[f"{SpanAttributes.LLM_PROMPTS}.0.content"] == "Weather in Tokyo?"
-    assert json.loads(attrs[SpanAttributes.LLM_REQUEST_FUNCTIONS])[0]["function"]["name"] == "get_weather"
-    assert json.loads(attrs[f"{SpanAttributes.LLM_COMPLETIONS}.0.tool_calls"])[0]["function"]["name"] == "get_weather"
+    assert (
+        json.loads(attrs[SpanAttributes.LLM_REQUEST_FUNCTIONS])[0]["function"]["name"]
+        == "get_weather"
+    )
+    assert (
+        json.loads(attrs[f"{SpanAttributes.LLM_COMPLETIONS}.0.tool_calls"])[0][
+            "function"
+        ]["name"]
+        == "get_weather"
+    )
     assert_no_banned_aliases(attrs)
 
 
@@ -300,9 +325,15 @@ def test_build_non_chat_attrs_cover_completion_embedding_rerank_and_image() -> N
         response_or_chunks=text_response(),
     )
     assert completion_attrs[RESPAN_LOG_TYPE] == LOG_TYPE_TEXT
-    assert completion_attrs[SpanAttributes.LLM_REQUEST_TYPE] == LLMRequestTypeValues.COMPLETION.value
+    assert (
+        completion_attrs[SpanAttributes.LLM_REQUEST_TYPE]
+        == LLMRequestTypeValues.CHAT.value
+    )
     assert completion_attrs[SpanAttributes.LLM_REQUEST_MODEL] == "code"
-    assert completion_attrs[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"] == " completed text"
+    assert (
+        completion_attrs[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"]
+        == " completed text"
+    )
     assert_no_banned_aliases(completion_attrs)
 
     embedding_attrs = build_embedding_attrs(
@@ -310,13 +341,17 @@ def test_build_non_chat_attrs_cover_completion_embedding_rerank_and_image() -> N
         response=embedding_response(),
     )
     assert embedding_attrs[RESPAN_LOG_TYPE] == LOG_TYPE_EMBEDDING
-    assert embedding_attrs[SpanAttributes.LLM_REQUEST_TYPE] == LLMRequestTypeValues.EMBEDDING.value
+    assert (
+        embedding_attrs[SpanAttributes.LLM_REQUEST_TYPE]
+        == LLMRequestTypeValues.EMBEDDING.value
+    )
     assert embedding_attrs[SpanAttributes.LLM_REQUEST_MODEL] == "embed"
     assert json.loads(embedding_attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == {
-        "embedding_count": 2,
-        "embedding_dimensions": 3,
+        "data": [
+            {"embedding": [0.1, 0.2, 0.3], "index": 0},
+            {"embedding": [0.4, 0.5, 0.6], "index": 1},
+        ]
     }
-    assert "0.1" not in embedding_attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
     assert_no_banned_aliases(embedding_attrs)
 
     rerank_attrs = build_rerank_attrs(
@@ -327,18 +362,28 @@ def test_build_non_chat_attrs_cover_completion_embedding_rerank_and_image() -> N
         },
         response=rerank_response(),
     )
-    assert rerank_attrs[SpanAttributes.LLM_REQUEST_TYPE] == LLMRequestTypeValues.RERANK.value
+    assert (
+        rerank_attrs[SpanAttributes.LLM_REQUEST_TYPE] == LLMRequestTypeValues.CHAT.value
+    )
     assert rerank_attrs[SpanAttributes.LLM_REQUEST_MODEL] == "rank"
-    assert json.loads(rerank_attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT])[0]["index"] == 1
+    assert (
+        json.loads(rerank_attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT])[0]["index"]
+        == 1
+    )
     assert_no_banned_aliases(rerank_attrs)
 
     image_attrs = build_image_attrs(
         request_kwargs={"model": "flux", "prompt": "a small robot"},
         response=image_response(),
     )
-    assert image_attrs[SpanAttributes.LLM_REQUEST_TYPE] == LLMRequestTypeValues.UNKNOWN.value
+    assert (
+        image_attrs[SpanAttributes.LLM_REQUEST_TYPE] == LLMRequestTypeValues.CHAT.value
+    )
     assert image_attrs[SpanAttributes.LLM_REQUEST_MODEL] == "flux"
-    assert json.loads(image_attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT])["image_count"] == 1
+    assert (
+        json.loads(image_attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT])["image_count"]
+        == 1
+    )
     assert_no_banned_aliases(image_attrs)
 
 
@@ -359,7 +404,10 @@ def test_activate_patches_sync_chat_and_emits_span(
     assert len(captured_spans) == 1
     attrs = captured_spans[0]._attributes
     assert attrs[SpanAttributes.LLM_REQUEST_MODEL] == "openai/gpt-oss-20b"
-    assert attrs[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"] == "openai/gpt-oss-20b: Say hello"
+    assert (
+        attrs[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"]
+        == "openai/gpt-oss-20b: Say hello"
+    )
     assert_no_banned_aliases(attrs)
 
     instrumentor.deactivate()
@@ -408,7 +456,10 @@ def test_async_chat_emits_span(
 
         assert response.choices[0].message.content == "async Async"
         assert len(captured_spans) == 1
-        assert captured_spans[0]._attributes[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"] == "async Async"
+        assert (
+            captured_spans[0]._attributes[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"]
+            == "async Async"
+        )
 
         instrumentor.deactivate()
 
@@ -436,7 +487,9 @@ def test_active_workflow_name_is_attached_to_injected_span() -> None:
     assert attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] == "together_chat_completion"
 
 
-def test_deactivate_restores_original_methods(fake_together_modules: dict[str, type[Any]]) -> None:
+def test_deactivate_restores_original_methods(
+    fake_together_modules: dict[str, type[Any]],
+) -> None:
     ChatCompletionsResource = fake_together_modules["chat"]
     AsyncChatCompletionsResource = fake_together_modules["async_chat"]
     original_sync = getattr(ChatCompletionsResource, CREATE_METHOD_NAME)
@@ -445,7 +498,9 @@ def test_deactivate_restores_original_methods(fake_together_modules: dict[str, t
     instrumentor = TogetherInstrumentor()
     instrumentor.activate()
     assert getattr(ChatCompletionsResource, CREATE_METHOD_NAME) is not original_sync
-    assert getattr(AsyncChatCompletionsResource, CREATE_METHOD_NAME) is not original_async
+    assert (
+        getattr(AsyncChatCompletionsResource, CREATE_METHOD_NAME) is not original_async
+    )
 
     instrumentor.deactivate()
     assert getattr(ChatCompletionsResource, CREATE_METHOD_NAME) is original_sync

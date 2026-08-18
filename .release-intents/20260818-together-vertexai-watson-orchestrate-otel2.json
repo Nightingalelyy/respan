@@ -1,0 +1,8 @@
+{
+  "summary": "Repair Together, Vertex AI, and Watson Orchestrate ADK Python instrumentation for the OpenTelemetry 2.x span contract",
+  "packages": {
+    "respan-instrumentation-together": "patch",
+    "respan-instrumentation-vertexai": "patch",
+    "respan-instrumentation-watson-orchestrate-adk": "patch"
+  }
+}

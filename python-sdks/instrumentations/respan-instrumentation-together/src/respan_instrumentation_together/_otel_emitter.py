@@ -8,13 +8,26 @@ from typing import Any
 
 from opentelemetry import context as context_api
 from opentelemetry import trace
+from opentelemetry.semconv._incubating.attributes import (
+    gen_ai_attributes as GenAIAttributes,
+)
 from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
+from respan_sdk.constants.llm_logging import (
+    LOG_TYPE_CHAT,
+    LOG_TYPE_EMBEDDING,
+    LOG_TYPE_TEXT,
+)
+from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
+from respan_sdk.utils.data_processing.id_processing import (
+    format_span_id,
+    format_trace_id,
+)
+from respan_tracing.utils.span_factory import build_readable_span, inject_span
 
 from respan_instrumentation_together._constants import (
     ASSISTANT_ROLE,
     BANNED_ALIAS_ATTRS,
     CONTENT_KEY,
-    MODEL_KEY,
     ROLE_KEY,
     TOGETHER_CHAT_SPAN_NAME,
     TOGETHER_COMPLETION_SPAN_NAME,
@@ -31,7 +44,7 @@ from respan_instrumentation_together._translator import (
     chat_input_messages,
     chat_output,
     embedding_input,
-    embedding_summary,
+    embedding_output,
     extract_tool_calls,
     extract_usage,
     finish_reason,
@@ -46,14 +59,6 @@ from respan_instrumentation_together._translator import (
     text_completion_output,
     to_json_attr,
 )
-from respan_sdk.constants.llm_logging import (
-    LOG_TYPE_CHAT,
-    LOG_TYPE_EMBEDDING,
-    LOG_TYPE_TEXT,
-)
-from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
-from respan_sdk.utils.data_processing.id_processing import format_span_id, format_trace_id
-from respan_tracing.utils.span_factory import build_readable_span, inject_span
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +67,7 @@ def _current_trace_parent_ids() -> tuple[str | None, str | None]:
     try:
         current_span = trace.get_current_span()
         span_context = current_span.get_span_context()
-    except Exception:
+    except BaseException:  # noqa: BLE001
         return None, None
 
     trace_id = getattr(span_context, "trace_id", 0) or 0
@@ -80,6 +85,7 @@ def _base_attrs(
 ) -> dict[str, Any]:
     attrs = {
         SpanAttributes.LLM_SYSTEM: TOGETHER_SYSTEM_NAME,
+        GenAIAttributes.GEN_AI_PROVIDER_NAME: TOGETHER_SYSTEM_NAME,
         SpanAttributes.LLM_REQUEST_TYPE: request_type,
         SpanAttributes.TRACELOOP_ENTITY_NAME: span_name,
         SpanAttributes.TRACELOOP_ENTITY_PATH: span_name,
@@ -91,7 +97,9 @@ def _base_attrs(
     return attrs
 
 
-def _set_model(attrs: dict[str, Any], request_kwargs: dict[str, Any], response: Any) -> None:
+def _set_model(
+    attrs: dict[str, Any], request_kwargs: dict[str, Any], response: Any
+) -> None:
     model = request_model(request_kwargs=request_kwargs, response=response)
     if model:
         attrs[SpanAttributes.LLM_REQUEST_MODEL] = model
@@ -101,13 +109,17 @@ def _set_usage(attrs: dict[str, Any], response_or_chunks: Any) -> None:
     usage = extract_usage(response_or_chunks=response_or_chunks)
     if "prompt_tokens" in usage:
         attrs[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] = usage["prompt_tokens"]
+        attrs[GenAIAttributes.GEN_AI_USAGE_INPUT_TOKENS] = usage["prompt_tokens"]
     if "completion_tokens" in usage:
         attrs[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] = usage["completion_tokens"]
+        attrs[GenAIAttributes.GEN_AI_USAGE_OUTPUT_TOKENS] = usage["completion_tokens"]
     if "total_tokens" in usage:
         attrs[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] = usage["total_tokens"]
 
 
-def _set_chat_input_attrs(attrs: dict[str, Any], request_kwargs: dict[str, Any]) -> None:
+def _set_chat_input_attrs(
+    attrs: dict[str, Any], request_kwargs: dict[str, Any]
+) -> None:
     messages = chat_input_messages(request_kwargs=request_kwargs)
     attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = chat_input(request_kwargs)
     for index, message in enumerate(messages):
@@ -115,7 +127,7 @@ def _set_chat_input_attrs(attrs: dict[str, Any], request_kwargs: dict[str, Any])
         role = message.get(ROLE_KEY)
         content = message.get(CONTENT_KEY)
         if role is not None:
-            attrs[f"{prefix}.role"] = str(role)
+            attrs[f"{prefix}.role"] = to_json_attr(role)
         if content is not None:
             attrs[f"{prefix}.content"] = to_json_attr(content)
         tool_calls = message.get(TOOL_CALLS_KEY)
@@ -173,7 +185,7 @@ def build_completion_attrs(
     attrs = _base_attrs(
         span_name=TOGETHER_COMPLETION_SPAN_NAME,
         log_type=LOG_TYPE_TEXT,
-        request_type=LLMRequestTypeValues.COMPLETION.value,
+        request_type=LLMRequestTypeValues.CHAT.value,
     )
     _set_model(attrs=attrs, request_kwargs=request_kwargs, response=response_or_chunks)
     prompt = text_completion_input(request_kwargs)
@@ -207,8 +219,7 @@ def build_embedding_attrs(
     attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = embedding_input(request_kwargs)
     attrs[f"{SpanAttributes.LLM_PROMPTS}.0.content"] = embedding_input(request_kwargs)
     if response is not None:
-        summary = embedding_summary(response)
-        attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safe_json(summary)
+        attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = embedding_output(response)
     _assert_no_banned_aliases(attrs)
     return attrs
 
@@ -221,7 +232,7 @@ def build_rerank_attrs(
     attrs = _base_attrs(
         span_name=TOGETHER_RERANK_SPAN_NAME,
         log_type=LOG_TYPE_TEXT,
-        request_type=LLMRequestTypeValues.RERANK.value,
+        request_type=LLMRequestTypeValues.CHAT.value,
     )
     _set_model(attrs=attrs, request_kwargs=request_kwargs, response=response)
     attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = rerank_input(request_kwargs)
@@ -240,7 +251,7 @@ def build_image_attrs(
     attrs = _base_attrs(
         span_name=TOGETHER_IMAGE_SPAN_NAME,
         log_type=LOG_TYPE_TEXT,
-        request_type=LLMRequestTypeValues.UNKNOWN.value,
+        request_type=LLMRequestTypeValues.CHAT.value,
     )
     _set_model(attrs=attrs, request_kwargs=request_kwargs, response=response)
     attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = image_input(request_kwargs)
@@ -266,31 +277,35 @@ def build_attrs(
     response_or_chunks: Any = None,
 ) -> dict[str, Any]:
     if operation == "chat":
-        return build_chat_attrs(
+        attrs = build_chat_attrs(
             request_kwargs=request_kwargs,
             response_or_chunks=response_or_chunks,
         )
-    if operation == "completion":
-        return build_completion_attrs(
+    elif operation == "completion":
+        attrs = build_completion_attrs(
             request_kwargs=request_kwargs,
             response_or_chunks=response_or_chunks,
         )
-    if operation == "embedding":
-        return build_embedding_attrs(
+    elif operation == "embedding":
+        attrs = build_embedding_attrs(
             request_kwargs=request_kwargs,
             response=response_or_chunks,
         )
-    if operation == "rerank":
-        return build_rerank_attrs(
+    elif operation == "rerank":
+        attrs = build_rerank_attrs(
             request_kwargs=request_kwargs,
             response=response_or_chunks,
         )
-    if operation == "image":
-        return build_image_attrs(
+    elif operation == "image":
+        attrs = build_image_attrs(
             request_kwargs=request_kwargs,
             response=response_or_chunks,
         )
-    raise ValueError(f"Unsupported Together operation: {operation}")
+    else:
+        raise ValueError(f"Unsupported Together operation: {operation}")
+    if operation in {"chat", "completion"} and request_kwargs.get("stream") is True:
+        attrs[SpanAttributes.LLM_IS_STREAMING] = True
+    return attrs
 
 
 def emit_together_span(
@@ -301,6 +316,8 @@ def emit_together_span(
     response_or_chunks: Any = None,
     error_message: str | None = None,
     status_code: int = 200,
+    trace_id: str | None = None,
+    parent_id: str | None = None,
 ) -> None:
     """Build a ReadableSpan for a Together SDK call and inject it."""
     try:
@@ -311,9 +328,22 @@ def emit_together_span(
         )
         if error_message:
             attrs["error.message"] = error_message
-            attrs.setdefault("status_code", status_code if status_code >= 400 else 500)
+            attrs["http.response.status_code"] = (
+                status_code if status_code >= 400 else 500
+            )
+            attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safe_json(
+                {
+                    "error": {
+                        "message": error_message,
+                        "status_code": status_code if status_code >= 400 else 500,
+                    }
+                }
+            )
 
-        trace_id, parent_id = _current_trace_parent_ids()
+        if trace_id is None or parent_id is None:
+            current_trace_id, current_parent_id = _current_trace_parent_ids()
+            trace_id = trace_id or current_trace_id
+            parent_id = parent_id or current_parent_id
         span_name = str(attrs[SpanAttributes.TRACELOOP_ENTITY_NAME])
         span = build_readable_span(
             name=span_name,

@@ -12,9 +12,7 @@ from opentelemetry.semconv._incubating.attributes import (
     gen_ai_attributes as GenAIAttributes,
 )
 from opentelemetry.semconv_ai import SpanAttributes
-
-from respan_instrumentation_vertexai import VertexAIInstrumentor
-from respan_instrumentation_vertexai import _instrumentation
+from respan_instrumentation_vertexai import VertexAIInstrumentor, _instrumentation
 from respan_instrumentation_vertexai._constants import (
     CHAT_SESSION_CLASS_NAME,
     GENERATE_CONTENT_ASYNC_METHOD_NAME,
@@ -60,11 +58,10 @@ def make_usage(prompt_tokens: int = 3, completion_tokens: int = 4) -> Obj:
 
 
 @pytest.fixture(autouse=True)
-def reset_instrumentation_globals() -> None:
-    _instrumentation._original_generate_content = None
-    _instrumentation._original_generate_content_async = None
-    _instrumentation._original_send_message = None
-    _instrumentation._original_send_message_async = None
+def reset_instrumentation_globals() -> Any:
+    _instrumentation._reset_runtime_for_tests()
+    yield
+    _instrumentation._reset_runtime_for_tests()
 
 
 @pytest.fixture()
@@ -129,7 +126,7 @@ def fake_vertexai(monkeypatch: pytest.MonkeyPatch) -> tuple[type[Any], type[Any]
     generative_models_module = ModuleType(VERTEXAI_GENERATIVE_MODELS_MODULE)
     setattr(generative_models_module, GENERATIVE_MODEL_CLASS_NAME, GenerativeModel)
     setattr(generative_models_module, CHAT_SESSION_CLASS_NAME, ChatSession)
-    setattr(vertexai_module, "generative_models", generative_models_module)
+    vertexai_module.generative_models = generative_models_module
 
     monkeypatch.setitem(sys.modules, "vertexai", vertexai_module)
     monkeypatch.setitem(
@@ -342,7 +339,7 @@ def test_function_calls_use_canonical_completion_field_only() -> None:
             "type": "function",
             "function": {
                 "name": "get_weather",
-                "arguments": '{"city": "Tokyo"}',
+                "arguments": '{"city":"Tokyo"}',
             },
         }
     ]
@@ -372,7 +369,7 @@ def test_error_path_emits_failed_span(
     assert len(captured_spans) == 1
     span = captured_spans[0]
     assert span.status.status_code.name == "ERROR"
-    assert span._attributes["error.message"] == "boom"
+    assert span._attributes["error.message"] == "RuntimeError: boom"
     assert span._attributes[SpanAttributes.LLM_REQUEST_MODEL] == "gemini-2.0-flash"
 
     instrumentor.deactivate()
