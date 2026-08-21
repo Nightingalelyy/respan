@@ -1,6 +1,7 @@
 import { context, trace } from "@opentelemetry/api";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import {
+  ATTR_ERROR_MESSAGE,
   ATTR_GEN_AI_COMPLETION,
   ATTR_GEN_AI_PROMPT,
   ATTR_GEN_AI_REQUEST_MODEL,
@@ -76,7 +77,8 @@ export class MastraInstrumentor {
   private readonly _excludedSpanTypes: Set<string>;
   private readonly _traceIdMap = new Map<string, string>();
   private readonly _emittedSpanIds = new Set<string>();
-  private readonly _pendingToolSpans = new Map<string, MastraExportedSpan[]>();
+  private readonly _emittedErrors = new Map<string, MastraExportedSpan["errorInfo"]>();
+  private readonly _pendingChildSpans = new Map<string, MastraExportedSpan[]>();
 
   constructor(options: MastraInstrumentorOptions = {}) {
     this._excludedSpanTypes = new Set([
@@ -91,9 +93,11 @@ export class MastraInstrumentor {
 
   deactivate(): void {
     this._enabled = false;
+    this._drainAllPendingChildSpans();
     this._traceIdMap.clear();
     this._emittedSpanIds.clear();
-    this._pendingToolSpans.clear();
+    this._emittedErrors.clear();
+    this._pendingChildSpans.clear();
   }
 
   onTracingEvent(event: MastraTracingEvent): void {
@@ -110,11 +114,11 @@ export class MastraInstrumentor {
       return;
     }
 
-    if (this._shouldBufferToolSpan(span)) {
+    if (this._shouldBufferChildSpan(span)) {
       const pendingKey = resolvePendingToolKey(span);
-      const pendingSpans = this._pendingToolSpans.get(pendingKey) ?? [];
+      const pendingSpans = this._pendingChildSpans.get(pendingKey) ?? [];
       pendingSpans.push(span);
-      this._pendingToolSpans.set(pendingKey, pendingSpans);
+      this._pendingChildSpans.set(pendingKey, pendingSpans);
       return;
     }
 
@@ -123,7 +127,7 @@ export class MastraInstrumentor {
     this._rememberEmittedSpan(span, readableSpan);
 
     if (span.type === "agent_run") {
-      this._drainPendingToolSpans(span, readableSpan.spanContext().spanId);
+      this._drainPendingChildSpans(span, readableSpan.spanContext().spanId);
     }
   }
 
@@ -132,10 +136,11 @@ export class MastraInstrumentor {
   }
 
   async shutdown(): Promise<void> {
-    this._drainAllPendingToolSpans();
+    this._drainAllPendingChildSpans();
     this._traceIdMap.clear();
     this._emittedSpanIds.clear();
-    this._pendingToolSpans.clear();
+    this._emittedErrors.clear();
+    this._pendingChildSpans.clear();
   }
 
   private _buildReadableSpan(
@@ -152,6 +157,17 @@ export class MastraInstrumentor {
         ? activeSpanContext?.spanId
         : undefined
     );
+    const rawErrorInfo =
+      span.errorInfo ?? (parentId ? this._emittedErrors.get(parentId) : undefined);
+    const effectiveErrorInfo = rawErrorInfo
+      ? {
+          ...rawErrorInfo,
+          message: sanitizeErrorMessage(rawErrorInfo.message),
+        }
+      : undefined;
+    const exportedSpan = effectiveErrorInfo
+      ? { ...span, errorInfo: effectiveErrorInfo }
+      : span;
 
     const readableSpan = buildReadableSpan({
       name: span.name || resolveEntityName(span),
@@ -160,9 +176,9 @@ export class MastraInstrumentor {
       parentId,
       startTimeIso: toIsoString(span.startTime),
       endTimeIso: toIsoString(span.endTime ?? new Date()),
-      attributes: buildMastraAttributes(span),
-      statusCode: span.errorInfo ? 500 : 200,
-      errorMessage: span.errorInfo?.message,
+      attributes: buildMastraAttributes(exportedSpan),
+      statusCode: effectiveErrorInfo ? 500 : 200,
+      errorMessage: effectiveErrorInfo?.message,
     }) as ReadableSpan & {
       instrumentationScope?: { name: string; version?: string };
     };
@@ -171,6 +187,10 @@ export class MastraInstrumentor {
       name: INSTRUMENTATION_NAME,
       version: PACKAGE_VERSION,
     };
+    if (effectiveErrorInfo) {
+      this._emittedErrors.set(span.id, effectiveErrorInfo);
+      this._emittedErrors.set(readableSpan.spanContext().spanId, effectiveErrorInfo);
+    }
     return readableSpan;
   }
 
@@ -185,8 +205,12 @@ export class MastraInstrumentor {
     return resolvedTraceId;
   }
 
-  private _shouldBufferToolSpan(span: MastraExportedSpan): boolean {
-    return isToolSpan(span) && (!(span.parentSpanId ?? (span as any).parentSpanContext?.spanId) || !this._emittedSpanIds.has((span.parentSpanId ?? (span as any).parentSpanContext?.spanId)));
+  private _shouldBufferChildSpan(span: MastraExportedSpan): boolean {
+    const parentSpanId = span.parentSpanId ?? (span as any).parentSpanContext?.spanId;
+    return (
+      (isToolSpan(span) || isModelSpan(span.type)) &&
+      (!parentSpanId || !this._emittedSpanIds.has(parentSpanId))
+    );
   }
 
   private _rememberEmittedSpan(span: MastraExportedSpan, readableSpan: ReadableSpan): void {
@@ -194,14 +218,14 @@ export class MastraInstrumentor {
     this._emittedSpanIds.add(readableSpan.spanContext().spanId);
   }
 
-  private _drainPendingToolSpans(agentSpan: MastraExportedSpan, parentId: string): void {
+  private _drainPendingChildSpans(agentSpan: MastraExportedSpan, parentId: string): void {
     const pendingKey = resolvePendingToolKey(agentSpan);
-    const pendingSpans = this._pendingToolSpans.get(pendingKey);
+    const pendingSpans = this._pendingChildSpans.get(pendingKey);
     if (!pendingSpans || pendingSpans.length === 0) {
       return;
     }
 
-    this._pendingToolSpans.delete(pendingKey);
+    this._pendingChildSpans.delete(pendingKey);
     for (const pendingSpan of pendingSpans) {
       const readableSpan = this._buildReadableSpan(pendingSpan, parentId);
       injectSpan(readableSpan);
@@ -209,15 +233,15 @@ export class MastraInstrumentor {
     }
   }
 
-  private _drainAllPendingToolSpans(): void {
-    for (const pendingSpans of this._pendingToolSpans.values()) {
+  private _drainAllPendingChildSpans(): void {
+    for (const pendingSpans of this._pendingChildSpans.values()) {
       for (const pendingSpan of pendingSpans) {
         const readableSpan = this._buildReadableSpan(pendingSpan);
         injectSpan(readableSpan);
         this._rememberEmittedSpan(pendingSpan, readableSpan);
       }
     }
-    this._pendingToolSpans.clear();
+    this._pendingChildSpans.clear();
   }
 }
 
@@ -235,6 +259,10 @@ function buildMastraAttributes(span: MastraExportedSpan): Record<string, unknown
 
   if (span.isRootSpan || span.type === "agent_run" || span.type === "workflow_run") {
     attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] = resolveEntityName(span);
+  }
+  if (span.errorInfo?.message) {
+    attrs[ATTR_ERROR_MESSAGE] = span.errorInfo.message;
+    attrs.status_code = 500;
   }
 
   if (span.entityId) {
@@ -256,6 +284,20 @@ function buildMastraAttributes(span: MastraExportedSpan): Record<string, unknown
   addTypeSpecificAttributes(attrs, span);
 
   return attrs;
+}
+
+function sanitizeErrorMessage(message: unknown): string {
+  return String(message ?? "Mastra operation failed")
+    .replace(
+      /\b(authorization\s*:\s*bearer\s+)([^\s,;]+)/gi,
+      "$1[REDACTED]",
+    )
+    .replace(
+      /\b((?:api[_ -]?key|token|secret)\s*[=:]\s*)([^\s,;]+)/gi,
+      "$1[REDACTED]",
+    )
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[REDACTED]")
+    .slice(0, 4096);
 }
 
 function addInputOutput(

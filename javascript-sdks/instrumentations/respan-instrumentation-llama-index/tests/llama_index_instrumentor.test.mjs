@@ -212,3 +212,122 @@ test("deactivate removes handlers", async () => {
 
   assert.equal(captureState.spans.length, 0);
 });
+
+test("rejected LLM calls emit failed chat and ancestor spans with sanitized errors", async () => {
+  const instrumentor = new LlamaIndexInstrumentor({
+    workflowName: "llama_index_ts_unit_failure",
+  });
+  await instrumentor.activate();
+
+  const failingLlm = {
+    model: "gpt-4.1-nano",
+    async chat() {
+      Settings.callbackManager.dispatchEvent(
+        "query-start",
+        { id: "query-failure", query: "Fail safely" },
+        true,
+      );
+      Settings.callbackManager.dispatchEvent(
+        "llm-start",
+        {
+          id: "llm-failure",
+          messages: [{ role: "user", content: "Fail safely" }],
+        },
+        true,
+      );
+      throw new Error("401 invalid api_key=sk-super-secret-token");
+    },
+  };
+  Settings.llm = failingLlm;
+
+  await assert.rejects(() => Settings.llm.chat({ messages: [] }), /401 invalid/);
+
+  assert.equal(captureState.spans.length, 2);
+  const chatSpan = captureState.spans.find(
+    (span) => span.attributes["respan.entity.log_type"] === "chat",
+  );
+  const workflowSpan = captureState.spans.find(
+    (span) => span.attributes["respan.entity.log_type"] === "workflow",
+  );
+  assert.ok(chatSpan);
+  assert.ok(workflowSpan);
+  assert.equal(chatSpan.status.code, 2);
+  assert.equal(workflowSpan.status.code, 2);
+  assert.equal(chatSpan.attributes.status_code, 500);
+  assert.equal(workflowSpan.attributes.status_code, 500);
+  assert.equal(chatSpan.attributes["gen_ai.request.model"], "gpt-4.1-nano");
+  assert.equal(chatSpan.attributes["gen_ai.prompt.0.content"], "Fail safely");
+  assert.equal(chatSpan.attributes["error.message"], "401 invalid api_key=[REDACTED]");
+  assert.equal(workflowSpan.attributes["error.message"], "401 invalid api_key=[REDACTED]");
+  assert.equal(chatSpan.parentSpanContext?.spanId, workflowSpan.spanContext().spanId);
+
+  instrumentor.deactivate();
+  assert.equal(Object.hasOwn(failingLlm, "chat"), true);
+  assert.equal(failingLlm.chat.name, "chat");
+});
+
+test("deactivate exports unfinished callbacks as failed spans instead of dropping them", async () => {
+  const instrumentor = new LlamaIndexInstrumentor({
+    workflowName: "llama_index_ts_unit_pending",
+  });
+  await instrumentor.activate();
+
+  Settings.callbackManager.dispatchEvent(
+    "llm-start",
+    {
+      id: "llm-pending",
+      messages: [{ role: "user", content: "Pending request" }],
+    },
+    true,
+  );
+  instrumentor.deactivate();
+
+  assert.equal(captureState.spans.length, 1);
+  assert.equal(captureState.spans[0].status.code, 2);
+  assert.equal(captureState.spans[0].attributes.status_code, 500);
+  assert.match(captureState.spans[0].attributes["error.message"], /without a matching/);
+});
+
+test("correlates id-less start and end events by LlamaIndex event reason", async () => {
+  const handlers = new Map();
+  const callbackManager = {
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+    off(event) {
+      handlers.delete(event);
+    },
+  };
+  const instrumentor = new LlamaIndexInstrumentor({
+    workflowName: "llama_index_ts_unit_idless",
+    llamaIndexModule: { Settings: { callbackManager } },
+  });
+  await instrumentor.activate();
+
+  const reason = { id: "stable-event-reason" };
+  handlers.get("chunking-start")({
+    detail: { chunks: ["input text"] },
+    reason,
+  });
+  handlers.get("chunking-end")({
+    detail: { chunks: ["output chunk"] },
+    reason,
+  });
+
+  handlers.get("node-parsing-start")({
+    detail: { documents: [{ text: "input document" }] },
+    reason: null,
+  });
+  handlers.get("node-parsing-end")({
+    detail: { nodes: [{ text: "output node" }] },
+    reason: null,
+  });
+
+  assert.equal(captureState.spans.length, 2);
+  for (const span of captureState.spans) {
+    assert.equal(span.status.code, 1);
+    assert.equal(span.attributes["error.message"], undefined);
+  }
+  instrumentor.deactivate();
+  assert.equal(captureState.spans.length, 2);
+});

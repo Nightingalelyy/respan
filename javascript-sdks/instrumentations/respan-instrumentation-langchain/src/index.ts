@@ -53,7 +53,9 @@ export class LangChainInstrumentor {
     return this._active;
   }
 
-  addCallback(config: LangChainCallbackConfig = {}): LangChainCallbackConfig {
+  addCallback<TConfig extends object = LangChainCallbackConfig>(
+    config: TConfig = {} as TConfig,
+  ): TConfig {
     return addRespanCallback(config, this.callbackHandler);
   }
 }

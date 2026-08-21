@@ -115,6 +115,10 @@ test("chain root and child emit workflow and task spans with parent linkage", ()
   assert.equal(childSpan.spanContext().traceId, rootSpan.spanContext().traceId);
   assert.equal(childSpan.parentSpanContext?.spanId, rootSpan.spanContext().spanId);
   assert.equal(rootSpan.attributes["langchain.framework"], "langgraph");
+  assert.equal(rootSpan.attributes["traceloop.workflow.name"], "root_chain");
+  assert.equal(childSpan.attributes["traceloop.workflow.name"], "root_chain");
+  assert.equal(rootSpan.attributes["respan.trace.trace_group_identifier"], "root_chain");
+  assert.equal(childSpan.attributes["respan.trace.trace_group_identifier"], "root_chain");
 });
 
 test("explicit Langflow handler groups independent root runs into one trace", () => {
@@ -147,7 +151,53 @@ test("explicit Langflow handler groups independent root runs into one trace", ()
   assert.equal(captured.length, 2);
   assert.equal(captured[0].spanContext().traceId, captured[1].spanContext().traceId);
   assert.equal(captured[0].parentSpanContext?.spanId, undefined);
-  assert.equal(captured[1].parentSpanContext?.spanId, undefined);
+  assert.equal(
+    captured[1].parentSpanContext?.spanId,
+    captured[0].spanContext().spanId,
+  );
+  assert.equal(captured[0].attributes["traceloop.workflow.name"], "DemoComponent");
+  assert.equal(captured[1].attributes["traceloop.workflow.name"], "DemoComponent");
+});
+
+test("createAgent root emits one agent boundary and propagates its workflow name", () => {
+  resetProvider();
+  const handler = new RespanCallbackHandler();
+  const agentRunId = runId(41);
+  const childRunId = runId(42);
+
+  handler.handleChainStart(
+    { name: "LangGraph" },
+    { messages: [{ role: "user", content: "help" }] },
+    agentRunId,
+    undefined,
+    undefined,
+    {
+      ls_integration: "langchain_create_agent",
+      custom_identifier: "otel2-fix-marker",
+    },
+    undefined,
+    "support_agent",
+  );
+  handler.handleToolStart(
+    { name: "lookup" },
+    { query: "help" },
+    childRunId,
+    agentRunId,
+  );
+  handler.handleToolEnd({ result: "done" }, childRunId);
+  handler.handleChainEnd({ messages: [{ role: "assistant", content: "done" }] }, agentRunId);
+
+  const [toolSpan, agentSpan] = captured;
+  assert.equal(agentSpan.attributes["respan.entity.log_type"], "agent");
+  assert.equal(agentSpan.attributes["traceloop.span.kind"], undefined);
+  assert.equal(toolSpan.parentSpanContext?.spanId, agentSpan.spanContext().spanId);
+  assert.equal(toolSpan.attributes["traceloop.workflow.name"], "support_agent");
+  assert.equal(agentSpan.attributes["traceloop.workflow.name"], "support_agent");
+  assert.equal(agentSpan.attributes["respan.span_params.custom_identifier"], "otel2-fix-marker");
+  assert.equal(
+    captured.filter((span) => span.attributes["respan.entity.log_type"] === "agent").length,
+    1,
+  );
 });
 
 test("chat model output maps messages, usage, model, tool calls, and strips JSON fences", () => {
@@ -182,20 +232,31 @@ test("chat model output maps messages, usage, model, tool calls, and strips JSON
   assert.equal(span.attributes["respan.entity.log_type"], "chat");
   assert.equal(span.attributes["llm.request.type"], "chat");
   assert.equal(span.attributes["gen_ai.request.model"], "gpt-4o-mini");
-  assert.equal(span.attributes.model, "gpt-4o-mini");
   assert.equal(span.attributes["gen_ai.usage.prompt_tokens"], 12);
   assert.equal(span.attributes["gen_ai.usage.completion_tokens"], 4);
-  assert.equal(span.attributes.prompt_tokens, 12);
-  assert.equal(span.attributes.completion_tokens, 4);
-  assert.equal(span.attributes.total_request_tokens, 16);
   assert.equal(span.attributes["gen_ai.prompt.0.role"], "user");
   assert.equal(
     span.attributes["gen_ai.completion.0.content"],
     '{"owner":"Security Operations Team"}',
   );
-  assert.equal(span.attributes.output.includes("```"), false);
-  assert.ok(Array.isArray(span.attributes["respan.span.tool_calls"]));
-  assert.equal(span.attributes["respan.span.tool_calls"][0].function.name, "router");
+  assert.equal(span.attributes["traceloop.entity.output"].includes("```"), false);
+  assert.equal(
+    JSON.parse(span.attributes["gen_ai.completion.0.tool_calls"])[0].function.name,
+    "router",
+  );
+  for (const alias of [
+    "traceloop.span.kind",
+    "respan.span.tools",
+    "respan.span.tool_calls",
+    "model",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_request_tokens",
+    "tools",
+    "tool_calls",
+  ]) {
+    assert.equal(span.attributes[alias], undefined);
+  }
 });
 
 test("chat model start preserves full tool definitions from LangChain extra params", () => {
@@ -234,8 +295,9 @@ test("chat model start preserves full tool definitions from LangChain extra para
   );
 
   const span = captured[0];
-  assert.deepEqual(span.attributes["respan.span.tools"], tools);
-  assert.deepEqual(span.attributes.tools, tools);
+  assert.deepEqual(JSON.parse(span.attributes["llm.request.functions"]), tools);
+  assert.equal(span.attributes["respan.span.tools"], undefined);
+  assert.equal(span.attributes.tools, undefined);
 });
 
 test("LLM streaming falls back to collected text when final output is empty", () => {
@@ -254,8 +316,8 @@ test("LLM streaming falls back to collected text when final output is empty", ()
 
   const span = captured[0];
   assert.equal(span.attributes["respan.entity.log_type"], "text");
-  assert.equal(span.attributes["llm.request.type"], "completion");
-  assert.equal(span.attributes.output, "old pond");
+  assert.equal(span.attributes["llm.request.type"], "chat");
+  assert.equal(span.attributes["traceloop.entity.output"], "old pond");
 });
 
 test("handleText streaming fallback records chain text output", () => {
@@ -268,7 +330,7 @@ test("handleText streaming fallback records chain text output", () => {
   handler.handleText("world", chainRunId);
   handler.handleChainEnd(undefined, chainRunId);
 
-  assert.equal(captured[0].attributes.output, "hello world");
+  assert.equal(captured[0].attributes["traceloop.entity.output"], "hello world");
 });
 
 test("tool and retriever callbacks map fields and errors", () => {
@@ -291,7 +353,7 @@ test("tool and retriever callbacks map fields and errors", () => {
   assert.equal(toolSpan.attributes["gen_ai.tool.call.arguments"], '{"expression":"2+2"}');
   assert.equal(toolSpan.attributes["gen_ai.tool.call.result"], '{"answer":4}');
   assert.equal(retrieverSpan.attributes["respan.entity.log_type"], "task");
-  assert.equal(retrieverSpan.attributes.output.includes("doc text"), true);
+  assert.equal(retrieverSpan.attributes["traceloop.entity.output"].includes("doc text"), true);
   assert.equal(errorSpan.status.code, 2);
   assert.equal(errorSpan.attributes["error.message"], "tool failed");
   assert.equal(errorSpan.attributes.status_code, 500);
@@ -349,6 +411,12 @@ test("agent action, agent end, and custom event emit event spans", () => {
   assert.equal(eventSpan.name, "custom_step");
   assert.equal(eventSpan.attributes["respan.entity.log_type"], "task");
   assert.equal(chainSpan.attributes["respan.entity.log_type"], "workflow");
+  assert.deepEqual(
+    [toolSpan, agentSpan, eventSpan, chainSpan].map(
+      (span) => span.attributes["traceloop.workflow.name"],
+    ),
+    ["agent_chain", "agent_chain", "agent_chain", "agent_chain"],
+  );
 });
 
 test("pure helpers normalize messages, usage, serializable values, and tool definitions", () => {

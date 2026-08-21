@@ -44,6 +44,8 @@ export interface SpanRecord {
   parentId?: string;
   startTime: HrTime;
   input?: unknown;
+  model?: string;
+  caller?: object;
 }
 
 export interface EmitterOptions {
@@ -126,8 +128,8 @@ export class LlamaIndexSpanEmitter {
   }): void {
     const activeContext = activeSpanContext();
     const parent = this.currentRecord();
-    const traceId = activeContext?.traceId ?? parent?.traceId;
-    const parentId = activeContext?.spanId ?? parent?.spanId;
+    const traceId = parent?.traceId ?? activeContext?.traceId;
+    const parentId = parent?.spanId ?? activeContext?.spanId;
     const record: SpanRecord = {
       id: params.id,
       name: params.name,
@@ -162,6 +164,10 @@ export class LlamaIndexSpanEmitter {
       output: params.output,
       workflowName: this.options.workflowName,
     });
+    if (params.errorMessage) {
+      attrs[ATTR_ERROR_MESSAGE] = params.errorMessage;
+      attrs.status_code = 500;
+    }
 
     emitReadableSpan({
       name: record.name,
@@ -175,7 +181,13 @@ export class LlamaIndexSpanEmitter {
     });
   }
 
-  startLLM(params: { id: string; messages: unknown; startTime: HrTime }): void {
+  startLLM(params: {
+    id: string;
+    messages: unknown;
+    startTime: HrTime;
+    model?: string;
+    caller?: object;
+  }): void {
     this.startRecord({
       id: params.id,
       name: "llamaindex.llm",
@@ -183,6 +195,11 @@ export class LlamaIndexSpanEmitter {
       startTime: params.startTime,
       input: formatMessages(params.messages),
     });
+    const record = this.records.get(params.id);
+    if (record) {
+      record.model = params.model;
+      record.caller = params.caller;
+    }
   }
 
   endLLM(params: {
@@ -202,7 +219,7 @@ export class LlamaIndexSpanEmitter {
       ? (record.input as Record<string, unknown>[])
       : [];
     const completion = extractResponseMessage(params.response);
-    const model = extractResponseModel(params.response);
+    const model = extractResponseModel(params.response) ?? record.model;
     const usage = extractUsage(params.response);
     const attrs = baseAttrs({
       name: record.name,
@@ -233,6 +250,10 @@ export class LlamaIndexSpanEmitter {
     }
     if (usage.totalTokens !== undefined) {
       attrs[TraceloopSpanAttributes.LLM_USAGE_TOTAL_TOKENS] = usage.totalTokens;
+    }
+    if (params.errorMessage) {
+      attrs[ATTR_ERROR_MESSAGE] = params.errorMessage;
+      attrs.status_code = 500;
     }
 
     emitReadableSpan({
@@ -344,6 +365,73 @@ export class LlamaIndexSpanEmitter {
       endTime: params.endTime,
       attributes: attrs,
     });
+  }
+
+  failLLMForCaller(params: {
+    caller?: object;
+    errorMessage: string;
+    endTime: HrTime;
+  }): boolean {
+    const candidates = [...this.records.values()].reverse();
+    const record =
+      candidates.find(
+        (candidate) =>
+          candidate.logType === RespanLogType.CHAT &&
+          params.caller !== undefined &&
+          candidate.caller === params.caller,
+      ) ?? candidates.find((candidate) => candidate.logType === RespanLogType.CHAT);
+    if (!record) {
+      return false;
+    }
+
+    const ancestorIds: string[] = [];
+    let parentId = record.parentId;
+    while (parentId) {
+      const parent = [...this.records.values()].find(
+        (candidate) => candidate.spanId === parentId,
+      );
+      if (!parent) break;
+      ancestorIds.push(parent.id);
+      parentId = parent.parentId;
+    }
+
+    this.endLLM({
+      id: record.id,
+      response: undefined,
+      errorMessage: params.errorMessage,
+      endTime: params.endTime,
+    });
+    for (const id of ancestorIds) {
+      this.endRecord({
+        id,
+        errorMessage: params.errorMessage,
+        endTime: params.endTime,
+      });
+    }
+    return true;
+  }
+
+  flushPending(params: { errorMessage: string; endTime: HrTime }): void {
+    const pendingIds = [...this.records.keys()].reverse();
+    for (const id of pendingIds) {
+      const record = this.records.get(id);
+      if (!record) continue;
+      if (record.logType === RespanLogType.CHAT) {
+        this.endLLM({
+          id,
+          response: undefined,
+          errorMessage: params.errorMessage,
+          endTime: params.endTime,
+        });
+      } else {
+        this.endRecord({
+          id,
+          errorMessage: params.errorMessage,
+          endTime: params.endTime,
+        });
+      }
+    }
+    this.pendingToolCalls.clear();
   }
 
   clear(): void {

@@ -11,14 +11,6 @@ export const LANGCHAIN_TAGS_ATTR = "langchain.tags";
 export const LANGCHAIN_METADATA_ATTR = "langchain.metadata";
 export const LANGCHAIN_SERIALIZED_ATTR = "langchain.serialized";
 
-export const DIRECT_INPUT = "input";
-export const DIRECT_OUTPUT = "output";
-export const DIRECT_MODEL = "model";
-export const DIRECT_PROMPT_TOKENS = "prompt_tokens";
-export const DIRECT_COMPLETION_TOKENS = "completion_tokens";
-export const DIRECT_TOTAL_REQUEST_TOKENS = "total_request_tokens";
-export const DIRECT_TOOLS = "tools";
-
 const JSON_CODE_FENCE_RE =
   /^\s*(?<fence>`{3,}|~{3,})[ \t]*(?<language>jsonc?)?[ \t]*\r?\n(?<body>.*?)(?:\r?\n)?\k<fence>\s*$/is;
 
@@ -28,7 +20,6 @@ export type HrTimeTuple = [number, number];
 export type FrameworkName = "langchain" | "langgraph" | "langflow";
 export interface LangChainCallbackConfig {
   callbacks?: unknown;
-  [key: string]: unknown;
 }
 
 export type SpanAttributesRecord = Record<string, unknown>;
@@ -58,6 +49,7 @@ export interface RunRecord {
   parentSpanId?: string;
   name: string;
   entityPath: string;
+  workflowName: string;
   logType: string;
   spanKind: string;
   startTime: HrTimeTuple;
