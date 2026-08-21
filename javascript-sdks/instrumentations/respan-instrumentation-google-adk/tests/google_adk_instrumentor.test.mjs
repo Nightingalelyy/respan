@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { trace } from "@opentelemetry/api";
+import {
+  BasicTracerProvider,
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+} from "@opentelemetry/sdk-trace-base";
 
 import {
   GoogleADKInstrumentor,
@@ -15,7 +20,60 @@ function createSpan(name, attributes) {
     name,
     attributes: { ...attributes },
     instrumentationScope: { name: "gcp.vertex.agent", version: "1.2.0" },
+    setAttribute(key, value) {
+      this.attributes[key] = value;
+      return this;
+    },
+    setAttributes(values) {
+      for (const [key, value] of Object.entries(values)) {
+        this.setAttribute(key, value);
+      }
+      return this;
+    },
   };
+}
+
+async function exportCapturedLlmResponses(responses) {
+  const exporter = new InMemorySpanExporter();
+  const provider = new BasicTracerProvider({
+    spanProcessors: [
+      new GoogleADKTranslator(),
+      new SimpleSpanProcessor(exporter),
+    ],
+  });
+
+  try {
+    const span = provider
+      .getTracer("gcp.vertex.agent", "1.3.0")
+      .startSpan("call_llm");
+    span.setAttributes({
+      "gen_ai.system": "gcp.vertex.agent",
+      "gen_ai.request.model": "deterministic-gemini",
+      "gcp.vertex.agent.llm_request": JSON.stringify({
+        model: "deterministic-gemini",
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: "Stream a response." }],
+          },
+        ],
+      }),
+    });
+    for (const response of responses) {
+      span.setAttribute(
+        "gcp.vertex.agent.llm_response",
+        JSON.stringify(response),
+      );
+    }
+    span.end();
+    await provider.forceFlush();
+
+    const finishedSpans = exporter.getFinishedSpans();
+    assert.equal(finishedSpans.length, 1);
+    return finishedSpans[0];
+  } finally {
+    await provider.shutdown();
+  }
 }
 
 test("translates ADK LLM spans to canonical chat attrs and strips raw keys", () => {
@@ -120,6 +178,254 @@ test("translates ADK LLM spans to canonical chat attrs and strips raw keys", () 
   assert.equal(attrs.prompt_tokens, undefined);
 });
 
+test("assembles every ADK streaming response chunk with OTel 2.x", async () => {
+  const span = await exportCapturedLlmResponses([
+    {
+      content: { role: "model", parts: [{ text: "Streaming " }] },
+      partial: true,
+    },
+    {
+      content: { role: "model", parts: [{ text: "ADK telemetry " }] },
+      partial: true,
+    },
+    {
+      content: {
+        role: "model",
+        parts: [{ text: "complete with propagated Respan attributes." }],
+      },
+      usageMetadata: {
+        promptTokenCount: 14,
+        candidatesTokenCount: 7,
+        totalTokenCount: 21,
+      },
+      finishReason: "STOP",
+    },
+  ]);
+
+  const attrs = span.attributes;
+  assert.equal(
+    attrs["gen_ai.completion.0.content"],
+    "Streaming ADK telemetry complete with propagated Respan attributes.",
+  );
+  assert.equal(attrs["gen_ai.completion.0.role"], "assistant");
+  assert.equal(attrs["gen_ai.completion.0.finish_reason"], "stop");
+  assert.equal(attrs["gen_ai.usage.input_tokens"], 14);
+  assert.equal(attrs["gen_ai.usage.output_tokens"], 7);
+  assert.equal(attrs["llm.usage.total_tokens"], 21);
+  assert.equal(attrs["gcp.vertex.agent.llm_response"], undefined);
+});
+
+test("retains repeated equal text deltas instead of treating them as cumulative", async () => {
+  const span = await exportCapturedLlmResponses([
+    {
+      content: { role: "model", parts: [{ text: "ha" }] },
+      partial: true,
+    },
+    {
+      content: { role: "model", parts: [{ text: "ha" }] },
+      partial: true,
+    },
+    {
+      usageMetadata: {
+        promptTokenCount: 2,
+        candidatesTokenCount: 1,
+        totalTokenCount: 3,
+      },
+      finishReason: "STOP",
+    },
+  ]);
+
+  assert.equal(span.attributes["gen_ai.completion.0.content"], "haha");
+});
+
+test("does not duplicate cumulative terminal content or streamed tool calls", async () => {
+  const span = await exportCapturedLlmResponses([
+    {
+      content: { role: "model", parts: [{ text: "Hello " }] },
+      partial: true,
+    },
+    {
+      content: { role: "model", parts: [{ text: "world" }] },
+      partial: true,
+    },
+    {
+      content: {
+        role: "model",
+        parts: [
+          { text: "Hello world" },
+          {
+            functionCall: {
+              id: "call_1",
+              name: "get_weather",
+              args: { city: "Tokyo" },
+            },
+          },
+        ],
+      },
+      finishReason: "STOP",
+    },
+    {
+      content: {
+        role: "model",
+        parts: [
+          { text: "Hello world" },
+          {
+            functionCall: {
+              id: "call_1",
+              name: "get_weather",
+              args: { city: "Tokyo" },
+            },
+          },
+        ],
+      },
+      finishReason: "STOP",
+    },
+  ]);
+
+  const attrs = span.attributes;
+  assert.equal(attrs["gen_ai.completion.0.content"], "Hello world");
+  assert.deepEqual(JSON.parse(attrs["gen_ai.completion.0.tool_calls"]), [
+    {
+      id: "call_1",
+      type: "function",
+      function: {
+        name: "get_weather",
+        arguments: JSON.stringify({ city: "Tokyo" }),
+      },
+    },
+  ]);
+});
+
+test("merges id-less streamed function calls by name and sequence", async () => {
+  const span = await exportCapturedLlmResponses([
+    {
+      content: {
+        role: "model",
+        parts: [
+          {
+            functionCall: {
+              name: "search_places",
+              partialArgs: [
+                {
+                  jsonPath: "$.query",
+                  stringValue: "weather ",
+                  willContinue: true,
+                },
+              ],
+              willContinue: true,
+            },
+          },
+          {
+            functionCall: {
+              name: "search_places",
+              partialArgs: [
+                {
+                  jsonPath: "$.query",
+                  stringValue: "muse",
+                  willContinue: true,
+                },
+              ],
+              willContinue: true,
+            },
+          },
+        ],
+      },
+      partial: true,
+    },
+    {
+      content: {
+        role: "model",
+        parts: [
+          {
+            functionCall: {
+              name: "search_places",
+              partialArgs: [
+                {
+                  jsonPath: "$.query",
+                  stringValue: "Tokyo",
+                  willContinue: false,
+                },
+                {
+                  jsonPath: "$.filters[0].kind",
+                  stringValue: "forecast",
+                  willContinue: false,
+                },
+              ],
+              willContinue: false,
+            },
+          },
+          {
+            functionCall: {
+              name: "search_places",
+              partialArgs: [
+                {
+                  jsonPath: "$.query",
+                  stringValue: "um",
+                  willContinue: false,
+                },
+              ],
+              willContinue: false,
+            },
+          },
+        ],
+      },
+      partial: true,
+    },
+    {
+      content: {
+        role: "model",
+        parts: [
+          {
+            functionCall: {
+              name: "search_places",
+              args: {
+                query: "weather Tokyo",
+                filters: [{ kind: "forecast" }],
+              },
+            },
+          },
+          {
+            functionCall: {
+              name: "search_places",
+              args: { query: "museum" },
+            },
+          },
+        ],
+      },
+      usageMetadata: {
+        promptTokenCount: 10,
+        candidatesTokenCount: 3,
+        totalTokenCount: 13,
+      },
+      finishReason: "STOP",
+    },
+  ]);
+
+  const attrs = span.attributes;
+  assert.deepEqual(JSON.parse(attrs["gen_ai.completion.0.tool_calls"]), [
+    {
+      type: "function",
+      function: {
+        name: "search_places",
+        arguments: JSON.stringify({
+          query: "weather Tokyo",
+          filters: [{ kind: "forecast" }],
+        }),
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "search_places",
+        arguments: JSON.stringify({ query: "museum" }),
+      },
+    },
+  ]);
+  assert.equal(attrs["gen_ai.usage.input_tokens"], 10);
+  assert.equal(attrs["gen_ai.usage.output_tokens"], 3);
+  assert.equal(attrs["llm.usage.total_tokens"], 13);
+});
+
 test("translates ADK tool spans with normalized input and output", () => {
   const span = createSpan("execute_tool get_weather", {
     "gen_ai.operation.name": "execute_tool",
@@ -197,9 +503,13 @@ test("translator marks ADK span names at start so Respan exports them", () => {
 });
 
 test("translator hook mutates ADK spans before the active processor receives them", () => {
+  const startedSpans = [];
   const capturedSpans = [];
   const originalGetTracerProvider = trace.getTracerProvider.bind(trace);
   const activeSpanProcessor = {
+    onStart(span) {
+      startedSpans.push(span);
+    },
     onEnd(span) {
       capturedSpans.push(span);
     },
@@ -214,10 +524,12 @@ test("translator hook mutates ADK spans before the active processor receives the
   });
 
   try {
+    const originalOnStart = activeSpanProcessor.onStart;
     const originalOnEnd = activeSpanProcessor.onEnd;
     const instrumentor = new GoogleADKInstrumentor();
     instrumentor.activate();
     assert.equal(instrumentor.isActive(), true);
+    assert.notEqual(activeSpanProcessor.onStart, originalOnStart);
     assert.notEqual(activeSpanProcessor.onEnd, originalOnEnd);
 
     const span = createSpan("execute_tool get_weather", {
@@ -226,14 +538,17 @@ test("translator hook mutates ADK spans before the active processor receives the
       "gcp.vertex.agent.tool_call_args": JSON.stringify({ city: "Tokyo" }),
       "gcp.vertex.agent.tool_response": JSON.stringify({ forecast: "sunny" }),
     });
+    activeSpanProcessor.onStart(span, {});
     activeSpanProcessor.onEnd(span);
 
+    assert.equal(startedSpans.length, 1);
     assert.equal(capturedSpans.length, 1);
     assert.equal(capturedSpans[0].attributes["respan.entity.log_type"], "tool");
     assert.equal(capturedSpans[0].attributes["gcp.vertex.agent.tool_response"], undefined);
 
     instrumentor.deactivate();
     assert.equal(instrumentor.isActive(), false);
+    assert.equal(activeSpanProcessor.onStart, originalOnStart);
     assert.equal(activeSpanProcessor.onEnd, originalOnEnd);
   } finally {
     Object.defineProperty(trace, "getTracerProvider", {

@@ -1,0 +1,8 @@
+{
+  "summary": "Fix OTel 2.x BeeAI agent, Flue compaction, and Google ADK streaming spans",
+  "packages": {
+    "@respan/instrumentation-beeai": "patch",
+    "@respan/instrumentation-flue": "patch",
+    "@respan/instrumentation-google-adk": "patch"
+  }
+}
