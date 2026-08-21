@@ -1,0 +1,7 @@
+{
+  "summary": "Preserve Strands structured agent output and expose Superagent model operation content and usage",
+  "packages": {
+    "@respan/instrumentation-strands-agents": "patch",
+    "@respan/instrumentation-superagent": "patch"
+  }
+}

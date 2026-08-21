@@ -53,6 +53,7 @@ import {
   STRANDS_OPERATION_INVOKE_PREFIX,
   STRANDS_OPERATION_INVOKE_SWARM,
   STRANDS_RAW_ATTR_PREFIXES_TO_STRIP,
+  STRANDS_STRUCTURED_OUTPUT_TOOL_NAME,
   STRANDS_SYSTEM_NAME,
   STRANDS_TOP_LEVEL_ALIAS_ATTRS_TO_STRIP,
   STRANDS_TOOL_JSON_SCHEMA_ATTR,
@@ -65,6 +66,15 @@ type SpanAttributesRecord = Record<string, any>;
 type SpanEventRecord = {
   name?: string;
   attributes?: Record<string, any>;
+};
+
+type StructuredOutputCandidate = {
+  output: unknown;
+};
+
+type StrandsTraceState = {
+  parents: Map<string, string | undefined>;
+  structuredOutputs: Map<string, StructuredOutputCandidate>;
 };
 
 const RESPAN_LOG_METHOD_TS_TRACING = "ts_tracing";
@@ -118,21 +128,152 @@ const OFF_CONTRACT_ALIAS_ATTRS = new Set([
 ]);
 
 export class StrandsAgentsSpanProcessor implements SpanProcessor {
+  private readonly _traceStates = new Map<string, StrandsTraceState>();
+
   onStart(_span: Span, _parentContext: Context): void {
     // Translation happens on ended spans so message/usage events are complete.
   }
 
   onEnd(span: ReadableSpan): void {
+    const traceId = span.spanContext().traceId;
+    const spanId = span.spanContext().spanId;
+    const parentSpanId = span.parentSpanContext?.spanId;
+    const state = this._traceState(traceId);
+    state.parents.set(spanId, parentSpanId);
+
     enrichStrandsAgentsSpan(span);
+
+    const attrs = (span as any).attributes as SpanAttributesRecord | undefined;
+    if (
+      attrs?.[RespanSpanAttributes.RESPAN_LOG_TYPE] === RespanLogType.TOOL &&
+      attrs[SpanAttributes.TRACELOOP_ENTITY_NAME] ===
+        STRANDS_STRUCTURED_OUTPUT_TOOL_NAME
+    ) {
+      const output = normalizeStructuredOutput(
+        attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT],
+      );
+      if (!isEmptyValue(output)) {
+        state.structuredOutputs.set(spanId, { output });
+      }
+    }
+
+    if (attrs?.[RespanSpanAttributes.RESPAN_LOG_TYPE] === RespanLogType.AGENT) {
+      this._recoverStructuredAgentOutput(attrs, spanId, state);
+      this._clearAgentState(spanId, state);
+    }
+
+    if (!parentSpanId) {
+      this._traceStates.delete(traceId);
+    }
   }
 
   shutdown(): Promise<void> {
+    this._traceStates.clear();
     return Promise.resolve();
   }
 
   forceFlush(): Promise<void> {
     return Promise.resolve();
   }
+
+  private _traceState(traceId: string): StrandsTraceState {
+    let state = this._traceStates.get(traceId);
+    if (!state) {
+      state = {
+        parents: new Map(),
+        structuredOutputs: new Map(),
+      };
+      this._traceStates.set(traceId, state);
+    }
+    return state;
+  }
+
+  private _recoverStructuredAgentOutput(
+    attrs: SpanAttributesRecord,
+    agentSpanId: string,
+    state: StrandsTraceState,
+  ): void {
+    if (hasMeaningfulAgentOutput(attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT])) {
+      return;
+    }
+
+    let recovered: unknown;
+    for (const [toolSpanId, candidate] of state.structuredOutputs) {
+      if (isDescendantSpan(toolSpanId, agentSpanId, state.parents)) {
+        recovered = candidate.output;
+      }
+    }
+    if (recovered === undefined) {
+      return;
+    }
+
+    attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson([
+      { role: "assistant", content: recovered },
+    ]);
+  }
+
+  private _clearAgentState(
+    agentSpanId: string,
+    state: StrandsTraceState,
+  ): void {
+    for (const toolSpanId of state.structuredOutputs.keys()) {
+      if (isDescendantSpan(toolSpanId, agentSpanId, state.parents)) {
+        state.structuredOutputs.delete(toolSpanId);
+      }
+    }
+    for (const spanId of state.parents.keys()) {
+      if (
+        spanId === agentSpanId ||
+        isDescendantSpan(spanId, agentSpanId, state.parents)
+      ) {
+        state.parents.delete(spanId);
+      }
+    }
+  }
+}
+
+function isDescendantSpan(
+  spanId: string,
+  ancestorSpanId: string,
+  parents: Map<string, string | undefined>,
+): boolean {
+  const visited = new Set<string>();
+  let current = parents.get(spanId);
+  while (current && !visited.has(current)) {
+    if (current === ancestorSpanId) {
+      return true;
+    }
+    visited.add(current);
+    current = parents.get(current);
+  }
+  return false;
+}
+
+function normalizeStructuredOutput(value: unknown): unknown {
+  let parsed = safeJsonLoads(value);
+  if (typeof parsed === "string") {
+    parsed = safeJsonLoads(parsed);
+  }
+  if (Array.isArray(parsed) && parsed.length === 1) {
+    parsed = parsed[0];
+  }
+  if (isRecord(parsed) && "json" in parsed) {
+    return toSerializableValue(parsed.json);
+  }
+  return toSerializableValue(parsed);
+}
+
+function hasMeaningfulAgentOutput(value: unknown): boolean {
+  const parsed = safeJsonLoads(value);
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    return !isEmptyValue(parsed);
+  }
+  return parsed.some((message) => {
+    if (!isRecord(message)) {
+      return !isEmptyValue(message);
+    }
+    return !isEmptyValue(message.content);
+  });
 }
 
 export function enrichStrandsAgentsSpan(span: ReadableSpan): void {

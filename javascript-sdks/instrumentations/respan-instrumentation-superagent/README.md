@@ -44,6 +44,12 @@ operations into the shared Respan OpenTelemetry pipeline.
 - `redact()` emits `respan.entity.log_type=tool`.
 - `scan()` emits `respan.entity.log_type=tool`.
 
+Each traced method also emits a child chat span for the underlying model
+operation. That child carries the configured model, canonical prompt and
+completion content, and the real token usage returned by `safety-agent`.
+Keeping model fields on the child preserves the common-only contract of the
+parent guardrail/tool span.
+
 Auto-emitted Superagent spans intentionally do not set `traceloop.span.kind`;
 that attribute is reserved for user-created Respan workflow/task/agent/tool
 spans.
