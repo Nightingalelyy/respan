@@ -4,7 +4,6 @@ from contextlib import contextmanager
 from types import ModuleType
 
 from opentelemetry.semconv_ai import SpanAttributes
-
 from respan_instrumentation_pinecone import PineconeInstrumentor
 from respan_instrumentation_pinecone import (
     _native_instrumentation as native_instrumentation,
@@ -73,7 +72,7 @@ def test_sync_async_and_embedding_operations(monkeypatch):
     inference_module.Inference = Inference
 
     tracer = _Tracer()
-    monkeypatch.setattr(native_instrumentation.trace, "get_tracer", lambda _: tracer)
+    monkeypatch.setattr(native_instrumentation.trace, "get_tracer", lambda *_: tracer)
     PineconeInstrumentor._patches_applied = False
     instrumentor = PineconeInstrumentor()
     instrumentor.activate()

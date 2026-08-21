@@ -1,0 +1,8 @@
+{
+  "summary": "Repair canonical OpenTelemetry 2.x spans, lifecycle safety, bounded content, streaming, tools, and provider errors for Pinecone, Pipecat, and Portkey instrumentations.",
+  "packages": {
+    "respan-instrumentation-pinecone": "patch",
+    "respan-instrumentation-pipecat": "patch",
+    "respan-instrumentation-portkey": "patch"
+  }
+}

@@ -2,15 +2,14 @@ import json
 import logging
 import sys
 from types import ModuleType, SimpleNamespace
+from typing import ClassVar
 
 import pytest
 from opentelemetry.semconv._incubating.attributes import (
     gen_ai_attributes as GenAIAttributes,
 )
 from opentelemetry.semconv_ai import SpanAttributes as TLSpanAttributes
-
-from respan_instrumentation_pipecat import PipecatInstrumentor
-from respan_instrumentation_pipecat import _instrumentation
+from respan_instrumentation_pipecat import PipecatInstrumentor, _instrumentation
 from respan_instrumentation_pipecat._instrumentation import (
     OPENINFERENCE_PIPECAT_MODULE,
     OPENINFERENCE_PIPECAT_OBSERVER_MODULE,
@@ -60,7 +59,7 @@ def _install_fake_modules(monkeypatch, *, activate_raises=False):
         pass
 
     class FakePipecatInstrumentor:
-        created = []
+        created: ClassVar[list] = []
 
         def __init__(self):
             self.instrument_kwargs = None
@@ -75,6 +74,10 @@ def _install_fake_modules(monkeypatch, *, activate_raises=False):
         def uninstrument(self):
             self.uninstrument_called = True
 
+    class FakeOpenInferenceObserver:
+        async def on_push_frame(self, data):
+            return None
+
     openinference_module = ModuleType("openinference")
     openinference_instrumentation_module = ModuleType("openinference.instrumentation")
     openinference_pipecat_module = ModuleType(OPENINFERENCE_PIPECAT_MODULE)
@@ -83,6 +86,9 @@ def _install_fake_modules(monkeypatch, *, activate_raises=False):
         OPENINFERENCE_PIPECAT_OBSERVER_MODULE
     )
     openinference_pipecat_observer_module.Context = FakeObserverContext
+    openinference_pipecat_observer_module.OpenInferenceObserver = (
+        FakeOpenInferenceObserver
+    )
     openinference_instrumentation_module.pipecat = openinference_pipecat_module
 
     monkeypatch.setitem(sys.modules, "openinference", openinference_module)
@@ -127,6 +133,14 @@ def _make_span(attrs: dict, name: str = "pipecat.llm"):
 @pytest.fixture(autouse=True)
 def reset_tracer():
     RespanTracer.reset_instance()
+    _instrumentation._REFCOUNT = 0
+    _instrumentation._PROCESSOR = None
+    _instrumentation._PROVIDER = None
+    _instrumentation._UPSTREAM = None
+    _instrumentation._OBSERVER_MODULE = None
+    _instrumentation._OBSERVER_CONTEXT_ORIGINAL = None
+    _instrumentation._OBSERVER_HOOK = None
+    _instrumentation._CONFIG = None
     yield
     RespanTracer.reset_instance()
 
@@ -184,6 +198,53 @@ def test_activate_passes_custom_openinference_kwargs(monkeypatch):
     }
 
 
+def test_multiple_instances_share_one_runtime_and_last_owner_cleans_up(monkeypatch):
+    fake = _install_fake_modules(monkeypatch)
+    first = PipecatInstrumentor()
+    second = PipecatInstrumentor()
+
+    first.activate()
+    second.activate()
+
+    assert len(fake.pipecat_instrumentor_class.created) == 1
+    assert (
+        len(
+            [
+                processor
+                for processor in fake.tracer_provider._active_span_processor._span_processors
+                if isinstance(processor, PipecatOpenInferenceTranslator)
+            ]
+        )
+        == 1
+    )
+    upstream = fake.pipecat_instrumentor_class.created[0]
+
+    first.deactivate()
+    assert upstream.uninstrument_called is False
+    assert second._is_instrumented is True
+    assert fake.observer_module.Context is _instrumentation.context_api.get_current
+
+    second.deactivate()
+    assert upstream.uninstrument_called is True
+    assert fake.observer_module.Context is fake.observer_context_class
+    assert fake.tracer_provider._active_span_processor._span_processors == ("exporter",)
+
+
+def test_active_runtime_rejects_mismatched_configuration(monkeypatch, caplog):
+    fake = _install_fake_modules(monkeypatch)
+    first = PipecatInstrumentor(debug_log_filename="one.log")
+    second = PipecatInstrumentor(debug_log_filename="two.log")
+
+    first.activate()
+    with caplog.at_level(logging.WARNING):
+        second.activate()
+
+    assert second._is_instrumented is False
+    assert len(fake.pipecat_instrumentor_class.created) == 1
+    assert "already active with different settings" in caplog.text
+    first.deactivate()
+
+
 def test_activate_cleans_up_when_activation_fails(monkeypatch, caplog):
     fake = _install_fake_modules(monkeypatch, activate_raises=True)
 
@@ -195,7 +256,6 @@ def test_activate_cleans_up_when_activation_fails(monkeypatch, caplog):
     assert upstream.uninstrument_called is True
     assert fake.observer_module.Context is fake.observer_context_class
     assert fake.tracer_provider._active_span_processor._span_processors == ("exporter",)
-    assert instrumentor._instrumentor is None
     assert instrumentor._is_instrumented is False
     assert "Failed to activate Pipecat instrumentation" in caplog.text
 
@@ -257,8 +317,13 @@ def test_translator_maps_pipecat_turn_span():
         span._attributes[TLSpanAttributes.TRACELOOP_ENTITY_NAME]
         == "pipecat.conversation.turn"
     )
-    assert span._attributes[TLSpanAttributes.TRACELOOP_ENTITY_INPUT] == "hello"
-    assert span._attributes[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] == "world"
+    assert (
+        json.loads(span._attributes[TLSpanAttributes.TRACELOOP_ENTITY_INPUT]) == "hello"
+    )
+    assert (
+        json.loads(span._attributes[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT])
+        == "world"
+    )
     assert span._attributes[RESPAN_SESSION_ID] == "session-1"
     assert "openinference.span.kind" not in span._attributes
 
@@ -341,13 +406,14 @@ def test_translator_maps_stt_and_tts_service_types():
     assert stt_span._attributes[RESPAN_LOG_TYPE] == LOG_TYPE_TRANSCRIPTION
     assert TLSpanAttributes.TRACELOOP_SPAN_KIND not in stt_span._attributes
     assert (
-        stt_span._attributes[TLSpanAttributes.TRACELOOP_ENTITY_INPUT] == "spoken text"
+        json.loads(stt_span._attributes[TLSpanAttributes.TRACELOOP_ENTITY_INPUT])
+        == "spoken text"
     )
     assert TLSpanAttributes.LLM_REQUEST_TYPE not in stt_span._attributes
     assert tts_span._attributes[RESPAN_LOG_TYPE] == LOG_TYPE_SPEECH
     assert TLSpanAttributes.TRACELOOP_SPAN_KIND not in tts_span._attributes
     assert (
-        tts_span._attributes[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT]
+        json.loads(tts_span._attributes[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT])
         == "spoken response"
     )
     assert TLSpanAttributes.LLM_REQUEST_TYPE not in tts_span._attributes
@@ -373,13 +439,13 @@ def test_translator_maps_tool_span():
         span._attributes[TLSpanAttributes.TRACELOOP_ENTITY_NAME]
         == "pipecat.tool.lookup"
     )
-    assert (
-        span._attributes[TLSpanAttributes.TRACELOOP_ENTITY_INPUT] == '{"city":"Tokyo"}'
-    )
-    assert (
-        span._attributes[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT]
-        == '{"weather":"sunny"}'
-    )
+    assert json.loads(span._attributes[TLSpanAttributes.TRACELOOP_ENTITY_INPUT]) == {
+        "name": "lookup",
+        "arguments": {"city": "Tokyo"},
+    }
+    assert json.loads(span._attributes[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == {
+        "weather": "sunny"
+    }
     for attr_name in _OFF_CONTRACT_ALIAS_ATTRS:
         assert attr_name not in span._attributes
     assert "tool.name" not in span._attributes

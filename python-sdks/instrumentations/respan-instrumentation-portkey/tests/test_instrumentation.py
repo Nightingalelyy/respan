@@ -1,17 +1,12 @@
+import json
 import logging
 import sys
 from types import ModuleType, SimpleNamespace
+from typing import ClassVar
 
 import pytest
 from respan_instrumentation_openinference._translator import OpenInferenceTranslator
-from respan_sdk.constants.span_attributes import (
-    RESPAN_SPAN_TOOL_CALLS,
-    RESPAN_SPAN_TOOLS,
-)
-from respan_tracing.core.tracer import RespanTracer
-
-from respan_instrumentation_portkey import PortkeyInstrumentor
-from respan_instrumentation_portkey import _instrumentation
+from respan_instrumentation_portkey import PortkeyInstrumentor, _instrumentation
 from respan_instrumentation_portkey._constants import OPENINFERENCE_PORTKEY_MODULE
 from respan_instrumentation_portkey._processor import (
     GEN_AI_COMPLETION_TOOL_CALLS_ATTR,
@@ -19,6 +14,12 @@ from respan_instrumentation_portkey._processor import (
     OTEL_SCOPE_NAME,
     PortkeySpanContractProcessor,
 )
+from respan_instrumentation_portkey._serialization import json_dumps
+from respan_sdk.constants.span_attributes import (
+    RESPAN_SPAN_TOOL_CALLS,
+    RESPAN_SPAN_TOOLS,
+)
+from respan_tracing.core.tracer import RespanTracer
 
 
 def _install_fake_modules(monkeypatch):
@@ -26,7 +27,7 @@ def _install_fake_modules(monkeypatch):
         pass
 
     class FakeOpenInferenceInstrumentor:
-        created = []
+        created: ClassVar[list] = []
 
         def __init__(self, instrumentor_class, **kwargs):
             self.instrumentor_class = instrumentor_class
@@ -64,6 +65,12 @@ def _install_fake_modules(monkeypatch):
         "OpenInferenceInstrumentor",
         FakeOpenInferenceInstrumentor,
     )
+    monkeypatch.setattr(
+        _instrumentation,
+        "install_stream_hooks",
+        lambda provider: SimpleNamespace(provider=provider),
+    )
+    monkeypatch.setattr(_instrumentation, "remove_stream_hooks", lambda hooks: None)
 
     return SimpleNamespace(
         portkey_instrumentor_class=FakePortkeyInstrumentor,
@@ -81,6 +88,12 @@ def _make_fake_tracer_provider(processors=()):
 @pytest.fixture(autouse=True)
 def reset_tracer():
     RespanTracer.reset_instance()
+    _instrumentation._REFCOUNT = 0
+    _instrumentation._CONFIG = None
+    _instrumentation._DELEGATE = None
+    _instrumentation._PROCESSOR = None
+    _instrumentation._PROVIDER = None
+    _instrumentation._STREAM_HOOKS = None
     yield
     RespanTracer.reset_instance()
 
@@ -145,6 +158,53 @@ def test_activate_is_idempotent(monkeypatch):
     instrumentor.activate()
 
     assert len(fake.openinference_instrumentor_class.created) == 1
+
+
+def test_two_instances_share_runtime_until_last_deactivate(monkeypatch):
+    fake = _install_fake_modules(monkeypatch)
+    tracer_provider = _make_fake_tracer_provider()
+    monkeypatch.setattr(
+        _instrumentation.trace,
+        "get_tracer_provider",
+        lambda: tracer_provider,
+    )
+    first = PortkeyInstrumentor()
+    second = PortkeyInstrumentor()
+
+    first.activate()
+    second.activate()
+
+    delegate = fake.openinference_instrumentor_class.created[0]
+    assert len(fake.openinference_instrumentor_class.created) == 1
+    assert _instrumentation._REFCOUNT == 2
+    first.deactivate()
+    assert delegate.is_deactivated is False
+    assert second._is_instrumented is True
+    second.deactivate()
+    assert delegate.is_deactivated is True
+    assert _instrumentation._REFCOUNT == 0
+
+
+def test_second_instance_rejects_mismatched_config(monkeypatch, caplog):
+    fake = _install_fake_modules(monkeypatch)
+    tracer_provider = _make_fake_tracer_provider()
+    monkeypatch.setattr(
+        _instrumentation.trace,
+        "get_tracer_provider",
+        lambda: tracer_provider,
+    )
+    first = PortkeyInstrumentor(trace_content=True)
+    second = PortkeyInstrumentor(trace_content=False)
+
+    first.activate()
+    with caplog.at_level(logging.WARNING):
+        second.activate()
+
+    assert len(fake.openinference_instrumentor_class.created) == 1
+    assert _instrumentation._REFCOUNT == 1
+    assert second._is_instrumented is False
+    assert "already active with different settings" in caplog.text
+    first.deactivate()
 
 
 def test_activate_cleans_up_delegate_when_activation_fails(monkeypatch, caplog):
@@ -256,9 +316,37 @@ def test_contract_processor_ignores_non_portkey_spans():
     processor = PortkeySpanContractProcessor()
     span = SimpleNamespace(
         _attributes={"model": "gpt-4o-mini"},
-        instrumentation_scope=SimpleNamespace(name="openinference.instrumentation.other"),
+        instrumentation_scope=SimpleNamespace(
+            name="openinference.instrumentation.other"
+        ),
     )
 
     processor.on_end(span)
 
     assert span._attributes == {"model": "gpt-4o-mini"}
+
+
+def test_serializer_is_bounded_redacted_and_never_calls_repr():
+    class Hostile:
+        def __repr__(self):
+            raise AssertionError("repr must not run")
+
+        def __str__(self):
+            raise AssertionError("str must not run")
+
+    encoded = json_dumps(
+        {
+            "api_key": "plain-secret",
+            "auth_token": "session-secret",
+            "prompt_tokens": 17,
+            "hostile": Hostile(),
+            "text": "😀" * 10_000,
+        }
+    )
+    parsed = json.loads(encoded)
+
+    assert len(encoded.encode("utf-8")) <= 16_000
+    assert "plain-secret" not in encoded
+    assert "session-secret" not in encoded
+    assert '"prompt_tokens":17' in encoded
+    assert "[truncated]" in encoded or parsed.get("truncated") is True

@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from collections import defaultdict
 from typing import Any
 
 from openinference.semconv.trace import (
     MessageAttributes,
-    SpanAttributes as OISpanAttributes,
     ToolCallAttributes,
+)
+from openinference.semconv.trace import (
+    SpanAttributes as OISpanAttributes,
 )
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 from opentelemetry.semconv._incubating.attributes import (
@@ -18,8 +19,12 @@ from opentelemetry.semconv._incubating.attributes import (
 )
 from opentelemetry.semconv_ai import (
     LLMRequestTypeValues,
+)
+from opentelemetry.semconv_ai import (
     SpanAttributes as TLSpanAttributes,
 )
+from opentelemetry.trace import Status, StatusCode
+from respan_sdk.constants import ERROR_MESSAGE_ATTR
 from respan_sdk.constants.llm_logging import (
     LOG_TYPE_AGENT,
     LOG_TYPE_CHAT,
@@ -30,10 +35,23 @@ from respan_sdk.constants.llm_logging import (
     LOG_TYPE_TOOL,
     LOG_TYPE_TRANSCRIPTION,
     LOG_TYPE_WORKFLOW,
+    LogMethodChoices,
 )
 from respan_sdk.constants.span_attributes import (
+    RESPAN_LOG_METHOD,
     RESPAN_LOG_TYPE,
     RESPAN_SESSION_ID,
+)
+
+from respan_instrumentation_pipecat._observer_hooks import (
+    RESPAN_PIPECAT_ERROR_STATUS,
+    RESPAN_PIPECAT_ERROR_TYPE,
+    RESPAN_PIPECAT_LLM_COMPLETED,
+)
+from respan_instrumentation_pipecat._serialization import (
+    json_dumps,
+    parse_json,
+    safe_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,20 +92,11 @@ _OI_KIND_TO_LOG_TYPE = {
 
 
 def _safe_json_str(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    return json.dumps(value, default=str)
+    return json_dumps(parse_json(value))
 
 
 def _parse_json(value: Any) -> Any:
-    if not isinstance(value, str):
-        return value
-    try:
-        return json.loads(value)
-    except (TypeError, json.JSONDecodeError):
-        return value
+    return parse_json(value)
 
 
 def _set_nested_value(target: dict[str, Any], dotted_path: str, value: Any) -> None:
@@ -167,7 +176,7 @@ def _normalize_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:
 
 
 def _tool_call_signature(tool_call: dict[str, Any]) -> str:
-    return json.dumps(tool_call, default=str, sort_keys=True, separators=(",", ":"))
+    return json_dumps(tool_call)
 
 
 def _extract_tool_calls_from_buckets(
@@ -188,8 +197,7 @@ def _extract_tool_calls_from_buckets(
             if not parts[0].isdigit() or len(parts) == 1:
                 continue
             field = parts[1]
-            if field.startswith(_OI_TOOL_CALL_PREFIX):
-                field = field[len(_OI_TOOL_CALL_PREFIX) :]
+            field = field.removeprefix(_OI_TOOL_CALL_PREFIX)
             tool_call_buckets[int(parts[0])][field] = value
 
         for tool_call_index in sorted(tool_call_buckets):
@@ -205,7 +213,9 @@ def _extract_tool_calls_from_buckets(
                 result.append(normalized)
 
         legacy_name = raw.get(MessageAttributes.MESSAGE_FUNCTION_CALL_NAME)
-        legacy_arguments = raw.get(MessageAttributes.MESSAGE_FUNCTION_CALL_ARGUMENTS_JSON)
+        legacy_arguments = raw.get(
+            MessageAttributes.MESSAGE_FUNCTION_CALL_ARGUMENTS_JSON
+        )
         if legacy_name is None and legacy_arguments is None:
             continue
         legacy_tool_call = {"type": "function", "function": {}}
@@ -234,19 +244,21 @@ def _messages_to_openllmetry(
 
         role = raw.get(MessageAttributes.MESSAGE_ROLE)
         if role:
-            attrs.setdefault(f"{target}.role", role)
+            attrs[f"{target}.role"] = safe_text(str(role))
 
         content = _extract_message_content(raw)
         if content is not None:
-            attrs.setdefault(f"{target}.content", content)
+            attrs[f"{target}.content"] = (
+                safe_text(content) if isinstance(content, str) else json_dumps(content)
+            )
 
         tool_calls = _extract_tool_calls_from_buckets({index: raw})
         if tool_calls is not None:
-            attrs.setdefault(f"{target}.tool_calls", _safe_json_str(tool_calls))
+            attrs[f"{target}.tool_calls"] = json_dumps(tool_calls)
 
         finish_reason = raw.get(_OI_MESSAGE_FINISH_REASON)
         if finish_reason:
-            attrs.setdefault(f"{target}.finish_reason", finish_reason)
+            attrs[f"{target}.finish_reason"] = safe_text(str(finish_reason))
 
 
 def _normalize_tools(value: Any) -> list[dict[str, Any]] | None:
@@ -281,6 +293,74 @@ def _pipecat_log_type(attrs: dict[str, Any], oi_kind_upper: str) -> str:
     return _OI_KIND_TO_LOG_TYPE.get(oi_kind_upper, LOG_TYPE_TASK)
 
 
+def _has_parent(span: ReadableSpan) -> bool:
+    parent = getattr(span, "parent", None)
+    return bool(parent and getattr(parent, "span_id", 0))
+
+
+def _status_message(span: ReadableSpan, attrs: dict[str, Any]) -> str | None:
+    direct = attrs.get(ERROR_MESSAGE_ATTR)
+    if isinstance(direct, str) and direct:
+        return safe_text(direct)
+    status = getattr(span, "status", None)
+    description = getattr(status, "description", None)
+    if isinstance(description, str) and description:
+        return safe_text(description)
+    for event in getattr(span, "events", ()) or ():
+        event_attrs = getattr(event, "attributes", None) or {}
+        message = event_attrs.get("exception.message")
+        if isinstance(message, str) and message:
+            return safe_text(message)
+    return None
+
+
+def _normalize_status(
+    span: ReadableSpan, attrs: dict[str, Any], *, is_chat: bool
+) -> None:
+    internal_code = attrs.pop(RESPAN_PIPECAT_ERROR_STATUS, None)
+    error_type = attrs.pop(RESPAN_PIPECAT_ERROR_TYPE, None)
+    status = getattr(span, "status", None)
+    is_error = getattr(status, "status_code", None) is StatusCode.ERROR or isinstance(
+        internal_code, int
+    )
+    if not is_error:
+        return
+    code = internal_code if isinstance(internal_code, int) else None
+    if code is None:
+        for key in ("http.response.status_code", "http.status_code", "status_code"):
+            candidate = attrs.get(key)
+            if isinstance(candidate, int) and 400 <= candidate <= 599:
+                code = candidate
+                break
+    message = _status_message(span, attrs) or "Pipecat operation failed"
+    if code is None and is_chat:
+        import re
+
+        match = re.search(
+            r"(?i)\b(?:error|status)(?:\s+code)?\s*[:=]?\s*([45]\d\d)\b",
+            message,
+        )
+        if match:
+            code = int(match.group(1))
+    code = code or 500
+    attrs[ERROR_MESSAGE_ATTR] = message
+    attrs["status_code"] = code
+    attrs["http.response.status_code"] = code
+    attrs["error.type"] = safe_text(str(error_type or "PipecatError"))
+    attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = json_dumps(
+        {"status": "error", "type": error_type or "PipecatError", "message": message}
+    )
+    try:
+        span._status = Status(StatusCode.ERROR, message)
+    except Exception:
+        logger.debug("Could not replace Pipecat span status", exc_info=True)
+    if hasattr(span, "_events"):
+        try:
+            span._events = ()
+        except Exception:
+            logger.debug("Could not sanitize Pipecat span events", exc_info=True)
+
+
 class PipecatOpenInferenceTranslator(SpanProcessor):
     """SpanProcessor for OpenInference spans emitted by Pipecat."""
 
@@ -302,59 +382,85 @@ class PipecatOpenInferenceTranslator(SpanProcessor):
         is_chat = log_type == LOG_TYPE_CHAT
         logger.debug("[Pipecat OI] Translating %s span: %s", oi_kind_upper, span.name)
 
-        attrs.setdefault(RESPAN_LOG_TYPE, log_type)
-        attrs.setdefault(
-            TLSpanAttributes.TRACELOOP_ENTITY_NAME,
-            attrs.get(OISpanAttributes.AGENT_NAME) or span.name,
+        entity_name = safe_text(
+            str(attrs.get(OISpanAttributes.AGENT_NAME) or span.name or "pipecat")
         )
-        attrs.setdefault(TLSpanAttributes.TRACELOOP_ENTITY_PATH, "")
+        attrs[RESPAN_LOG_METHOD] = LogMethodChoices.TRACING_INTEGRATION.value
+        attrs[RESPAN_LOG_TYPE] = log_type
+        attrs[TLSpanAttributes.TRACELOOP_ENTITY_NAME] = entity_name
+        attrs[TLSpanAttributes.TRACELOOP_ENTITY_PATH] = (
+            entity_name if _has_parent(span) else ""
+        )
 
         session_id = attrs.get(OISpanAttributes.SESSION_ID)
         if session_id:
-            attrs.setdefault(RESPAN_SESSION_ID, session_id)
+            attrs[RESPAN_SESSION_ID] = safe_text(str(session_id))
 
         input_value = attrs.get(OISpanAttributes.INPUT_VALUE)
         if input_value is not None:
-            attrs.setdefault(
-                TLSpanAttributes.TRACELOOP_ENTITY_INPUT,
-                _safe_json_str(input_value),
-            )
+            attrs[TLSpanAttributes.TRACELOOP_ENTITY_INPUT] = _safe_json_str(input_value)
 
         output_value = attrs.get(OISpanAttributes.OUTPUT_VALUE)
         if output_value is not None:
-            attrs.setdefault(
-                TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT,
-                _safe_json_str(output_value),
+            attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _safe_json_str(
+                output_value
             )
 
         if log_type == LOG_TYPE_TOOL:
             tool_input = attrs.get(OISpanAttributes.TOOL_PARAMETERS)
+            tool_name = attrs.get(OISpanAttributes.TOOL_NAME)
             if tool_input is not None:
-                attrs.setdefault(
-                    TLSpanAttributes.TRACELOOP_ENTITY_INPUT,
-                    _safe_json_str(tool_input),
+                attrs[TLSpanAttributes.TRACELOOP_ENTITY_INPUT] = json_dumps(
+                    {
+                        "name": tool_name or span.name,
+                        "arguments": parse_json(tool_input),
+                    }
                 )
             tool_output = attrs.get(_PIPECAT_TOOL_RESULT)
             if tool_output is not None:
-                attrs.setdefault(
-                    TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT,
-                    _safe_json_str(tool_output),
+                attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _safe_json_str(
+                    tool_output
                 )
-            tool_name = attrs.get(OISpanAttributes.TOOL_NAME)
             if tool_name:
-                attrs.setdefault(
-                    TLSpanAttributes.TRACELOOP_ENTITY_NAME,
-                    f"pipecat.tool.{tool_name}",
+                tool_entity = safe_text(f"pipecat.tool.{tool_name}")
+                attrs[TLSpanAttributes.TRACELOOP_ENTITY_NAME] = tool_entity
+                attrs[TLSpanAttributes.TRACELOOP_ENTITY_PATH] = (
+                    tool_entity if _has_parent(span) else ""
                 )
 
         if is_chat:
             self._translate_chat(attrs)
 
+        llm_completed = attrs.pop(RESPAN_PIPECAT_LLM_COMPLETED, False) is True
+        if llm_completed and not attrs.get(RESPAN_PIPECAT_ERROR_STATUS):
+            attrs["conversation.end_reason"] = "completed"
+            attrs["conversation.was_interrupted"] = False
+
+        _normalize_status(span, attrs, is_chat=is_chat)
         self._remove_raw_attrs(attrs)
+        attrs.pop(TLSpanAttributes.TRACELOOP_SPAN_KIND, None)
+        for key in list(attrs):
+            if key.startswith(("frame.", "service.")):
+                attrs.pop(key, None)
+            elif (
+                isinstance(attrs.get(key), str)
+                and key
+                not in {
+                    TLSpanAttributes.TRACELOOP_ENTITY_INPUT,
+                    TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT,
+                    TLSpanAttributes.LLM_REQUEST_FUNCTIONS,
+                    _GEN_AI_COMPLETION_TOOL_CALLS,
+                }
+                and not key.endswith(".tool_calls")
+            ):
+                attrs[key] = safe_text(
+                    attrs[key],
+                    endpoint="url" in key.lower() or "endpoint" in key.lower(),
+                )
         span._attributes = attrs
 
     def _translate_chat(self, attrs: dict[str, Any]) -> None:
-        attrs.setdefault(TLSpanAttributes.LLM_REQUEST_TYPE, LLMRequestTypeValues.CHAT.value)
+        attrs[TLSpanAttributes.LLM_REQUEST_TYPE] = LLMRequestTypeValues.CHAT.value
 
         model = attrs.get(TLSpanAttributes.LLM_REQUEST_MODEL) or attrs.get(
             OISpanAttributes.LLM_MODEL_NAME
@@ -363,36 +469,30 @@ class PipecatOpenInferenceTranslator(SpanProcessor):
         if _is_unknown_model(model) and not _is_unknown_model(settings_model):
             model = settings_model
         if not _is_unknown_model(model):
-            attrs[TLSpanAttributes.LLM_REQUEST_MODEL] = model
+            attrs[TLSpanAttributes.LLM_REQUEST_MODEL] = safe_text(str(model))
 
         provider = attrs.get(OISpanAttributes.LLM_PROVIDER)
         if provider:
-            provider_name = str(provider).lower()
-            attrs.setdefault(GenAIAttributes.GEN_AI_PROVIDER_NAME, provider_name)
-            attrs.setdefault(TLSpanAttributes.LLM_SYSTEM, provider_name)
+            provider_name = safe_text(str(provider).lower())
+            attrs[GenAIAttributes.GEN_AI_PROVIDER_NAME] = provider_name
+            attrs[TLSpanAttributes.LLM_SYSTEM] = provider_name
         system = attrs.get(OISpanAttributes.LLM_SYSTEM)
         if system:
-            attrs.setdefault(TLSpanAttributes.LLM_SYSTEM, str(system).lower())
+            attrs[TLSpanAttributes.LLM_SYSTEM] = safe_text(str(system).lower())
 
         prompt_tokens = attrs.get(OISpanAttributes.LLM_TOKEN_COUNT_PROMPT)
         if prompt_tokens is not None:
-            attrs.setdefault(TLSpanAttributes.LLM_USAGE_PROMPT_TOKENS, prompt_tokens)
-            attrs.setdefault(GenAIAttributes.GEN_AI_USAGE_INPUT_TOKENS, prompt_tokens)
+            attrs[TLSpanAttributes.LLM_USAGE_PROMPT_TOKENS] = prompt_tokens
+            attrs[GenAIAttributes.GEN_AI_USAGE_INPUT_TOKENS] = prompt_tokens
 
         completion_tokens = attrs.get(OISpanAttributes.LLM_TOKEN_COUNT_COMPLETION)
         if completion_tokens is not None:
-            attrs.setdefault(
-                TLSpanAttributes.LLM_USAGE_COMPLETION_TOKENS,
-                completion_tokens,
-            )
-            attrs.setdefault(
-                GenAIAttributes.GEN_AI_USAGE_OUTPUT_TOKENS,
-                completion_tokens,
-            )
+            attrs[TLSpanAttributes.LLM_USAGE_COMPLETION_TOKENS] = completion_tokens
+            attrs[GenAIAttributes.GEN_AI_USAGE_OUTPUT_TOKENS] = completion_tokens
 
         total_tokens = attrs.get(OISpanAttributes.LLM_TOKEN_COUNT_TOTAL)
         if total_tokens is not None:
-            attrs.setdefault(TLSpanAttributes.LLM_USAGE_TOTAL_TOKENS, total_tokens)
+            attrs[TLSpanAttributes.LLM_USAGE_TOTAL_TOKENS] = total_tokens
 
         _messages_to_openllmetry(
             attrs,
@@ -409,24 +509,24 @@ class PipecatOpenInferenceTranslator(SpanProcessor):
             _collect_message_buckets(attrs, _OI_OUTPUT_MESSAGES_PREFIX)
         )
         if tool_calls is not None:
-            attrs.setdefault(_GEN_AI_COMPLETION_TOOL_CALLS, _safe_json_str(tool_calls))
+            attrs[_GEN_AI_COMPLETION_TOOL_CALLS] = json_dumps(tool_calls)
 
         tools = _normalize_tools(attrs.get(OISpanAttributes.LLM_TOOLS))
         if tools is None:
             tools = _normalize_tools(attrs.get(_PIPECAT_TOOLS_DEFINITIONS))
         if tools is not None:
-            tools_json = _safe_json_str(tools)
-            attrs.setdefault(TLSpanAttributes.LLM_REQUEST_FUNCTIONS, tools_json)
+            attrs[TLSpanAttributes.LLM_REQUEST_FUNCTIONS] = json_dumps(tools)
 
         invocation_parameters = _parse_json(
             attrs.get(OISpanAttributes.LLM_INVOCATION_PARAMETERS)
         )
         if isinstance(invocation_parameters, dict):
             if invocation_parameters.get("model"):
-                attrs.setdefault(
-                    TLSpanAttributes.LLM_REQUEST_MODEL,
-                    invocation_parameters["model"],
+                attrs[TLSpanAttributes.LLM_REQUEST_MODEL] = safe_text(
+                    str(invocation_parameters["model"])
                 )
+            if invocation_parameters.get("stream") is True:
+                attrs[TLSpanAttributes.LLM_IS_STREAMING] = True
 
     @staticmethod
     def _remove_raw_attrs(attrs: dict[str, Any]) -> None:
@@ -444,6 +544,7 @@ class PipecatOpenInferenceTranslator(SpanProcessor):
             OISpanAttributes.LLM_TOKEN_COUNT_COMPLETION,
             OISpanAttributes.LLM_TOKEN_COUNT_TOTAL,
             OISpanAttributes.LLM_TOOLS,
+            OISpanAttributes.METADATA,
             OISpanAttributes.AGENT_NAME,
             OISpanAttributes.SESSION_ID,
             OISpanAttributes.TOOL_NAME,
@@ -451,6 +552,15 @@ class PipecatOpenInferenceTranslator(SpanProcessor):
             OISpanAttributes.TOOL_DESCRIPTION,
             _PIPECAT_TOOLS_DEFINITIONS,
             _PIPECAT_TOOL_RESULT,
+            "tools",
+            "tool_calls",
+            "model",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_request_tokens",
+            "span_tools",
+            "has_tool_calls",
+            "parallel_tool_calls",
         }
         prefixes_to_remove = (
             _OI_INPUT_MESSAGES_PREFIX,
