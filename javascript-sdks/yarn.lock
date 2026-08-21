@@ -4900,6 +4900,7 @@ __metadata:
     "@opentelemetry/api": "npm:^1.9.0"
     "@opentelemetry/core": "npm:^2.10.0"
     "@opentelemetry/sdk-trace-base": "npm:^2.10.0"
+    "@opentelemetry/semantic-conventions": "npm:^1.43.0"
     "@respan/respan-sdk": "npm:^1.1.7"
     "@respan/tracing": "npm:^1.1.4"
     "@traceloop/ai-semantic-conventions": "npm:^0.13.0"

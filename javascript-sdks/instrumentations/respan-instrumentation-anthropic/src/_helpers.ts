@@ -8,7 +8,11 @@ import {
   ToolCallSchema,
 } from "@respan/respan-sdk";
 
-export const PACKAGE_VERSION = "1.1.1";
+const packageManifest = createRequire(import.meta.url)("../package.json") as {
+  version?: string;
+};
+
+export const PACKAGE_VERSION = packageManifest.version ?? "unknown";
 export const INSTRUMENTATION_LIBRARY_NAME = "@respan/instrumentation-anthropic";
 export const ANTHROPIC_CHAT_ENTITY_NAME = "anthropic.chat";
 export const STREAM_INSTRUMENTED = Symbol("respan.anthropic.stream.instrumented");
@@ -82,6 +86,28 @@ export function stringifyStructured(value: unknown): string {
     return serialized;
   }
   return safeJson(serialized);
+}
+
+export function resolveErrorStatusCode(error: unknown): number {
+  if (!error || typeof error !== "object") return 500;
+
+  const candidate = error as Record<string, any>;
+  const values = [
+    candidate.status,
+    candidate.statusCode,
+    candidate.response?.status,
+    candidate.cause?.status,
+    candidate.cause?.statusCode,
+  ];
+
+  for (const value of values) {
+    const statusCode = typeof value === "number" ? value : Number(value);
+    if (Number.isInteger(statusCode) && statusCode >= 400 && statusCode <= 599) {
+      return statusCode;
+    }
+  }
+
+  return 500;
 }
 
 export interface ToolExecution {

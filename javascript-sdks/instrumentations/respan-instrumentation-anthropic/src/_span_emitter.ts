@@ -1,6 +1,14 @@
 import { context, trace, TraceFlags } from "@opentelemetry/api";
 import { hrTime } from "@opentelemetry/core";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
+import {
+  ATTR_GEN_AI_COMPLETION,
+  ATTR_GEN_AI_PROMPT,
+  ATTR_GEN_AI_USAGE_COMPLETION_TOKENS,
+  ATTR_GEN_AI_USAGE_INPUT_TOKENS,
+  ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
+  ATTR_GEN_AI_USAGE_PROMPT_TOKENS,
+} from "@opentelemetry/semantic-conventions/incubating";
 import { buildReadableSpan, injectSpan } from "@respan/tracing";
 import { RespanLogType, RespanSpanAttributes } from "@respan/respan-sdk";
 import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
@@ -9,22 +17,29 @@ import {
   INSTRUMENTATION_LIBRARY_NAME,
   PACKAGE_VERSION,
   extractToolCalls,
-  extractToolCallsFromInputMessages,
   extractToolExecutions,
   formatInputMessages,
   formatOutputMessage,
   formatTools,
-  mergeToolCalls,
+  resolveErrorStatusCode,
   safeJson,
   stringifyStructured,
   type ToolExecution,
 } from "./_helpers.js";
+
+const COMPLETION_ZERO = `${ATTR_GEN_AI_COMPLETION}.0`;
+const COMPLETION_TOOL_CALLS = `${COMPLETION_ZERO}.tool_calls`;
+const LLM_IS_STREAMING =
+  (SpanAttributes as unknown as Record<string, string>).LLM_IS_STREAMING ??
+  "llm.is_streaming";
+const STATUS_CODE_ATTR = "status_code";
 
 function buildInstrumentedReadableSpan(opts: {
   name: string;
   startTime: [number, number];
   endTime: [number, number];
   attributes: Record<string, any>;
+  statusCode?: number;
   errorMessage?: string;
 }): ReadableSpan {
   const activeSpanContext = trace.getSpan(context.active())?.spanContext();
@@ -35,8 +50,8 @@ function buildInstrumentedReadableSpan(opts: {
     startTimeHr: opts.startTime,
     endTimeHr: opts.endTime,
     attributes: opts.attributes,
+    statusCode: opts.statusCode,
     errorMessage: opts.errorMessage,
-    mergePropagated: false,
   }) as ReadableSpan & {
     instrumentationScope?: { name: string; version?: string };
     spanContext: () => ReturnType<ReadableSpan["spanContext"]>;
@@ -57,22 +72,18 @@ function buildInstrumentedReadableSpan(opts: {
   return mutableSpan;
 }
 
-function setStructuredAttr(
-  attrs: Record<string, any>,
-  key: string,
-  value: unknown,
-): void {
-  attrs[key] = value;
-}
-
-function setStructuredCompatibilityAttrs(
-  attrs: Record<string, any>,
-  key: RespanSpanAttributes.RESPAN_SPAN_TOOLS | RespanSpanAttributes.RESPAN_SPAN_TOOL_CALLS,
-  legacyKey: "tools" | "tool_calls",
-  value: unknown,
-): void {
-  setStructuredAttr(attrs, key, value);
-  setStructuredAttr(attrs, legacyKey, value);
+function setPromptAttrs(attrs: Record<string, any>, messages: Record<string, any>[]): void {
+  messages.forEach((message, index) => {
+    const prefix = `${ATTR_GEN_AI_PROMPT}.${index}`;
+    attrs[`${prefix}.role`] = message.role;
+    attrs[`${prefix}.content`] = stringifyStructured(message.content ?? "");
+    if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+      attrs[`${prefix}.tool_calls`] = safeJson(message.tool_calls);
+    }
+    if (message.tool_call_id) {
+      attrs[`${prefix}.tool_call_id`] = String(message.tool_call_id);
+    }
+  });
 }
 
 function buildBaseChatAttrs(kwargs: Record<string, any>, model?: string): Record<string, any> {
@@ -83,6 +94,7 @@ function buildBaseChatAttrs(kwargs: Record<string, any>, model?: string): Record
     [RespanSpanAttributes.RESPAN_LOG_TYPE]: RespanLogType.CHAT,
     [RespanSpanAttributes.LLM_REQUEST_TYPE]: RespanLogType.CHAT,
     [RespanSpanAttributes.LLM_SYSTEM]: "anthropic",
+    [LLM_IS_STREAMING]: kwargs.stream === true,
   };
 
   const resolvedModel = model ?? kwargs.model;
@@ -90,18 +102,13 @@ function buildBaseChatAttrs(kwargs: Record<string, any>, model?: string): Record
     attrs[RespanSpanAttributes.GEN_AI_REQUEST_MODEL] = resolvedModel;
   }
 
-  attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson(
-    formatInputMessages(kwargs.messages ?? [], kwargs.system),
-  );
+  const inputMessages = formatInputMessages(kwargs.messages ?? [], kwargs.system);
+  attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson(inputMessages);
+  setPromptAttrs(attrs, inputMessages);
 
   const tools = formatTools(kwargs.tools);
   if (tools) {
-    setStructuredCompatibilityAttrs(
-      attrs,
-      RespanSpanAttributes.RESPAN_SPAN_TOOLS,
-      "tools",
-      tools,
-    );
+    attrs[SpanAttributes.LLM_REQUEST_FUNCTIONS] = safeJson(tools);
   }
 
   return attrs;
@@ -109,45 +116,33 @@ function buildBaseChatAttrs(kwargs: Record<string, any>, model?: string): Record
 
 function buildSuccessAttrs(kwargs: Record<string, any>, message: any): Record<string, any> {
   const attrs = buildBaseChatAttrs(kwargs, message?.model ?? kwargs.model);
-  attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson([formatOutputMessage(message)]);
+  const outputMessage = formatOutputMessage(message);
+  attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson([outputMessage]);
+  attrs[`${COMPLETION_ZERO}.role`] = outputMessage.role ?? "assistant";
+  attrs[`${COMPLETION_ZERO}.content`] = stringifyStructured(
+    outputMessage.content ?? "",
+  );
 
   if (message?.usage) {
-    attrs[RespanSpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS] =
-      message.usage.input_tokens ?? 0;
-    attrs[RespanSpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS] =
-      message.usage.output_tokens ?? 0;
+    const inputTokens = message.usage.input_tokens ?? 0;
+    const outputTokens = message.usage.output_tokens ?? 0;
+    attrs[ATTR_GEN_AI_USAGE_INPUT_TOKENS] = inputTokens;
+    attrs[ATTR_GEN_AI_USAGE_OUTPUT_TOKENS] = outputTokens;
+    attrs[ATTR_GEN_AI_USAGE_PROMPT_TOKENS] = inputTokens;
+    attrs[ATTR_GEN_AI_USAGE_COMPLETION_TOKENS] = outputTokens;
+    attrs[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] = inputTokens + outputTokens;
   }
 
-  const toolCalls = mergeToolCalls(
-    extractToolCalls(message),
-    extractToolCallsFromInputMessages(kwargs.messages),
-  );
+  const toolCalls = extractToolCalls(message);
   if (toolCalls) {
-    setStructuredCompatibilityAttrs(
-      attrs,
-      RespanSpanAttributes.RESPAN_SPAN_TOOL_CALLS,
-      "tool_calls",
-      toolCalls,
-    );
+    attrs[COMPLETION_TOOL_CALLS] = safeJson(toolCalls);
   }
 
   return attrs;
 }
 
 function buildErrorAttrs(kwargs: Record<string, any>): Record<string, any> {
-  const attrs = buildBaseChatAttrs(kwargs);
-
-  const toolCalls = extractToolCallsFromInputMessages(kwargs.messages);
-  if (toolCalls) {
-    setStructuredCompatibilityAttrs(
-      attrs,
-      RespanSpanAttributes.RESPAN_SPAN_TOOL_CALLS,
-      "tool_calls",
-      toolCalls,
-    );
-  }
-
-  return attrs;
+  return buildBaseChatAttrs(kwargs);
 }
 
 function emitSpan(
@@ -155,6 +150,7 @@ function emitSpan(
   attrs: Record<string, any>,
   startTime: [number, number],
   errorMessage?: string,
+  statusCode?: number,
 ): void {
   try {
     const span = buildInstrumentedReadableSpan({
@@ -162,6 +158,7 @@ function emitSpan(
       startTime,
       endTime: hrTime(),
       attributes: attrs,
+      statusCode,
       errorMessage,
     });
     injectSpan(span);
@@ -193,9 +190,11 @@ export function emitErrorSpan(
 ): void {
   try {
     const errorMessage = String(err);
+    const statusCode = resolveErrorStatusCode(err);
     const attrs = buildErrorAttrs(kwargs);
     attrs["error.message"] = errorMessage;
-    emitSpan(ANTHROPIC_CHAT_ENTITY_NAME, attrs, startTime, errorMessage);
+    attrs[STATUS_CODE_ATTR] = statusCode;
+    emitSpan(ANTHROPIC_CHAT_ENTITY_NAME, attrs, startTime, errorMessage, statusCode);
   } catch {
     // Never break the application.
   }
@@ -221,6 +220,7 @@ export function emitToolSpan(toolExecution: ToolExecution): void {
   }
   if (toolExecution.isError) {
     attrs["error.message"] = stringifyStructured(toolExecution.output);
+    attrs[STATUS_CODE_ATTR] = 500;
   }
 
   emitSpan(
@@ -228,6 +228,7 @@ export function emitToolSpan(toolExecution: ToolExecution): void {
     attrs,
     startTime,
     toolExecution.isError ? stringifyStructured(toolExecution.output) : undefined,
+    toolExecution.isError ? 500 : undefined,
   );
 }
 
