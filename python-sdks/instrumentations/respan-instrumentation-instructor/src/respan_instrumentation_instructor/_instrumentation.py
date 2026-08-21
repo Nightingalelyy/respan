@@ -21,9 +21,10 @@ from typing import (
 )
 
 from opentelemetry import trace
-from opentelemetry.semconv_ai import LLMRequestTypeValues
-from opentelemetry.semconv_ai import SpanAttributes
-
+from opentelemetry.semconv._incubating.attributes import (
+    gen_ai_attributes as GenAIAttributes,
+)
+from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
 from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT
 from respan_sdk.constants.span_attributes import (
     GEN_AI_SYSTEM,
@@ -166,7 +167,8 @@ def _typed_dict_json_schema(response_model: Any) -> dict[str, Any]:
         annotations = getattr(response_model, "__annotations__", {})
     required_keys = getattr(response_model, "__required_keys__", frozenset())
     properties = {
-        field_name: _json_schema_for_annotation(field_type) | {
+        field_name: _json_schema_for_annotation(field_type)
+        | {
             "title": field_name.replace("_", " ").title(),
         }
         for field_name, field_type in annotations.items()
@@ -209,7 +211,9 @@ def _response_model_function_schema(response_model: Any) -> list[dict[str, Any]]
 
 
 def _request_function_schema(arguments: Mapping[str, Any]) -> Any | None:
-    response_model_schema = _response_model_function_schema(arguments.get("response_model"))
+    response_model_schema = _response_model_function_schema(
+        arguments.get("response_model")
+    )
     if response_model_schema is not None:
         return response_model_schema
 
@@ -410,9 +414,9 @@ def _build_span_attributes(
                     role
                 )
             if content is not None:
-                attributes[
-                    f"{SpanAttributes.LLM_PROMPTS}.{message_index}.content"
-                ] = _message_content_to_string(content)
+                attributes[f"{SpanAttributes.LLM_PROMPTS}.{message_index}.content"] = (
+                    _message_content_to_string(content)
+                )
             if tool_calls is not None:
                 attributes[
                     f"{SpanAttributes.LLM_PROMPTS}.{message_index}.tool_calls"
@@ -427,8 +431,152 @@ def _build_span_attributes(
     return attributes
 
 
-def _set_success_attributes(span: Any, result: Any) -> None:
-    output = _serialize_value_to_string(result)
+def _object_value(value: Any, key: str) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(key)
+    return getattr(value, key, None)
+
+
+def _looks_like_raw_response(value: Any) -> bool:
+    choices = _object_value(value, "choices")
+    return isinstance(choices, (list, tuple)) and bool(choices)
+
+
+def _raw_response_from_result(
+    result: Any,
+    captured_responses: list[Any] | None = None,
+) -> Any | None:
+    if captured_responses:
+        return captured_responses[-1]
+
+    if (
+        isinstance(result, tuple)
+        and len(result) > 1
+        and _looks_like_raw_response(result[1])
+    ):
+        return result[1]
+
+    raw_response = getattr(result, "_raw_response", None)
+    if raw_response is not None:
+        return raw_response
+
+    get_raw_response = getattr(result, "get_raw_response", None)
+    if callable(get_raw_response):
+        return get_raw_response()
+
+    if isinstance(result, (list, tuple)):
+        for item in reversed(result):
+            raw_response = getattr(item, "_raw_response", None)
+            if raw_response is not None:
+                return raw_response
+
+    return None
+
+
+def _parsed_result(result: Any, raw_response: Any | None = None) -> Any:
+    if (
+        isinstance(result, tuple)
+        and len(result) == 2
+        and (result[1] is raw_response or _looks_like_raw_response(result[1]))
+    ):
+        return result[0]
+    return result
+
+
+def _normalized_tool_calls(raw_response: Any) -> list[dict[str, Any]]:
+    choices = _object_value(raw_response, "choices")
+    if not isinstance(choices, (list, tuple)) or not choices:
+        return []
+
+    message = _object_value(choices[0], "message")
+    raw_tool_calls = _object_value(message, "tool_calls")
+    if not isinstance(raw_tool_calls, (list, tuple)):
+        return []
+
+    tool_calls: list[dict[str, Any]] = []
+    for raw_tool_call in raw_tool_calls:
+        function = _object_value(raw_tool_call, "function")
+        name = _object_value(function, "name")
+        arguments = _object_value(function, "arguments")
+        if name is None:
+            continue
+        tool_call: dict[str, Any] = {
+            "type": _object_value(raw_tool_call, "type") or "function",
+            "function": {
+                "name": str(name),
+                "arguments": "" if arguments is None else str(arguments),
+            },
+        }
+        tool_call_id = _object_value(raw_tool_call, "id")
+        if tool_call_id is not None:
+            tool_call["id"] = str(tool_call_id)
+        tool_calls.append(tool_call)
+    return tool_calls
+
+
+def _set_raw_response_attributes(span: Any, raw_response: Any) -> None:
+    if raw_response is None:
+        return
+
+    response_model = _object_value(raw_response, "model")
+    if response_model:
+        span.set_attribute(SpanAttributes.LLM_RESPONSE_MODEL, str(response_model))
+
+    choices = _object_value(raw_response, "choices")
+    if isinstance(choices, (list, tuple)) and choices:
+        finish_reason = _object_value(choices[0], "finish_reason")
+        if finish_reason:
+            span.set_attribute(
+                SpanAttributes.GEN_AI_RESPONSE_FINISH_REASON,
+                str(finish_reason),
+            )
+
+    tool_calls = _normalized_tool_calls(raw_response)
+    if tool_calls:
+        span.set_attribute(
+            f"{SpanAttributes.LLM_COMPLETIONS}.0.tool_calls",
+            _serialize_value_to_string(tool_calls),
+        )
+
+    usage = _object_value(raw_response, "usage")
+    if usage is None:
+        return
+
+    input_tokens = _object_value(usage, "input_tokens")
+    if input_tokens is None:
+        input_tokens = _object_value(usage, "prompt_tokens")
+    output_tokens = _object_value(usage, "output_tokens")
+    if output_tokens is None:
+        output_tokens = _object_value(usage, "completion_tokens")
+    total_tokens = _object_value(usage, "total_tokens")
+    if total_tokens is None and input_tokens is not None and output_tokens is not None:
+        total_tokens = int(input_tokens) + int(output_tokens)
+
+    if input_tokens is not None:
+        span.set_attribute(GenAIAttributes.GEN_AI_USAGE_INPUT_TOKENS, int(input_tokens))
+        span.set_attribute(SpanAttributes.LLM_USAGE_PROMPT_TOKENS, int(input_tokens))
+    if output_tokens is not None:
+        span.set_attribute(
+            GenAIAttributes.GEN_AI_USAGE_OUTPUT_TOKENS,
+            int(output_tokens),
+        )
+        span.set_attribute(
+            SpanAttributes.LLM_USAGE_COMPLETION_TOKENS,
+            int(output_tokens),
+        )
+    if total_tokens is not None:
+        span.set_attribute(SpanAttributes.LLM_USAGE_TOTAL_TOKENS, int(total_tokens))
+
+
+def _set_success_attributes(
+    span: Any,
+    result: Any,
+    raw_response: Any | None = None,
+) -> None:
+    if raw_response is None:
+        raw_response = _raw_response_from_result(result)
+    parsed_result = _parsed_result(result, raw_response=raw_response)
+    output = _serialize_value_to_string(parsed_result)
     span.set_attribute(SpanAttributes.TRACELOOP_ENTITY_OUTPUT, output)
     span.set_attribute(
         f"{SpanAttributes.LLM_COMPLETIONS}.0.role",
@@ -438,7 +586,29 @@ def _set_success_attributes(span: Any, result: Any) -> None:
         f"{SpanAttributes.LLM_COMPLETIONS}.0.content",
         output,
     )
+    _set_raw_response_attributes(span=span, raw_response=raw_response)
     span.set_status(trace.StatusCode.OK)
+
+
+def _with_completion_response_hook(
+    kwargs: Mapping[str, Any],
+    captured_responses: list[Any],
+) -> dict[str, Any]:
+    call_kwargs = dict(kwargs)
+    try:
+        hooks_module = importlib.import_module("instructor.core.hooks")
+        hooks = call_kwargs.get("hooks")
+        if hooks is None:
+            hooks = hooks_module.Hooks()
+        elif hasattr(hooks, "copy"):
+            hooks = hooks.copy()
+        else:
+            return call_kwargs
+        hooks.on("completion:response", captured_responses.append)
+        call_kwargs["hooks"] = hooks
+    except (AttributeError, ImportError, TypeError):
+        return call_kwargs
+    return call_kwargs
 
 
 def _set_error_status(span: Any, exception: Exception) -> None:
@@ -450,6 +620,7 @@ def _iter_with_span(
     iterator: Iterator[Any],
     span: Any,
     span_context: Any,
+    captured_responses: list[Any] | None = None,
 ) -> Iterator[Any]:
     output_items: list[Any] = []
     span_closed = False
@@ -463,12 +634,26 @@ def _iter_with_span(
         span_closed = True
         raise
     else:
-        _set_success_attributes(span=span, result=output_items)
+        _set_success_attributes(
+            span=span,
+            result=output_items,
+            raw_response=_raw_response_from_result(
+                output_items,
+                captured_responses=captured_responses,
+            ),
+        )
         span_context.__exit__(None, None, None)
         span_closed = True
     finally:
         if not span_closed:
-            _set_success_attributes(span=span, result=output_items)
+            _set_success_attributes(
+                span=span,
+                result=output_items,
+                raw_response=_raw_response_from_result(
+                    output_items,
+                    captured_responses=captured_responses,
+                ),
+            )
             span_context.__exit__(None, None, None)
 
 
@@ -476,6 +661,7 @@ async def _async_iter_with_span(
     async_iterator: AsyncIterator[Any],
     span: Any,
     span_context: Any,
+    captured_responses: list[Any] | None = None,
 ) -> AsyncIterator[Any]:
     output_items: list[Any] = []
     span_closed = False
@@ -489,12 +675,26 @@ async def _async_iter_with_span(
         span_closed = True
         raise
     else:
-        _set_success_attributes(span=span, result=output_items)
+        _set_success_attributes(
+            span=span,
+            result=output_items,
+            raw_response=_raw_response_from_result(
+                output_items,
+                captured_responses=captured_responses,
+            ),
+        )
         span_context.__exit__(None, None, None)
         span_closed = True
     finally:
         if not span_closed:
-            _set_success_attributes(span=span, result=output_items)
+            _set_success_attributes(
+                span=span,
+                result=output_items,
+                raw_response=_raw_response_from_result(
+                    output_items,
+                    captured_responses=captured_responses,
+                ),
+            )
             span_context.__exit__(None, None, None)
 
 
@@ -571,8 +771,13 @@ class InstructorInstrumentor:
                     mode=effective_mode,
                 )
                 span = span_context.__enter__()
+                captured_responses: list[Any] = []
+                call_kwargs = _with_completion_response_hook(
+                    kwargs=kwargs,
+                    captured_responses=captured_responses,
+                )
                 try:
-                    result = await original_create(*args, **kwargs)
+                    result = await original_create(*args, **call_kwargs)
                 except Exception as exception:
                     _set_error_status(span=span, exception=exception)
                     span_context.__exit__(
@@ -582,8 +787,20 @@ class InstructorInstrumentor:
                     )
                     raise
                 if isinstance(result, AsyncIterator):
-                    return _async_iter_with_span(result, span, span_context)
-                _set_success_attributes(span=span, result=result)
+                    return _async_iter_with_span(
+                        result,
+                        span,
+                        span_context,
+                        captured_responses=captured_responses,
+                    )
+                _set_success_attributes(
+                    span=span,
+                    result=result,
+                    raw_response=_raw_response_from_result(
+                        result,
+                        captured_responses=captured_responses,
+                    ),
+                )
                 span_context.__exit__(None, None, None)
                 return result
 
@@ -610,8 +827,13 @@ class InstructorInstrumentor:
                 mode=effective_mode,
             )
             span = span_context.__enter__()
+            captured_responses: list[Any] = []
+            call_kwargs = _with_completion_response_hook(
+                kwargs=kwargs,
+                captured_responses=captured_responses,
+            )
             try:
-                result = original_create(*args, **kwargs)
+                result = original_create(*args, **call_kwargs)
             except Exception as exception:
                 _set_error_status(span=span, exception=exception)
                 span_context.__exit__(
@@ -621,8 +843,20 @@ class InstructorInstrumentor:
                 )
                 raise
             if isinstance(result, Iterator):
-                return _iter_with_span(result, span, span_context)
-            _set_success_attributes(span=span, result=result)
+                return _iter_with_span(
+                    result,
+                    span,
+                    span_context,
+                    captured_responses=captured_responses,
+                )
+            _set_success_attributes(
+                span=span,
+                result=result,
+                raw_response=_raw_response_from_result(
+                    result,
+                    captured_responses=captured_responses,
+                ),
+            )
             span_context.__exit__(None, None, None)
             return result
 
@@ -762,6 +996,10 @@ class InstructorInstrumentor:
                     result = original_method(instance, *args, **kwargs)
                 finally:
                     INSTRUCTOR_CALL_CONTEXT.reset(token)
+                if isinstance(result, AsyncIterator) and operation_name.endswith(
+                    "create_iterable"
+                ):
+                    return _async_iter_with_call_context(result, context)
                 if isinstance(result, Iterator) and operation_name.endswith(
                     "create_iterable"
                 ):
@@ -776,19 +1014,52 @@ class InstructorInstrumentor:
             )
             if arguments.get("model") is None:
                 arguments["model"] = getattr(instance, "default_model", None)
-            with self._start_span(
+            span_context = self._start_span(
                 operation_name=operation_name,
                 arguments=arguments,
                 provider=_extract_provider_from_instance(instance) or _OPENAI_PROVIDER,
                 mode=getattr(instance, "mode", None),
-            ) as span:
-                try:
-                    result = original_method(instance, *args, **kwargs)
-                except Exception as exception:
-                    _set_error_status(span=span, exception=exception)
-                    raise
-                _set_success_attributes(span=span, result=result)
-                return result
+            )
+            span = span_context.__enter__()
+            captured_responses: list[Any] = []
+            call_kwargs = _with_completion_response_hook(
+                kwargs=kwargs,
+                captured_responses=captured_responses,
+            )
+            try:
+                result = original_method(instance, *args, **call_kwargs)
+            except Exception as exception:
+                _set_error_status(span=span, exception=exception)
+                span_context.__exit__(
+                    type(exception),
+                    exception,
+                    exception.__traceback__,
+                )
+                raise
+            if isinstance(result, AsyncIterator):
+                return _async_iter_with_span(
+                    result,
+                    span,
+                    span_context,
+                    captured_responses=captured_responses,
+                )
+            if isinstance(result, Iterator):
+                return _iter_with_span(
+                    result,
+                    span,
+                    span_context,
+                    captured_responses=captured_responses,
+                )
+            _set_success_attributes(
+                span=span,
+                result=result,
+                raw_response=_raw_response_from_result(
+                    result,
+                    captured_responses=captured_responses,
+                ),
+            )
+            span_context.__exit__(None, None, None)
+            return result
 
         return _mark_wrapped(wrapped_method)
 

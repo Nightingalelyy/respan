@@ -1,3 +1,4 @@
+from dataclasses import asdict, is_dataclass
 from datetime import date, datetime
 from typing import Any, Dict, List
 
@@ -7,7 +8,7 @@ def json_serial(obj):
 
     if isinstance(obj, (datetime, date)):
         return obj.isoformat()
-    raise TypeError ("Type %s not serializable" % type(obj))
+    raise TypeError("Type %s not serializable" % type(obj))
 
 
 def serialize_value(value: Any) -> Any:
@@ -18,8 +19,19 @@ def serialize_value(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)):
         return value
 
-    if isinstance(value, datetime):
+    if isinstance(value, (datetime, date)):
         return value.isoformat()
+
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return serialize_value(value=model_dump())
+
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        return serialize_value(value=tolist())
+
+    if is_dataclass(value) and not isinstance(value, type):
+        return serialize_value(value=asdict(value))
 
     if isinstance(value, dict):
         normalized: Dict[str, Any] = {}
