@@ -281,11 +281,13 @@ def _stringify_structured_canonical_values(attrs: dict[str, Any]) -> None:
         attrs[_FUNCTIONS_ATTR] = _safe_json_str(attrs[_FUNCTIONS_ATTR])
 
     for key, value in list(attrs.items()):
-        if not (key.startswith(_PROMPT_PREFIX) or key.startswith(_COMPLETION_PREFIX)):
+        if not key.startswith((_PROMPT_PREFIX, _COMPLETION_PREFIX)):
             continue
-        if key.endswith(f".{_TOOL_CALL_PATH}"):
-            attrs[key] = _safe_json_str(value)
-        elif key.endswith(".content") and isinstance(value, (dict, list)):
+        if (
+            key.endswith(f".{_TOOL_CALL_PATH}")
+            or key.endswith(".content")
+            and isinstance(value, (dict, list))
+        ):
             attrs[key] = _safe_json_str(value)
 
 
@@ -294,12 +296,17 @@ def _normalize_cohere_attrs(
     attrs: dict[str, Any],
 ) -> None:
     request_type = _request_type_from_span(span, attrs)
-    if request_type:
-        attrs[SpanAttributes.LLM_REQUEST_TYPE] = request_type
-
     log_type = _log_type_for_request_type(request_type)
     if log_type is not None:
         attrs.setdefault(RESPAN_LOG_TYPE, log_type)
+
+    if request_type in {
+        LLMRequestTypeValues.CHAT.value,
+        LLMRequestTypeValues.COMPLETION.value,
+    }:
+        attrs[SpanAttributes.LLM_REQUEST_TYPE] = LLMRequestTypeValues.CHAT.value
+    elif request_type:
+        attrs[SpanAttributes.LLM_REQUEST_TYPE] = request_type
 
     attrs[SpanAttributes.LLM_SYSTEM] = "cohere"
     _set_token_aliases(attrs)

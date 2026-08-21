@@ -2,15 +2,14 @@ import json
 import logging
 import sys
 from types import ModuleType, SimpleNamespace
+from typing import ClassVar
 
 import pytest
 from opentelemetry.semconv._incubating.attributes import (
     gen_ai_attributes as GenAIAttributes,
 )
 from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
-
-from respan_instrumentation_cohere import CohereInstrumentor
-from respan_instrumentation_cohere import _instrumentation
+from respan_instrumentation_cohere import CohereInstrumentor, _instrumentation
 from respan_instrumentation_cohere._instrumentation import OTEL_COHERE_MODULE
 from respan_instrumentation_cohere._processor import (
     COHERE_SCOPE_NAME,
@@ -49,7 +48,7 @@ class FakeSpan:
 
 def _install_fake_modules(monkeypatch):
     class FakeOTELCohereInstrumentor:
-        created = []
+        created: ClassVar[list["FakeOTELCohereInstrumentor"]] = []
 
         def __init__(self, **kwargs):
             self.constructor_kwargs = kwargs
@@ -365,6 +364,104 @@ def test_processor_maps_embedding_and_rerank_log_types():
 
     assert embedding_span._attributes[RESPAN_LOG_TYPE] == "embedding"
     assert rerank_span._attributes[RESPAN_LOG_TYPE] == "task"
+
+
+def test_processor_maps_text_completion_to_text_log_with_chat_request_type():
+    span = FakeSpan(
+        {
+            SpanAttributes.LLM_SYSTEM: "Cohere",
+            SpanAttributes.LLM_REQUEST_TYPE: LLMRequestTypeValues.COMPLETION.value,
+        },
+        name="cohere.completion",
+    )
+
+    CohereSpanProcessor().on_end(span)
+
+    assert span._attributes[RESPAN_LOG_TYPE] == "text"
+    assert (
+        span._attributes[SpanAttributes.LLM_REQUEST_TYPE]
+        == LLMRequestTypeValues.CHAT.value
+    )
+
+
+def test_rerank_content_patch_preserves_structured_input_and_output():
+    calls = []
+
+    def original_input(span, request_type, kwargs):
+        calls.append(("input", request_type, kwargs))
+
+    def original_response(span, request_type, response):
+        calls.append(("response", request_type, response))
+
+    module = SimpleNamespace(
+        set_input_content_attributes=original_input,
+        set_response_content_attributes=original_response,
+    )
+
+    class RecordingSpan:
+        def __init__(self):
+            self.attributes = {}
+
+        def is_recording(self):
+            return True
+
+        def set_attribute(self, key, value):
+            self.attributes[key] = value
+
+    span = RecordingSpan()
+    response = SimpleNamespace(
+        id="rerank-1",
+        results=[
+            SimpleNamespace(
+                index=1,
+                relevance_score=0.97,
+                document=SimpleNamespace(text="second document"),
+            )
+        ],
+    )
+
+    assert _instrumentation._install_content_patch(module) is True
+    try:
+        module.set_input_content_attributes(
+            span,
+            LLMRequestTypeValues.RERANK,
+            {
+                "model": "rerank-v3.5",
+                "query": "best document",
+                "documents": ["first document", "second document"],
+                "top_n": 1,
+            },
+        )
+        module.set_response_content_attributes(
+            span,
+            LLMRequestTypeValues.RERANK,
+            response,
+        )
+
+        assert json.loads(span.attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT]) == {
+            "model": "rerank-v3.5",
+            "query": "best document",
+            "documents": ["first document", "second document"],
+            "top_n": 1,
+        }
+        assert json.loads(span.attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == {
+            "id": "rerank-1",
+            "results": [
+                {
+                    "index": 1,
+                    "relevance_score": 0.97,
+                    "document": {"text": "second document"},
+                }
+            ],
+        }
+        assert span.attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "rerank"
+        assert span.attributes[SpanAttributes.TRACELOOP_ENTITY_PATH] == "rerank"
+        assert [call[0] for call in calls] == ["input", "response"]
+    finally:
+        _instrumentation._remove_content_patch()
+
+    assert module.set_input_content_attributes is original_input
+    assert module.set_response_content_attributes is original_response
 
 
 def test_processor_ignores_non_cohere_spans():

@@ -786,11 +786,14 @@ def test_enrich_claude_agent_sdk_span_maps_agent_fields():
     assert span._attributes[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] == 19
     assert span._attributes[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] == 7
     assert span._attributes[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] == 26
+    assert span._attributes["gen_ai.usage.input_tokens"] == 19
+    assert span._attributes["gen_ai.usage.output_tokens"] == 7
     assert span._attributes[RESPAN_SESSION_ID] == "session-123"
     assert span._status.status_code == StatusCode.OK
     assert json.loads(span._attributes[SpanAttributes.LLM_REQUEST_FUNCTIONS]) == [
         {"type": "function", "function": {"name": "get_weather"}}
     ]
+    assert not any(key.startswith("gen_ai.tool.") for key in span._attributes)
     assert json.loads(span._attributes[_COMPLETION_TOOL_CALLS_ATTR]) == [
         {
             "id": "toolu_123",
@@ -807,6 +810,36 @@ def test_enrich_claude_agent_sdk_span_maps_agent_fields():
     assert span._attributes[f"{SpanAttributes.LLM_PROMPTS}.0.role"] == "system"
     assert span._attributes[f"{SpanAttributes.LLM_PROMPTS}.1.role"] == "user"
     assert span._attributes[f"{SpanAttributes.LLM_COMPLETIONS}.0.role"] == "assistant"
+    _assert_no_banned_aliases(span._attributes)
+
+
+def test_enrich_agent_overrides_chat_and_keeps_session_cost_and_cache_usage():
+    span = _make_span(
+        name="invoke_agent research_agent",
+        attributes={
+            "gen_ai.operation.name": "invoke_agent",
+            "gen_ai.agent.name": "research_agent",
+            "gen_ai.conversation.id": "session-resume-1",
+            "gen_ai.usage.input_tokens": 20,
+            "gen_ai.usage.output_tokens": 4,
+            SpanAttributes.LLM_USAGE_CACHE_READ_INPUT_TOKENS: 11,
+            SpanAttributes.LLM_USAGE_CACHE_CREATION_INPUT_TOKENS: 3,
+            "respan.metadata.response_cost": "0.003",
+            RESPAN_LOG_TYPE: LOG_TYPE_CHAT,
+        },
+    )
+
+    _processor.enrich_claude_agent_sdk_span(span)
+
+    assert span._attributes[RESPAN_LOG_TYPE] == LOG_TYPE_AGENT
+    assert span._attributes[RESPAN_SESSION_ID] == "session-resume-1"
+    assert span._attributes["respan.metadata.response_cost"] == "0.003"
+    assert span._attributes[SpanAttributes.LLM_USAGE_CACHE_READ_INPUT_TOKENS] == 11
+    assert (
+        span._attributes[SpanAttributes.LLM_USAGE_CACHE_CREATION_INPUT_TOKENS] == 3
+    )
+    assert span._attributes["gen_ai.usage.input_tokens"] == 20
+    assert span._attributes["gen_ai.usage.output_tokens"] == 4
     _assert_no_banned_aliases(span._attributes)
 
 
@@ -846,6 +879,7 @@ def test_enrich_claude_agent_sdk_span_maps_tool_fields():
     assert CLAUDE_AGENT_SDK_TOOL_NAME_ATTR not in span._attributes
     assert CLAUDE_AGENT_SDK_TOOL_CALL_ARGUMENTS_ATTR not in span._attributes
     assert CLAUDE_AGENT_SDK_TOOL_CALL_RESULT_ATTR not in span._attributes
+    assert not any(key.startswith("gen_ai.tool.") for key in span._attributes)
 
 
 def test_enrich_claude_agent_sdk_span_overrides_upstream_tool_chat_defaults():
@@ -1020,6 +1054,7 @@ def test_span_processor_on_end_merges_pending_tool_calls_into_parent_agent_span(
     processor.on_end(tool_span)
     processor.on_end(agent_span)
 
+    assert not any(key.startswith("gen_ai.tool.") for key in tool_span._attributes)
     assert json.loads(agent_span._attributes[_COMPLETION_TOOL_CALLS_ATTR]) == [
         {
             "id": "toolu_123",
@@ -1104,15 +1139,15 @@ def test_span_processor_on_end_discards_pending_tool_calls_for_tool_parent_span(
     assert (57, 1) in processor._pending_tool_calls_by_parent
 
 
-def test_span_processor_on_end_leaves_final_chat_child_to_shared_exporter():
+def test_span_processor_on_end_splits_real_scope_agent_and_chat_contracts():
     processor = _processor.ClaudeAgentSDKSpanProcessor()
 
     agent_span = _make_span(
-        name="ClaudeAgentSDK.query",
+        name="invoke_agent weather_agent",
         trace_id=88,
         span_id=7,
         start_time=100,
-        scope_name="openinference.instrumentation.claude_agent_sdk",
+        scope_name="opentelemetry.instrumentation.claude_agent_sdk",
         attributes={
             "gen_ai.operation.name": "invoke_agent",
             "gen_ai.agent.name": "weather_agent",
@@ -1138,6 +1173,10 @@ def test_span_processor_on_end_leaves_final_chat_child_to_shared_exporter():
                 ]
             ),
             "gen_ai.response.model": "claude-sonnet-4-5",
+            "gen_ai.usage.input_tokens": 19,
+            "gen_ai.usage.output_tokens": 7,
+            SpanAttributes.LLM_USAGE_CACHE_READ_INPUT_TOKENS: 3,
+            SpanAttributes.LLM_REQUEST_TYPE: "chat",
         },
     )
 
@@ -1176,11 +1215,29 @@ def test_span_processor_on_end_leaves_final_chat_child_to_shared_exporter():
 
     prepared_spans = _prepare_spans_for_export(spans=[agent_span])
     assert [span.name for span in prepared_spans] == [
-        "ClaudeAgentSDK.query",
+        "invoke_agent weather_agent",
         "assistant_message",
     ]
-    assert prepared_spans[1].attributes[_COMPLETION_TOOL_CALLS_ATTR] == json.loads(
+    prepared_agent_attrs = prepared_spans[0].attributes
+    prepared_chat_attrs = prepared_spans[1].attributes
+    assert prepared_agent_attrs[RESPAN_LOG_TYPE] == LOG_TYPE_AGENT
+    assert SpanAttributes.LLM_REQUEST_TYPE not in prepared_agent_attrs
+    assert SpanAttributes.LLM_REQUEST_MODEL not in prepared_agent_attrs
+    assert SpanAttributes.LLM_SYSTEM not in prepared_agent_attrs
+    assert not any(key.startswith("gen_ai.usage.") for key in prepared_agent_attrs)
+    assert not any(key.startswith("llm.usage.") for key in prepared_agent_attrs)
+    assert _COMPLETION_TOOL_CALLS_ATTR not in prepared_agent_attrs
+    assert prepared_chat_attrs[RESPAN_LOG_TYPE] == LOG_TYPE_CHAT
+    assert prepared_chat_attrs[SpanAttributes.LLM_REQUEST_TYPE] == "chat"
+    assert prepared_chat_attrs[SpanAttributes.LLM_REQUEST_MODEL] == "claude-sonnet-4-5"
+    assert prepared_chat_attrs["gen_ai.usage.input_tokens"] == 19
+    assert prepared_chat_attrs["gen_ai.usage.output_tokens"] == 7
+    assert prepared_chat_attrs[SpanAttributes.LLM_USAGE_CACHE_READ_INPUT_TOKENS] == 3
+    assert json.loads(prepared_chat_attrs[_COMPLETION_TOOL_CALLS_ATTR]) == json.loads(
         agent_span._attributes[_COMPLETION_TOOL_CALLS_ATTR]
+    )
+    assert prepared_chat_attrs[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"] == (
+        "Tokyo is sunny."
     )
 
 

@@ -1,0 +1,9 @@
+{
+  "summary": "Repair canonical agent, rerank, and tool span content for the Claude Agent SDK, Cohere, and CrewAI instrumentations, including Claude agent/chat export splitting",
+  "packages": {
+    "respan-instrumentation-claude-agent-sdk": "patch",
+    "respan-instrumentation-cohere": "patch",
+    "respan-instrumentation-crewai": "patch",
+    "respan-tracing": "patch"
+  }
+}

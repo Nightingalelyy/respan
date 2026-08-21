@@ -76,6 +76,7 @@ from respan_instrumentation_crewai._serialization import (
     json_attribute,
     normalize_provider,
     normalize_token_usage,
+    normalize_tool_definitions,
     set_llm_message_attributes,
 )
 
@@ -316,10 +317,12 @@ def _llm_start_spec(source: Any, event: LLMCallStartedEvent) -> SpanStartSpec:
     tools = getattr(event, "tools", None)
     available_functions = getattr(event, "available_functions", None)
     if tools:
-        attributes[SpanAttributes.LLM_REQUEST_FUNCTIONS] = json_attribute(tools)
+        attributes[SpanAttributes.LLM_REQUEST_FUNCTIONS] = json_attribute(
+            normalize_tool_definitions(tools)
+        )
     elif available_functions:
         attributes[SpanAttributes.LLM_REQUEST_FUNCTIONS] = json_attribute(
-            available_functions
+            normalize_tool_definitions(available_functions)
         )
 
     request_values = (
