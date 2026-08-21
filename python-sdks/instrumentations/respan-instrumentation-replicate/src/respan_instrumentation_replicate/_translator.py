@@ -2,33 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping, Sequence
+from itertools import islice
 from typing import Any
 
 from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
-
-from respan_instrumentation_replicate._constants import (
-    ASSISTANT_ROLE,
-    DEPLOYMENT_KEY,
-    ERROR_KEY,
-    ID_KEY,
-    INPUT_KEY,
-    LOGS_KEY,
-    MAX_TEXT_LENGTH,
-    METRICS_KEY,
-    MODEL_KEY,
-    OUTPUT_KEY,
-    PROMPT_KEY,
-    PREDICTION_RESPAN_MODEL_ATTR,
-    REF_KEY,
-    REPLICATE_SYSTEM_NAME,
-    RESPAN_PARAMS_KEY,
-    RESPAN_PARAMS_MODEL_KEY,
-    STATUS_KEY,
-    USER_ROLE,
-    VERSION_KEY,
-)
 from respan_sdk.constants.llm_logging import (
     LOG_TYPE_TASK,
     LOG_TYPE_TEXT,
@@ -41,23 +19,44 @@ from respan_sdk.constants.span_attributes import (
     RESPAN_SPAN_ATTRIBUTES_MAP,
     RESPAN_TRACE_GROUP_ID,
 )
-from respan_sdk.utils.serialization import serialize_value
+
+from respan_instrumentation_replicate._constants import (
+    ASSISTANT_ROLE,
+    DEPLOYMENT_KEY,
+    ERROR_KEY,
+    ID_KEY,
+    INPUT_KEY,
+    LOGS_KEY,
+    MAX_TEXT_LENGTH,
+    METRICS_KEY,
+    MODEL_KEY,
+    OUTPUT_KEY,
+    PREDICTION_RESPAN_MODEL_ATTR,
+    PROMPT_KEY,
+    REF_KEY,
+    REPLICATE_SYSTEM_NAME,
+    RESPAN_PARAMS_KEY,
+    RESPAN_PARAMS_MODEL_KEY,
+    STATUS_KEY,
+    USER_ROLE,
+    VERSION_KEY,
+)
+from respan_instrumentation_replicate._serialization import (
+    exception_message,
+    json_string,
+    prediction_summary,
+    safe_text,
+    sensitive_key,
+)
 
 
 def safe_json(value: Any) -> str:
     """Serialize arbitrary Replicate values into an OTEL-safe JSON string."""
-    try:
-        return json.dumps(
-            serialize_value(value=value), default=str, separators=(",", ":")
-        )
-    except Exception:
-        return json.dumps(str(value), separators=(",", ":"))
+    return json_string(value)
 
 
 def _truncate_text(value: str) -> str:
-    if len(value) <= MAX_TEXT_LENGTH:
-        return value
-    return f"{value[:MAX_TEXT_LENGTH]}...<truncated>"
+    return safe_text(value)[:MAX_TEXT_LENGTH]
 
 
 def _to_mapping(value: Any) -> Mapping[str, Any] | None:
@@ -65,26 +64,35 @@ def _to_mapping(value: Any) -> Mapping[str, Any] | None:
         return value
 
     for method_name in ("model_dump", "dict"):
-        method = getattr(value, method_name, None)
+        try:
+            method = getattr(value, method_name, None)
+        except Exception:  # noqa: BLE001 - vendor objects may expose hostile properties.
+            method = None
         if callable(method):
             try:
                 converted = method()
-            except Exception:
+            except Exception:  # noqa: BLE001,S112 - vendor conversion is best effort.
                 continue
             if isinstance(converted, Mapping):
                 return converted
 
-    value_dict = getattr(value, "__dict__", None)
+    try:
+        value_dict = getattr(value, "__dict__", None)
+    except Exception:  # noqa: BLE001 - fall back to a stable type summary.
+        value_dict = None
     if isinstance(value_dict, Mapping):
         return value_dict
     return None
 
 
 def _file_output_text(value: Any) -> str | None:
-    if value.__class__.__name__ != "FileOutput":
+    if type(value).__name__ != "FileOutput":
         return None
-    url = getattr(value, "url", None)
-    return str(url) if url else str(value)
+    try:
+        url = getattr(value, "url", None)
+    except Exception:  # noqa: BLE001
+        url = None
+    return safe_text(url) if url else f"<{type(value).__name__}>"
 
 
 def output_to_text(value: Any) -> str:
@@ -102,14 +110,16 @@ def output_to_text(value: Any) -> str:
     if file_output is not None:
         return _truncate_text(file_output)
 
-    if isinstance(value, Sequence) and not isinstance(
-        value, (str, bytes, bytearray)
-    ):
-        if all(isinstance(item, str) for item in value):
-            return _truncate_text("".join(value))
-        text_parts = [output_to_text(item) for item in value]
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        items = list(islice(iter(value), 51))
+        selected = items[:50]
+        if all(isinstance(item, str) for item in selected):
+            suffix = "...[truncated items]" if len(items) > 50 else ""
+            return _truncate_text("".join(selected) + suffix)
+        text_parts = [output_to_text(item) for item in selected]
         if any(text_parts):
-            return _truncate_text("".join(text_parts))
+            suffix = "...[truncated items]" if len(items) > 50 else ""
+            return _truncate_text("".join(text_parts) + suffix)
 
     mapping = _to_mapping(value)
     if mapping is not None:
@@ -118,7 +128,7 @@ def output_to_text(value: Any) -> str:
                 return output_to_text(mapping[key])
         return _truncate_text(safe_json(mapping))
 
-    return _truncate_text(str(value))
+    return f"<{type(value).__name__}>"
 
 
 def _prediction_mapping(prediction: Any) -> Mapping[str, Any]:
@@ -136,14 +146,17 @@ def model_from_ref_or_prediction(
     if respan_params is not None:
         model_override = respan_params.get(RESPAN_PARAMS_MODEL_KEY)
         if model_override:
-            return str(model_override)
+            return safe_text(model_override)
 
     if prediction is not None:
-        prediction_model_override = getattr(
-            prediction, PREDICTION_RESPAN_MODEL_ATTR, None
-        )
+        try:
+            prediction_model_override = getattr(
+                prediction, PREDICTION_RESPAN_MODEL_ATTR, None
+            )
+        except Exception:  # noqa: BLE001 - private attribute is best-effort.
+            prediction_model_override = None
         if prediction_model_override:
-            return str(prediction_model_override)
+            return safe_text(prediction_model_override)
 
     for value in (
         kwargs.get(MODEL_KEY),
@@ -152,21 +165,21 @@ def model_from_ref_or_prediction(
         ref,
     ):
         if value:
-            return str(value)
+            return safe_text(value)
 
     prediction_map = _prediction_mapping(prediction)
     model = prediction_map.get(MODEL_KEY)
     version = prediction_map.get(VERSION_KEY)
     if model and version:
-        model_text = str(model)
-        version_text = str(version)
+        model_text = safe_text(model)
+        version_text = safe_text(version)
         if version_text.startswith(f"{model_text}:"):
             return version_text
         return f"{model_text}:{version_text}"
     if model:
-        return str(model)
+        return safe_text(model)
     if version:
-        return str(version)
+        return safe_text(version)
     return None
 
 
@@ -180,12 +193,14 @@ def _prompt_content(input_value: Any) -> str:
     return output_to_text(input_value)
 
 
-def _base_llm_attrs(*, span_name: str, model: str | None, stream: bool) -> dict[str, Any]:
+def _base_llm_attrs(
+    *, span_name: str, model: str | None, stream: bool
+) -> dict[str, Any]:
     attrs: dict[str, Any] = {
         RESPAN_LOG_METHOD: LogMethodChoices.TRACING_INTEGRATION.value,
         RESPAN_LOG_TYPE: LOG_TYPE_TEXT,
         SpanAttributes.LLM_SYSTEM: REPLICATE_SYSTEM_NAME,
-        SpanAttributes.LLM_REQUEST_TYPE: LLMRequestTypeValues.COMPLETION.value,
+        SpanAttributes.LLM_REQUEST_TYPE: LLMRequestTypeValues.CHAT.value,
         SpanAttributes.TRACELOOP_ENTITY_NAME: span_name,
         SpanAttributes.TRACELOOP_ENTITY_PATH: span_name,
     }
@@ -213,7 +228,7 @@ def _apply_respan_params(attributes: dict[str, Any], params: Any) -> str | None:
     span_name = params_mapping.get("span_name")
     workflow_name = params_mapping.get("workflow_name")
     if workflow_name and "trace_group_identifier" not in params_mapping:
-        attributes.setdefault(RESPAN_TRACE_GROUP_ID, str(workflow_name))
+        attributes.setdefault(RESPAN_TRACE_GROUP_ID, safe_text(workflow_name))
 
     for key, value in params_mapping.items():
         if key in {
@@ -229,15 +244,26 @@ def _apply_respan_params(attributes: dict[str, Any], params: Any) -> str | None:
         if attr_key is None:
             continue
         if attr_key == RESPAN_METADATA and isinstance(value, Mapping):
+            attributes[RESPAN_METADATA] = safe_json(value)
             for metadata_key, metadata_value in value.items():
-                attributes[f"{RESPAN_METADATA}.{metadata_key}"] = (
-                    metadata_value
-                    if isinstance(metadata_value, str)
-                    else str(metadata_value)
-                )
+                attribute_key = f"{RESPAN_METADATA}.{safe_text(metadata_key)[:128]}"
+                if sensitive_key(metadata_key):
+                    attributes[attribute_key] = "[REDACTED]"
+                elif isinstance(metadata_value, str):
+                    attributes[attribute_key] = safe_text(metadata_value)
+                elif isinstance(metadata_value, bool | int | float):
+                    attributes[attribute_key] = metadata_value
+                else:
+                    attributes[attribute_key] = safe_json(metadata_value)
         else:
-            attributes[attr_key] = value
-    return str(span_name) if span_name else None
+            attributes[attr_key] = (
+                safe_text(value)
+                if isinstance(value, str | bytes | bytearray)
+                else value
+                if isinstance(value, bool | int | float)
+                else safe_json(value)
+            )
+    return safe_text(span_name) if span_name else None
 
 
 def _set_request_attrs(
@@ -270,6 +296,9 @@ def _set_prediction_metadata(attrs: dict[str, Any], prediction: Any) -> None:
     metrics = prediction_map.get(METRICS_KEY)
     if metrics:
         attrs[f"{RESPAN_METADATA}.replicate_metrics"] = safe_json(metrics)
+    attrs[f"{RESPAN_METADATA}.replicate_prediction"] = safe_json(
+        prediction_summary(prediction)
+    )
 
 
 def _set_output_attrs(
@@ -280,7 +309,7 @@ def _set_output_attrs(
     error: Exception | None,
 ) -> None:
     if error is not None:
-        completion_text = str(error)
+        completion_text = exception_message(error)
     elif output is not None:
         completion_text = output_to_text(output)
     else:
@@ -288,7 +317,7 @@ def _set_output_attrs(
         completion_text = output_to_text(prediction_map.get(OUTPUT_KEY))
 
     if completion_text:
-        attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = completion_text
+        attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safe_json(completion_text)
         completion_prefix = f"{SpanAttributes.LLM_COMPLETIONS}.0"
         attrs[f"{completion_prefix}.role"] = ASSISTANT_ROLE
         attrs[f"{completion_prefix}.content"] = completion_text
@@ -334,7 +363,14 @@ def build_operation_span_data(
     if input_value is not None:
         attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safe_json(input_value)
     if output is not None:
-        attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safe_json(output)
+        attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safe_json(
+            prediction_summary(output)
+        )
     if error is not None:
-        attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = str(error)
+        attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safe_json(
+            {
+                "error": type(error).__name__,
+                "message": exception_message(error),
+            }
+        )
     return span_name, attrs

@@ -1,0 +1,8 @@
+{
+  "summary": "Repair Ragas, Replicate, and Restate OTel 2.x instrumentation",
+  "packages": {
+    "respan-instrumentation-ragas": "patch",
+    "respan-instrumentation-replicate": "patch",
+    "respan-instrumentation-restate": "patch"
+  }
+}

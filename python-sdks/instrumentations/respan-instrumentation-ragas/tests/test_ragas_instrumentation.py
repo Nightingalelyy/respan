@@ -5,13 +5,12 @@ import json
 from types import SimpleNamespace
 
 import pytest
+import respan_instrumentation_ragas._instrumentation as instrumentation
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.semconv_ai import SpanAttributes
 from opentelemetry.trace import StatusCode
-
-import respan_instrumentation_ragas._instrumentation as instrumentation
 from respan_sdk.constants.span_attributes import RESPAN_LOG_METHOD, RESPAN_LOG_TYPE
 
 
@@ -26,6 +25,7 @@ def spans(monkeypatch):
         lambda *args, **kwargs: provider.get_tracer("test.ragas"),
     )
     monkeypatch.setattr(instrumentation, "_CAPTURE_CONTENT", True)
+    monkeypatch.setattr(instrumentation, "_ENABLED", True)
     return exporter
 
 

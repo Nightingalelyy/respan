@@ -1,4 +1,4 @@
-"""Bounded, privacy-safe JSON serialization for Ragas values."""
+"""Bounded, privacy-safe serialization for Replicate SDK values."""
 
 from __future__ import annotations
 
@@ -6,11 +6,12 @@ import json
 import math
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import fields, is_dataclass
+from datetime import date, datetime
 from enum import Enum
 from itertools import islice
 from numbers import Integral, Real
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 MAX_ATTRIBUTE_BYTES = 16_000
 MAX_DEPTH = 8
@@ -44,8 +45,34 @@ def _truncate_utf8(value: str, limit: int = MAX_STRING_BYTES) -> str:
     return encoded[:budget].decode("utf-8", errors="ignore") + suffix
 
 
+def sanitize_url(value: str) -> str:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return "<redacted-endpoint>"
+    if not parsed.scheme or not parsed.netloc:
+        return value
+    hostname = parsed.hostname
+    if not hostname:
+        return "<redacted-endpoint>"
+    netloc = (
+        f"[{hostname}]"
+        if ":" in hostname and not hostname.startswith("[")
+        else hostname
+    )
+    try:
+        port = parsed.port
+    except ValueError:
+        return "<redacted-endpoint>"
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
 def safe_text(value: Any, *, default: str = "") -> str:
     if isinstance(value, str):
+        if "://" in value:
+            value = sanitize_url(value)
         value = _BEARER.sub(REDACTED, value)
         value = _SECRET_ASSIGNMENT.sub(
             lambda match: (
@@ -69,7 +96,7 @@ def safe_text(value: Any, *, default: str = "") -> str:
 def exception_message(exc: BaseException) -> str:
     try:
         arguments = exc.args
-    except Exception:  # noqa: BLE001 - hostile exception objects are supported.
+    except Exception:  # noqa: BLE001
         arguments = ()
     for argument in arguments:
         if isinstance(argument, str | bool | int | float):
@@ -77,10 +104,20 @@ def exception_message(exc: BaseException) -> str:
     return type(exc).__name__
 
 
-def _key(value: Any) -> str:
-    if isinstance(value, Enum):
-        value = value.value
-    return safe_text(value)[:256]
+def exception_status(exc: BaseException, *, default: int = 500) -> int:
+    for candidate in (exc, _safe_attr(exc, "response")):
+        for name in ("status_code", "status"):
+            value = _safe_attr(candidate, name)
+            if isinstance(value, int) and 400 <= value <= 599:
+                return value
+    return default
+
+
+def _safe_attr(value: Any, name: str) -> Any:
+    try:
+        return getattr(value, name, None)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def sensitive_key(value: Any) -> bool:
@@ -88,6 +125,12 @@ def sensitive_key(value: Any) -> bool:
         return False
     normalized = re.sub(r"[^a-z0-9]", "", value.lower())
     return any(normalized.endswith(suffix) for suffix in _SENSITIVE_SUFFIXES)
+
+
+def _key(value: Any) -> str:
+    if isinstance(value, Enum):
+        value = value.value
+    return safe_text(value)[:256]
 
 
 def json_value(value: Any, *, depth: int = 0, seen: set[int] | None = None) -> Any:
@@ -100,6 +143,8 @@ def json_value(value: Any, *, depth: int = 0, seen: set[int] | None = None) -> A
     if isinstance(value, Real):
         number = float(value)
         return number if math.isfinite(number) else None
+    if isinstance(value, datetime | date):
+        return value.isoformat()
     if isinstance(value, bytes | bytearray | memoryview):
         return {"length": len(value), "type": type(value).__name__}
     if isinstance(value, Enum):
@@ -113,14 +158,6 @@ def json_value(value: Any, *, depth: int = 0, seen: set[int] | None = None) -> A
         return "<cycle>"
     active.add(identity)
     try:
-        if is_dataclass(value) and not isinstance(value, type):
-            selected = list(islice(fields(value), MAX_ITEMS + 1))
-            converted = {
-                field.name: getattr(value, field.name) for field in selected[:MAX_ITEMS]
-            }
-            if len(selected) > MAX_ITEMS:
-                converted["__truncated_items__"] = True
-            return json_value(converted, depth=depth + 1, seen=active)
         if isinstance(value, Mapping):
             result: dict[str, Any] = {}
             items = list(islice(value.items(), MAX_ITEMS + 1))
@@ -146,27 +183,23 @@ def json_value(value: Any, *, depth: int = 0, seen: set[int] | None = None) -> A
                 return {"items": converted, "truncated": True}
             return converted
         for method_name in ("model_dump", "to_dict", "dict"):
-            try:
-                method = getattr(value, method_name, None)
-            except Exception:  # noqa: BLE001 - vendor attributes are untrusted.
-                method = None
+            method = _safe_attr(value, method_name)
             if not callable(method):
                 continue
             try:
                 converted = method()
-            except Exception:  # noqa: BLE001,S112 - fall through to a type summary.
+            except Exception:  # noqa: BLE001,S112
                 continue
             if isinstance(converted, Mapping):
                 return json_value(converted, depth=depth + 1, seen=active)
         return {"type": type(value).__name__}
-    except Exception:  # noqa: BLE001 - serialization must never break Ragas.
+    except Exception:  # noqa: BLE001
         return {"type": type(value).__name__, "unserializable": True}
     finally:
         active.discard(identity)
 
 
 def json_string(value: Any) -> str:
-    """Return valid JSON bounded by the OTel attribute budget."""
     encoded = json.dumps(
         json_value(value),
         allow_nan=False,
@@ -174,18 +207,14 @@ def json_string(value: Any) -> str:
         separators=(",", ":"),
         sort_keys=True,
     )
-    encoded_bytes = len(encoded.encode("utf-8"))
-    if encoded_bytes <= MAX_ATTRIBUTE_BYTES:
+    size = len(encoded.encode("utf-8"))
+    if size <= MAX_ATTRIBUTE_BYTES:
         return encoded
     low, high, result = 0, len(encoded), ""
     while low <= high:
         midpoint = (low + high) // 2
         candidate = json.dumps(
-            {
-                "original_bytes": encoded_bytes,
-                "preview": encoded[:midpoint],
-                "truncated": True,
-            },
+            {"original_bytes": size, "preview": encoded[:midpoint], "truncated": True},
             ensure_ascii=False,
             separators=(",", ":"),
             sort_keys=True,
@@ -196,3 +225,55 @@ def json_string(value: Any) -> str:
         else:
             high = midpoint - 1
     return result
+
+
+def prediction_summary(value: Any) -> Any:
+    """Return allow-listed stable prediction/page fields."""
+    mapping = value if isinstance(value, Mapping) else None
+    if mapping is None:
+        for method_name in ("model_dump", "dict"):
+            method = _safe_attr(value, method_name)
+            if not callable(method):
+                continue
+            try:
+                converted = method()
+            except Exception:  # noqa: BLE001,S112
+                continue
+            if isinstance(converted, Mapping):
+                mapping = converted
+                break
+    if mapping is None:
+        results = _safe_attr(value, "results")
+        if results is not None:
+            return {"results": prediction_summary(results)}
+        return json_value(value)
+
+    allowed = (
+        "id",
+        "model",
+        "version",
+        "status",
+        "input",
+        "output",
+        "error",
+        "logs",
+        "metrics",
+        "created_at",
+        "started_at",
+        "completed_at",
+        "urls",
+    )
+    summary = {
+        key: mapping[key]
+        for key in allowed
+        if key in mapping and mapping[key] is not None
+    }
+    if "results" in mapping:
+        summary["results"] = [
+            prediction_summary(item)
+            for item in list(islice(iter(mapping["results"]), MAX_ITEMS))
+        ]
+    for key in ("next", "previous"):
+        if key in mapping:
+            summary[key] = mapping[key]
+    return json_value(summary)
