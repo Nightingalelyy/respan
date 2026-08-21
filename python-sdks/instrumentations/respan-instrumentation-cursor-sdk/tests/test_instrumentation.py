@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 from opentelemetry.semconv_ai import SpanAttributes
-from respan_sdk.constants.llm_logging import LOG_TYPE_AGENT, LOG_TYPE_TASK, LOG_TYPE_TOOL
+from respan_sdk.constants.llm_logging import (
+    LOG_TYPE_AGENT,
+    LOG_TYPE_TASK,
+    LOG_TYPE_TOOL,
+)
 from respan_sdk.constants.span_attributes import (
     RESPAN_LOG_METHOD,
     RESPAN_LOG_TYPE,
@@ -190,15 +194,63 @@ def test_agent_turn_replay_emits_canonical_spans(tmp_path, monkeypatch):
     _assert_contract_attrs(root_attrs)
 
 
-def test_stop_cleans_generation_state(tmp_path, monkeypatch):
-    _capture_spans(monkeypatch)
+def test_stop_emits_cancelled_agent_root_after_child(tmp_path, monkeypatch):
+    captured = _capture_spans(monkeypatch)
     processor = CursorHookProcessor(state_path=tmp_path / "state.json")
 
     processor.process_event(_event("beforeSubmitPrompt", prompt="Will be stopped"))
+    thought = processor.process_event(
+        _event(
+            "afterAgentThought",
+            text="I started the requested work.",
+            duration_ms=120,
+        )
+    )
+    result = processor.process_event(_event("stop", status="cancelled", loop_count=1))
+
+    assert thought.emitted is True
+    assert result.emitted is True
+    assert len(captured) == 2
+    assert captured[0]["parent_id"] == "gen_def456-root"
+    assert captured[1]["span_id"] == "gen_def456-root"
+    assert captured[1]["parent_id"] is None
+    assert captured[1]["status_code"] == 499
+    assert captured[1]["error_message"] == "Cursor generation cancelled"
+    root_attrs = captured[1]["attributes"]
+    assert root_attrs[RESPAN_LOG_TYPE] == LOG_TYPE_AGENT
+    assert json.loads(root_attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT]) == [
+        {"role": "user", "content": "Will be stopped"}
+    ]
+    assert json.loads(root_attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == {
+        "status": "cancelled"
+    }
+    assert root_attrs[f"{RESPAN_METADATA}.cursor.stop_status"] == "cancelled"
+    assert root_attrs[f"{RESPAN_METADATA}.cursor.child_count"] == 1
+    assert root_attrs[f"{RESPAN_METADATA}.cursor.loop_count"] == 1
+    assert root_attrs["status_code"] == 499
+    assert root_attrs["error.message"] == "Cursor generation cancelled"
+    _assert_contract_attrs(root_attrs)
+    assert json.loads((tmp_path / "state.json").read_text()) == {}
+
+
+def test_terminal_state_is_retained_when_root_export_fails(tmp_path, monkeypatch):
+    captured = []
+
+    def fake_build_readable_span(name, **kwargs):
+        span = {"name": name, **kwargs}
+        captured.append(span)
+        return span
+
+    monkeypatch.setattr(_processor, "build_readable_span", fake_build_readable_span)
+    monkeypatch.setattr(_processor, "inject_span", lambda span: False)
+    processor = CursorHookProcessor(state_path=tmp_path / "state.json")
+
+    processor.process_event(_event("beforeSubmitPrompt", prompt="Retry this export"))
     result = processor.process_event(_event("stop", status="cancelled"))
 
     assert result.emitted is False
-    assert json.loads((tmp_path / "state.json").read_text()) == {}
+    state = json.loads((tmp_path / "state.json").read_text())
+    assert state["gen_def456"]["prompt"] == "Retry this export"
 
 
 def test_unknown_event_is_ignored(tmp_path, monkeypatch):

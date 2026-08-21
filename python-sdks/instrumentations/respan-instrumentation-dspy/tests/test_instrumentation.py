@@ -4,22 +4,21 @@ import logging
 import sys
 from types import ModuleType, SimpleNamespace
 
-from opentelemetry.semconv_ai import SpanAttributes
-
 import respan_instrumentation_dspy._callback
+from opentelemetry.semconv_ai import SpanAttributes
 from respan_instrumentation_dspy import DSPyInstrumentor
+from respan_instrumentation_dspy._callback import DSPyInstrumentationCallback
 from respan_instrumentation_dspy._constants import (
     DSPY_USAGE_INPUT_TOKENS_ATTR,
     DSPY_USAGE_OUTPUT_TOKENS_ATTR,
 )
-from respan_instrumentation_dspy._callback import DSPyInstrumentationCallback
 from respan_instrumentation_dspy._utils import (
     add_lm_usage_attributes,
     extract_provider_name,
     normalize_messages,
+    request_type_from_model_type,
     safe_json,
 )
-
 
 _OFF_CONTRACT_ALIAS_KEYS = (
     "tools",
@@ -39,6 +38,10 @@ _OFF_CONTRACT_ALIAS_KEYS = (
 def _assert_no_off_contract_aliases(attributes):
     for off_contract_key in _OFF_CONTRACT_ALIAS_KEYS:
         assert off_contract_key not in attributes
+
+
+def test_text_model_uses_canonical_chat_request_type():
+    assert request_type_from_model_type("text") == "chat"
 
 
 def _install_fake_dspy(monkeypatch, callbacks=None):
@@ -277,10 +280,7 @@ def test_tool_callback_emits_tool_span(monkeypatch):
         "name": "lookup_order",
         "arguments": {"order_id": "ord_123"},
     }
-    assert (
-        attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
-        == '{"status": "shipped"}'
-    )
+    assert attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] == '{"status": "shipped"}'
     assert SpanAttributes.TRACELOOP_SPAN_KIND not in attributes
     _assert_no_off_contract_aliases(attributes=attributes)
 
@@ -327,6 +327,7 @@ def test_react_module_callback_emits_agent_span(monkeypatch):
     assert attributes["respan.entity.log_type"] == "agent"
     assert attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "ReAct"
     assert SpanAttributes.TRACELOOP_SPAN_KIND not in attributes
+    assert not any(key.startswith(("gen_ai.", "llm.")) for key in attributes)
     _assert_no_off_contract_aliases(attributes=attributes)
 
 

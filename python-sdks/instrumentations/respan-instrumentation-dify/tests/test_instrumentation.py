@@ -111,6 +111,41 @@ def test_build_completion_span_data_uses_inputs_query():
     assert not OFF_CONTRACT_ALIASES.intersection(attrs)
 
 
+def test_build_chat_span_data_maps_only_provider_exposed_model():
+    _, attrs = build_dify_span_data(
+        method="POST",
+        endpoint="/chat-messages",
+        request_json={"query": "Hi", "user": "user-123"},
+        response=FakeResponse(
+            {
+                "answer": "Hello",
+                "metadata": {
+                    "usage": {
+                        "model": "anthropic/claude-sonnet-4",
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                    }
+                },
+            }
+        ),
+    )
+
+    assert attrs[SpanAttributes.LLM_REQUEST_MODEL] == "anthropic/claude-sonnet-4"
+    assert "model" not in attrs
+
+
+def test_build_chat_span_data_does_not_invent_missing_model():
+    _, attrs = build_dify_span_data(
+        method="POST",
+        endpoint="/chat-messages",
+        request_json={"query": "Hi", "user": "user-123"},
+        response=FakeResponse({"answer": "Hello", "metadata": {"usage": {}}}),
+    )
+
+    assert SpanAttributes.LLM_REQUEST_MODEL not in attrs
+    assert "model" not in attrs
+
+
 def test_build_workflow_span_data_sets_workflow_log_type_without_llm_aliases():
     _, attrs = build_dify_span_data(
         method="POST",
@@ -131,7 +166,9 @@ def test_build_workflow_span_data_sets_workflow_log_type_without_llm_aliases():
 
     assert attrs[RESPAN_LOG_TYPE] == "workflow"
     assert SpanAttributes.LLM_REQUEST_TYPE not in attrs
-    assert attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] == '{"result":"Short summary."}'
+    assert (
+        attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] == '{"result":"Short summary."}'
+    )
     assert attrs[f"{RESPAN_METADATA}.dify.workflow_run_id"] == "run-123"
     assert attrs[f"{RESPAN_METADATA}.dify.total_tokens"] == "42"
     assert not OFF_CONTRACT_ALIASES.intersection(attrs)
@@ -149,6 +186,7 @@ def test_streaming_events_accumulate_answer_and_usage():
                 "event": "message_end",
                 "metadata": {
                     "usage": {
+                        "model": "dify/stream-model",
                         "prompt_tokens": 1,
                         "completion_tokens": 1,
                         "total_tokens": 2,
@@ -161,6 +199,7 @@ def test_streaming_events_accumulate_answer_and_usage():
     assert attrs[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"] == "Hello"
     assert attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] == "Hello"
     assert attrs[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] == 2
+    assert attrs[SpanAttributes.LLM_REQUEST_MODEL] == "dify/stream-model"
     assert not OFF_CONTRACT_ALIASES.intersection(attrs)
 
 

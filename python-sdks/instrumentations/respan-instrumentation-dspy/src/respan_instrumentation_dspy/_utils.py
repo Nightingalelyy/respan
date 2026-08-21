@@ -7,12 +7,12 @@ from collections.abc import Mapping
 from typing import Any
 
 from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
+from respan_sdk.utils.serialization import serialize_value
 
 from respan_instrumentation_dspy._constants import (
     ANTHROPIC_PROVIDER_PREFIX,
     AZURE_PROVIDER_PREFIX,
     BEDROCK_PROVIDER_PREFIX,
-    CHAT_MODEL_TYPE,
     COMPLETION_TOKENS_KEY,
     DSPY_PROVIDER_NAME,
     DSPY_USAGE_INPUT_TOKENS_ATTR,
@@ -24,12 +24,9 @@ from respan_instrumentation_dspy._constants import (
     OPENAI_PROVIDER_PREFIX,
     OUTPUT_TOKENS_KEY,
     PROMPT_TOKENS_KEY,
-    RESPONSES_MODEL_TYPE,
-    TEXT_MODEL_TYPE,
     TOTAL_TOKENS_KEY,
     USER_ROLE,
 )
-from respan_sdk.utils.serialization import serialize_value
 
 
 def safe_json(value: Any) -> str:
@@ -143,11 +140,8 @@ def extract_provider_name(model_name: Any) -> str:
 
 
 def request_type_from_model_type(model_type: Any) -> str:
-    """Map DSPy model types to the Respan LLM request type value."""
-    if model_type == TEXT_MODEL_TYPE:
-        return LLMRequestTypeValues.COMPLETION.value
-    if model_type in {CHAT_MODEL_TYPE, RESPONSES_MODEL_TYPE}:
-        return LLMRequestTypeValues.CHAT.value
+    """Return the canonical request type for every DSPy LLM surface."""
+    del model_type
     return LLMRequestTypeValues.CHAT.value
 
 
@@ -206,9 +200,7 @@ def add_lm_request_attributes(
     instance_kwargs = getattr(instance, "kwargs", None)
     request_kwargs = inputs.get("kwargs")
 
-    attributes[SpanAttributes.LLM_SYSTEM] = extract_provider_name(
-        model_name=model_name
-    )
+    attributes[SpanAttributes.LLM_SYSTEM] = extract_provider_name(model_name=model_name)
     if isinstance(model_name, str) and model_name:
         attributes[SpanAttributes.LLM_REQUEST_MODEL] = model_name
     attributes[SpanAttributes.LLM_REQUEST_TYPE] = request_type_from_model_type(

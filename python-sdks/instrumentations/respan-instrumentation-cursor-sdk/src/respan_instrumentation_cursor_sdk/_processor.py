@@ -108,8 +108,7 @@ class CursorHookProcessor:
             self._handle_before_submit_prompt(event=event, state=state)
             return CursorHookResult(event_name=event_name, emitted=False)
         if event_name == CURSOR_EVENT_STOP:
-            self._handle_stop(event=event, state=state)
-            return CursorHookResult(event_name=event_name, emitted=False)
+            return self._handle_stop(event=event, state=state)
 
         if event_name == CURSOR_EVENT_AFTER_AGENT_THOUGHT:
             return self._emit_agent_thought(event=event, state=state)
@@ -134,17 +133,61 @@ class CursorHookProcessor:
         attachments = event.get("attachments")
         state[generation_id] = {
             "prompt": _string(event.get("prompt")),
-            "attachments_count": len(attachments) if isinstance(attachments, list) else 0,
+            "attachments_count": (
+                len(attachments) if isinstance(attachments, list) else 0
+            ),
             "start_time": _event_time(event),
             "child_count": 0,
         }
         self._state.save(state)
 
-    def _handle_stop(self, *, event: Mapping[str, Any], state: dict[str, Any]) -> None:
+    def _handle_stop(
+        self,
+        *,
+        event: Mapping[str, Any],
+        state: dict[str, Any],
+    ) -> CursorHookResult:
         generation_id = _string(event.get(CURSOR_GENERATION_ID))
-        if generation_id and generation_id in state:
+        generation_state = state.get(generation_id)
+        if not generation_id or not isinstance(generation_state, Mapping):
+            return CursorHookResult(event_name=CURSOR_EVENT_STOP, emitted=False)
+
+        stop_status = _string(event.get("status")).strip().lower() or "cancelled"
+        is_cancelled = stop_status in {"aborted", "canceled", "cancelled", "stopped"}
+        user_prompt = _string(generation_state.get("prompt")) or "[No prompt captured]"
+        child_count = generation_state.get("child_count")
+        start_time = _string(generation_state.get("start_time")) or _event_time(event)
+
+        result = self._emit_span(
+            event=event,
+            span_name=f"Cursor generation {_short_id(generation_id)}",
+            span_id=_root_span_id(event),
+            parent_id=None,
+            log_type=LOG_TYPE_AGENT,
+            entity_path="",
+            entity_input=[{"role": "user", "content": user_prompt}],
+            entity_output={"status": stop_status},
+            metadata={
+                "cursor.event": CURSOR_EVENT_STOP,
+                "cursor.stop_status": stop_status,
+                "cursor.child_count": (
+                    child_count if isinstance(child_count, int) else 0
+                ),
+                "cursor.attachments_count": generation_state.get(
+                    "attachments_count", 0
+                ),
+                "cursor.loop_count": event.get("loop_count"),
+            },
+            start_time=start_time,
+            end_time=_event_time(event),
+            status_code=499 if is_cancelled else 200,
+            error_message="Cursor generation cancelled" if is_cancelled else None,
+        )
+
+        if result.emitted:
             del state[generation_id]
             self._state.save(state)
+        return result
 
     def _emit_agent_thought(
         self,
@@ -304,14 +347,18 @@ class CursorHookProcessor:
             entity_output=[{"role": "assistant", "content": response_text}],
             metadata={
                 "cursor.event": CURSOR_EVENT_AFTER_AGENT_RESPONSE,
-                "cursor.child_count": child_count if isinstance(child_count, int) else 0,
-                "cursor.attachments_count": generation_state.get("attachments_count", 0),
+                "cursor.child_count": (
+                    child_count if isinstance(child_count, int) else 0
+                ),
+                "cursor.attachments_count": generation_state.get(
+                    "attachments_count", 0
+                ),
             },
             start_time=start_time,
             end_time=end_time,
         )
 
-        if generation_id in state:
+        if result.emitted and generation_id in state:
             del state[generation_id]
             self._state.save(state)
 
@@ -347,6 +394,8 @@ class CursorHookProcessor:
         metadata: Mapping[str, Any],
         start_time: str,
         end_time: str,
+        status_code: int = 200,
+        error_message: str | None = None,
     ) -> CursorHookResult:
         trace_id = _trace_id(event)
         attrs = _base_attributes(
@@ -358,6 +407,10 @@ class CursorHookProcessor:
             entity_output=entity_output,
             metadata=metadata,
         )
+        if status_code >= 400:
+            attrs["status_code"] = status_code
+        if error_message:
+            attrs["error.message"] = error_message
         span = build_readable_span(
             name=span_name,
             trace_id=trace_id,
@@ -366,6 +419,8 @@ class CursorHookProcessor:
             start_time_iso=start_time,
             end_time_iso=end_time,
             attributes=attrs,
+            status_code=status_code,
+            error_message=error_message,
         )
         emitted = inject_span(span=span)
         return CursorHookResult(
@@ -427,9 +482,14 @@ def _format_edits(edits: Any) -> list[dict[str, Any]] | str:
                     "index": index,
                     "start_line": edit.get("startLine")
                     or _nested_get(edit, ("start", "line")),
-                    "end_line": edit.get("endLine") or _nested_get(edit, ("end", "line")),
-                    "old": _truncate(_string(edit.get("oldText") or edit.get("old")), 500),
-                    "new": _truncate(_string(edit.get("newText") or edit.get("new")), 500),
+                    "end_line": edit.get("endLine")
+                    or _nested_get(edit, ("end", "line")),
+                    "old": _truncate(
+                        _string(edit.get("oldText") or edit.get("old")), 500
+                    ),
+                    "new": _truncate(
+                        _string(edit.get("newText") or edit.get("new")), 500
+                    ),
                 }
             )
         else:

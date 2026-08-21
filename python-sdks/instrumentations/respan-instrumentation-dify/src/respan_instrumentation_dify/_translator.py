@@ -191,7 +191,9 @@ def _completion_prompt(request_json: Mapping[str, Any]) -> str:
     return _string_content(inputs)
 
 
-def _response_output(response_data: Mapping[str, Any], stream_events: Sequence[Any]) -> Any:
+def _response_output(
+    response_data: Mapping[str, Any], stream_events: Sequence[Any]
+) -> Any:
     if stream_events:
         text = _stream_answer(stream_events=stream_events)
         if text:
@@ -219,6 +221,25 @@ def _metadata_usage(response_data: Mapping[str, Any]) -> Mapping[str, Any]:
     if isinstance(data, Mapping):
         return data
     return {}
+
+
+def _response_model(response_data: Mapping[str, Any]) -> str | None:
+    """Return a model only when Dify includes one in its response payload."""
+    candidates = [response_data.get("model")]
+    metadata = response_data.get(METADATA_KEY)
+    if isinstance(metadata, Mapping):
+        candidates.append(metadata.get("model"))
+        usage = metadata.get(USAGE_KEY)
+        if isinstance(usage, Mapping):
+            candidates.append(usage.get("model"))
+    data = response_data.get(DATA_KEY)
+    if isinstance(data, Mapping):
+        candidates.append(data.get("model"))
+
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return None
 
 
 def _stream_answer(stream_events: Sequence[Any]) -> str:
@@ -290,7 +311,9 @@ def _apply_response_metadata(
         MODE_KEY,
         STATUS_KEY,
     ):
-        _set_metadata(attributes=attributes, key=f"dify.{key}", value=response_data.get(key))
+        _set_metadata(
+            attributes=attributes, key=f"dify.{key}", value=response_data.get(key)
+        )
 
     data = response_data.get(DATA_KEY)
     if isinstance(data, Mapping):
@@ -348,7 +371,9 @@ def _apply_usage(
     if total_tokens is not None:
         attributes[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] = total_tokens
 
-    _set_metadata(attributes=attributes, key=f"dify.{LATENCY_KEY}", value=usage.get(LATENCY_KEY))
+    _set_metadata(
+        attributes=attributes, key=f"dify.{LATENCY_KEY}", value=usage.get(LATENCY_KEY)
+    )
 
 
 def _apply_llm_content(
@@ -356,6 +381,8 @@ def _apply_llm_content(
     *,
     endpoint: str,
     request_json: Mapping[str, Any],
+    response_data: Mapping[str, Any],
+    usage: Mapping[str, Any],
     output: Any,
 ) -> None:
     kind = _endpoint_kind(endpoint)
@@ -367,6 +394,17 @@ def _apply_llm_content(
     # even for text-style Dify completion apps, which return answer-shaped
     # message payloads rather than raw completion choices.
     attributes[SpanAttributes.LLM_REQUEST_TYPE] = LLMRequestTypeValues.CHAT.value
+    model = _response_model(response_data=response_data)
+    if model is None:
+        usage_model = usage.get("model")
+        if isinstance(usage_model, str) and usage_model.strip():
+            model = usage_model.strip()
+    if model is None:
+        request_model = request_json.get("model")
+        if isinstance(request_model, str) and request_model.strip():
+            model = request_model.strip()
+    if model is not None:
+        attributes[SpanAttributes.LLM_REQUEST_MODEL] = model
 
     prompt_content = (
         _string_content(request_json.get(QUERY_KEY))
@@ -397,9 +435,16 @@ def _apply_respan_params(
         or current_workflow_name
     )
     if workflow_name:
-        attributes.setdefault(SpanAttributes.TRACELOOP_WORKFLOW_NAME, str(workflow_name))
-    if respan_params.get("workflow_name") and "trace_group_identifier" not in respan_params:
-        attributes.setdefault(RESPAN_TRACE_GROUP_ID, str(respan_params["workflow_name"]))
+        attributes.setdefault(
+            SpanAttributes.TRACELOOP_WORKFLOW_NAME, str(workflow_name)
+        )
+    if (
+        respan_params.get("workflow_name")
+        and "trace_group_identifier" not in respan_params
+    ):
+        attributes.setdefault(
+            RESPAN_TRACE_GROUP_ID, str(respan_params["workflow_name"])
+        )
 
     for key, value in respan_params.items():
         if key in {
@@ -450,7 +495,11 @@ def build_dify_span_data(
     request_params_mapping = _to_mapping(request_params) or {}
     response_data = _response_json(response)
     stream_events = list(stream_events or [])
-    output = str(error) if error is not None else _response_output(response_data, stream_events)
+    output = (
+        str(error)
+        if error is not None
+        else _response_output(response_data, stream_events)
+    )
     default_span_name = _default_span_name(endpoint=endpoint)
 
     attributes: dict[str, Any] = {
@@ -493,6 +542,8 @@ def build_dify_span_data(
             attributes=attributes,
             endpoint=endpoint,
             request_json=request_json_mapping,
+            response_data=response_data,
+            usage=usage,
             output=output,
         )
 
