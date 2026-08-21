@@ -7,9 +7,9 @@ import json
 import logging
 import re
 import time
-from http import HTTPStatus
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
+from http import HTTPStatus
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -18,14 +18,33 @@ from opentelemetry.semconv_ai import SpanAttributes
 from respan_sdk.constants.llm_logging import (
     LOG_TYPE_AGENT,
     LOG_TYPE_CHAT,
-    LOG_TYPE_COMPLETION,
     LOG_TYPE_CUSTOM,
     LOG_TYPE_TASK,
+    LOG_TYPE_TEXT,
     LOG_TYPE_TOOL,
     LOG_TYPE_WORKFLOW,
     LogMethodChoices,
 )
 from respan_sdk.constants.otlp_constants import ERROR_MESSAGE_ATTR
+from respan_sdk.constants.span_attributes import (
+    GEN_AI_TOOL_CALL_ARGUMENTS,
+    GEN_AI_TOOL_CALL_RESULT,
+    GEN_AI_TOOL_NAME,
+    LLM_REQUEST_MODEL,
+    LLM_REQUEST_TYPE,
+    LLM_USAGE_COMPLETION_TOKENS,
+    LLM_USAGE_PROMPT_TOKENS,
+    RESPAN_LOG_METHOD,
+    RESPAN_LOG_TYPE,
+    RESPAN_METADATA,
+    RESPAN_SPAN_ATTRIBUTES_MAP,
+)
+from respan_sdk.utils.data_processing.id_processing import (
+    format_span_id,
+    format_trace_id,
+)
+from respan_tracing.utils.span_factory import build_readable_span, inject_span
+
 from respan_instrumentation_langchain._constants import (
     AGENT_ACTION_FALLBACK_NAME,
     AGENT_FINISH_EVENT_NAME,
@@ -37,8 +56,8 @@ from respan_instrumentation_langchain._constants import (
     GROUP_LANGFLOW_ROOT_RUNS_KWARG,
     LANGCHAIN_ADDITIONAL_KWARGS_KEY,
     LANGCHAIN_ADDITIONAL_MESSAGE_FIELDS,
-    LANGCHAIN_ARGUMENTS_KEY,
     LANGCHAIN_ARGS_KEY,
+    LANGCHAIN_ARGUMENTS_KEY,
     LANGCHAIN_ASSISTANT_ROLE,
     LANGCHAIN_CALLBACK_ADD_HANDLER_METHOD,
     LANGCHAIN_CALLBACK_HANDLERS_ATTR,
@@ -74,11 +93,11 @@ from respan_instrumentation_langchain._constants import (
     LANGCHAIN_METADATA_OBJECT_ATTR,
     LANGCHAIN_MODEL_DUMP_METHOD,
     LANGCHAIN_NAME_KEY,
-    LANGCHAIN_OUTPUT_TOKENS_KEY,
     LANGCHAIN_OTEL_SPAN_ID_ATTR,
     LANGCHAIN_OTEL_TRACE_ID_ATTR,
-    LANGCHAIN_PARENT_RUN_ID_ATTR,
+    LANGCHAIN_OUTPUT_TOKENS_KEY,
     LANGCHAIN_PAGE_CONTENT_ATTR,
+    LANGCHAIN_PARENT_RUN_ID_ATTR,
     LANGCHAIN_PREGEL_MARKER,
     LANGCHAIN_PRIVATE_ATTR_PREFIX,
     LANGCHAIN_PROMPT_TOKENS_KEY,
@@ -87,11 +106,11 @@ from respan_instrumentation_langchain._constants import (
     LANGCHAIN_RETRY_STATE_ATTR,
     LANGCHAIN_RETURN_VALUES_ATTR,
     LANGCHAIN_ROLE_KEY,
+    LANGCHAIN_RUN_ID_ATTR,
     LANGCHAIN_RUN_ID_KEY,
+    LANGCHAIN_SERIALIZED_ATTR,
     LANGCHAIN_SERIALIZED_MODEL_FIELDS,
     LANGCHAIN_SERIALIZED_MODEL_KWARG_FIELDS,
-    LANGCHAIN_RUN_ID_ATTR,
-    LANGCHAIN_SERIALIZED_ATTR,
     LANGCHAIN_SERIALIZED_NAME_FIELDS,
     LANGCHAIN_TAGS_ATTR,
     LANGCHAIN_TEXT_ATTR,
@@ -112,27 +131,13 @@ from respan_instrumentation_langchain._constants import (
     TOOL_FALLBACK_NAME,
     ZERO_SPAN_ID_FALLBACK,
 )
-from respan_sdk.constants.span_attributes import (
-    GEN_AI_TOOL_CALL_ARGUMENTS,
-    GEN_AI_TOOL_CALL_RESULT,
-    GEN_AI_TOOL_NAME,
-    LLM_REQUEST_MODEL,
-    LLM_REQUEST_TYPE,
-    LLM_USAGE_COMPLETION_TOKENS,
-    LLM_USAGE_PROMPT_TOKENS,
-    RESPAN_LOG_METHOD,
-    RESPAN_LOG_TYPE,
-    RESPAN_SPAN_TOOL_CALLS,
-    RESPAN_SPAN_TOOLS,
-)
-from respan_tracing.utils.span_factory import build_readable_span, inject_span
-from respan_sdk.utils.data_processing.id_processing import format_span_id, format_trace_id
 
 logger = logging.getLogger(__name__)
 
 try:
     from langchain_core.callbacks import BaseCallbackHandler
-except Exception:  # pragma: no cover - exercised in missing-dependency envs
+except Exception:  # noqa: BLE001  # pragma: no cover - optional dependency
+
     class BaseCallbackHandler:  # type: ignore[no-redef]
         """Fallback so importing the package does not require LangChain eagerly."""
 
@@ -142,7 +147,7 @@ except Exception:  # pragma: no cover - exercised in missing-dependency envs
 
 try:
     import langgraph.callbacks
-except Exception:  # pragma: no cover - optional dependency
+except Exception:  # noqa: BLE001  # pragma: no cover - optional dependency
     GraphCallbackHandler = None
 else:
     GraphCallbackHandler = getattr(
@@ -157,6 +162,7 @@ if GraphCallbackHandler is None:
 elif issubclass(GraphCallbackHandler, BaseCallbackHandler):
     _CallbackBase = GraphCallbackHandler
 else:
+
     class _CallbackBase(  # type: ignore[misc, valid-type]
         GraphCallbackHandler,
         BaseCallbackHandler,
@@ -165,28 +171,30 @@ else:
 
 
 _EMPTY_VALUES = (None, "", (), [])
-_JSON_CODE_FENCE_RE = re.compile(LANGCHAIN_JSON_CODE_FENCE_PATTERN, re.IGNORECASE | re.DOTALL)
+_JSON_CODE_FENCE_RE = re.compile(
+    LANGCHAIN_JSON_CODE_FENCE_PATTERN, re.IGNORECASE | re.DOTALL
+)
 
 
 class _RunRecord:
     __slots__ = (
-        "run_id",
-        "trace_id",
-        "span_id",
+        "entity_path",
+        "extra_attributes",
+        "framework",
+        "input_value",
+        "log_type",
+        "metadata",
+        "name",
         "parent_run_id",
         "parent_span_id",
-        "name",
-        "entity_path",
-        "log_type",
+        "run_id",
+        "serialized",
+        "span_id",
         "span_kind",
         "start_ns",
-        "input_value",
-        "serialized",
-        "tags",
-        "metadata",
-        "framework",
-        "extra_attributes",
         "streamed_tokens",
+        "tags",
+        "trace_id",
     )
 
     def __init__(
@@ -256,7 +264,7 @@ def _derive_span_id(*parts: Any) -> str:
 def _get_active_otel_parent() -> tuple[str, str] | None:
     try:
         span_context = trace.get_current_span().get_span_context()
-    except Exception:
+    except Exception:  # noqa: BLE001 - OpenTelemetry context access is best-effort
         return None
 
     trace_id = getattr(span_context, LANGCHAIN_OTEL_TRACE_ID_ATTR, 0)
@@ -361,7 +369,9 @@ def _serialize_value(value: Any) -> Any:
         return _serialize_value(value_dict)
     if hasattr(value, LANGCHAIN_PAGE_CONTENT_ATTR):
         payload = {
-            LANGCHAIN_PAGE_CONTENT_ATTR: getattr(value, LANGCHAIN_PAGE_CONTENT_ATTR, None),
+            LANGCHAIN_PAGE_CONTENT_ATTR: getattr(
+                value, LANGCHAIN_PAGE_CONTENT_ATTR, None
+            ),
             LANGCHAIN_METADATA_OBJECT_ATTR: getattr(
                 value,
                 LANGCHAIN_METADATA_OBJECT_ATTR,
@@ -396,8 +406,7 @@ def _normalize_output_for_logging(value: Any) -> Any:
         return _strip_json_code_fence(value)
     if isinstance(value, Mapping):
         return {
-            str(key): _normalize_output_for_logging(item)
-            for key, item in value.items()
+            str(key): _normalize_output_for_logging(item) for key, item in value.items()
         }
     if isinstance(value, list):
         return [_normalize_output_for_logging(item) for item in value]
@@ -424,7 +433,11 @@ def _extract_name(serialized: Any, fallback: str) -> str:
                 if key == LANGCHAIN_ID_KEY and LANGCHAIN_ENTITY_PATH_SEPARATOR in value:
                     return value.rsplit(LANGCHAIN_ENTITY_PATH_SEPARATOR, 1)[-1]
                 return value
-            if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and value:
+            if (
+                isinstance(value, Sequence)
+                and not isinstance(value, (str, bytes))
+                and value
+            ):
                 return str(value[-1])
         kwargs = serialized.get(LANGCHAIN_KWARGS_KEY)
         if isinstance(kwargs, Mapping):
@@ -447,14 +460,17 @@ def _extract_model(
         kwargs = serialized.get(LANGCHAIN_KWARGS_KEY)
         if isinstance(kwargs, Mapping):
             candidates.extend(
-                kwargs.get(key)
-                for key in LANGCHAIN_SERIALIZED_MODEL_KWARG_FIELDS
+                kwargs.get(key) for key in LANGCHAIN_SERIALIZED_MODEL_KWARG_FIELDS
             )
-        candidates.extend(serialized.get(key) for key in LANGCHAIN_SERIALIZED_MODEL_FIELDS)
+        candidates.extend(
+            serialized.get(key) for key in LANGCHAIN_SERIALIZED_MODEL_FIELDS
+        )
 
     llm_output = getattr(response, LANGCHAIN_LLM_OUTPUT_ATTR, None)
     if isinstance(llm_output, Mapping):
-        candidates.extend(llm_output.get(key) for key in LANGCHAIN_SERIALIZED_MODEL_FIELDS)
+        candidates.extend(
+            llm_output.get(key) for key in LANGCHAIN_SERIALIZED_MODEL_FIELDS
+        )
 
     for candidate in candidates:
         if isinstance(candidate, str) and candidate:
@@ -476,7 +492,9 @@ def _extract_usage(response: Any) -> tuple[int | None, int | None, int | None]:
     payloads: list[Any] = []
     llm_output = getattr(response, LANGCHAIN_LLM_OUTPUT_ATTR, None)
     if isinstance(llm_output, Mapping):
-        payloads.extend(llm_output.get(key) for key in LANGCHAIN_LLM_OUTPUT_USAGE_FIELDS)
+        payloads.extend(
+            llm_output.get(key) for key in LANGCHAIN_LLM_OUTPUT_USAGE_FIELDS
+        )
         payloads.append(llm_output)
 
     generations = getattr(response, LANGCHAIN_GENERATIONS_ATTR, None)
@@ -599,30 +617,60 @@ def _extract_tool_calls_from_messages(
     return tool_calls or None
 
 
-def _extract_tool_names_from_serialized(serialized: Any) -> list[str] | None:
-    if not isinstance(serialized, Mapping):
-        return None
-    tools = serialized.get(LANGCHAIN_TOOLS_KEY) or serialized.get(
-        LANGCHAIN_FUNCTIONS_KEY
-    )
-    if not isinstance(tools, list):
-        kwargs = serialized.get(LANGCHAIN_KWARGS_KEY)
-        tools = kwargs.get(LANGCHAIN_TOOLS_KEY) if isinstance(kwargs, Mapping) else None
-    if not isinstance(tools, list):
-        return None
-    names = []
-    for tool in tools:
-        if not isinstance(tool, Mapping):
+def _extract_tools(*sources: Any) -> list[dict[str, Any]] | None:
+    """Return complete tool definitions from LangChain callback payloads."""
+    candidates: list[Any] = []
+    for source in sources:
+        if not isinstance(source, Mapping):
             continue
-        function = tool.get(LANGCHAIN_FUNCTION_KEY)
-        name = (
-            function.get(LANGCHAIN_NAME_KEY)
-            if isinstance(function, Mapping)
-            else tool.get(LANGCHAIN_NAME_KEY)
+        candidates.append(source)
+        for key in (LANGCHAIN_KWARGS_KEY, "invocation_params", "options"):
+            nested = source.get(key)
+            if isinstance(nested, Mapping):
+                candidates.append(nested)
+
+    for candidate in candidates:
+        tools = candidate.get(LANGCHAIN_TOOLS_KEY) or candidate.get(
+            LANGCHAIN_FUNCTIONS_KEY
         )
-        if isinstance(name, str) and name:
-            names.append(name)
-    return names or None
+        if not isinstance(tools, list):
+            continue
+        normalized = []
+        for tool in tools:
+            serialized_tool = _serialize_value(tool)
+            if isinstance(serialized_tool, Mapping):
+                normalized.append(dict(serialized_tool))
+        if normalized:
+            return normalized
+    return None
+
+
+def _extract_respan_attributes(metadata: Any) -> dict[str, Any]:
+    """Bridge explicit ``metadata.respan_params`` into canonical attributes."""
+    if not isinstance(metadata, Mapping):
+        return {}
+    params = metadata.get("respan_params")
+    if not isinstance(params, Mapping):
+        return {}
+
+    attributes: dict[str, Any] = {}
+    for key, value in params.items():
+        attribute_key = RESPAN_SPAN_ATTRIBUTES_MAP.get(str(key))
+        if attribute_key is None:
+            continue
+        if attribute_key == RESPAN_METADATA and isinstance(value, Mapping):
+            for metadata_key, metadata_value in value.items():
+                attributes[f"{RESPAN_METADATA}.{metadata_key}"] = (
+                    metadata_value
+                    if isinstance(metadata_value, (str, bool, int, float))
+                    else _to_json_string(metadata_value)
+                )
+            continue
+        if isinstance(value, (Mapping, list, tuple, set)):
+            attributes[attribute_key] = _to_json_string(value)
+        elif value is not None:
+            attributes[attribute_key] = value
+    return attributes
 
 
 def _detect_framework(
@@ -637,9 +685,7 @@ def _detect_framework(
     if isinstance(metadata, Mapping):
         haystack.extend(str(key).lower() for key in metadata)
         haystack.extend(
-            str(value).lower()
-            for value in metadata.values()
-            if isinstance(value, str)
+            str(value).lower() for value in metadata.values() if isinstance(value, str)
         )
     if isinstance(serialized, Mapping):
         haystack.append(json.dumps(_serialize_value(serialized), default=str).lower())
@@ -683,7 +729,7 @@ def _callback_list_contains(callbacks: list[Any], handler: Any) -> bool:
 
 def add_respan_callback(
     config: Mapping[str, Any] | None = None,
-    handler: "RespanCallbackHandler | None" = None,
+    handler: RespanCallbackHandler | None = None,
 ) -> dict[str, Any]:
     """Return a RunnableConfig copy with a Respan callback handler attached."""
     callback_handler = handler or get_callback_handler()
@@ -696,7 +742,7 @@ def add_respan_callback(
     return new_config
 
 
-def _with_respan_callback(callbacks: Any, handler: "RespanCallbackHandler") -> Any:
+def _with_respan_callback(callbacks: Any, handler: RespanCallbackHandler) -> Any:
     if callbacks is None:
         return [handler]
 
@@ -731,7 +777,7 @@ def _with_respan_callback(callbacks: Any, handler: "RespanCallbackHandler") -> A
     return [callbacks, handler]
 
 
-def get_callback_handler(**kwargs: Any) -> "RespanCallbackHandler":
+def get_callback_handler(**kwargs: Any) -> RespanCallbackHandler:
     """Create a Respan callback handler for explicit LangChain/LangGraph config."""
     kwargs.setdefault(GROUP_LANGFLOW_ROOT_RUNS_KWARG, True)
     return RespanCallbackHandler(**kwargs)
@@ -786,7 +832,9 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
         extra_attributes: dict[str, Any] | None = None,
     ) -> None:
         run_hex = _run_id_to_hex(run_id)
-        parent_hex = _run_id_to_hex(parent_run_id) if parent_run_id is not None else None
+        parent_hex = (
+            _run_id_to_hex(parent_run_id) if parent_run_id is not None else None
+        )
         framework = _detect_framework(
             serialized=serialized,
             tags=tags,
@@ -815,7 +863,9 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
         parent_span_id = (
             _derive_span_id(parent_hex)
             if parent_hex
-            else active_parent[1] if active_parent else None
+            else active_parent[1]
+            if active_parent
+            else None
         )
         span_id = _derive_span_id(run_hex)
         parent_path = (
@@ -856,7 +906,6 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
         attrs: dict[str, Any] = {
             RESPAN_LOG_METHOD: LogMethodChoices.TRACING_INTEGRATION.value,
             RESPAN_LOG_TYPE: record.log_type,
-            SpanAttributes.TRACELOOP_SPAN_KIND: record.span_kind,
             SpanAttributes.TRACELOOP_ENTITY_NAME: record.name,
             SpanAttributes.TRACELOOP_ENTITY_PATH: record.entity_path,
             LANGCHAIN_RUN_ID_ATTR: record.run_id,
@@ -866,14 +915,22 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
 
         if self.include_metadata:
             _set_if_present(attrs, LANGCHAIN_TAGS_ATTR, _to_json_string(record.tags))
-            _set_if_present(attrs, LANGCHAIN_METADATA_ATTR, _to_json_string(record.metadata))
-            _set_if_present(attrs, LANGCHAIN_SERIALIZED_ATTR, _to_json_string(record.serialized))
+            _set_if_present(
+                attrs, LANGCHAIN_METADATA_ATTR, _to_json_string(record.metadata)
+            )
+            _set_if_present(
+                attrs, LANGCHAIN_SERIALIZED_ATTR, _to_json_string(record.serialized)
+            )
+
+        attrs.update(_extract_respan_attributes(record.metadata))
 
         if self.include_content:
             input_string = _to_json_string(record.input_value)
             output_string = _to_json_string(_normalize_output_for_logging(output_value))
             _set_if_present(attrs, SpanAttributes.TRACELOOP_ENTITY_INPUT, input_string)
-            _set_if_present(attrs, SpanAttributes.TRACELOOP_ENTITY_OUTPUT, output_string)
+            _set_if_present(
+                attrs, SpanAttributes.TRACELOOP_ENTITY_OUTPUT, output_string
+            )
 
         attrs.update(record.extra_attributes)
         return attrs
@@ -927,7 +984,9 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
         error: BaseException | None = None,
         extra_attributes: dict[str, Any] | None = None,
     ) -> bool:
-        parent_hex = _run_id_to_hex(parent_run_id) if parent_run_id is not None else None
+        parent_hex = (
+            _run_id_to_hex(parent_run_id) if parent_run_id is not None else None
+        )
         active_parent = _get_active_otel_parent() if parent_hex is None else None
         trace_id = (
             self._runs[parent_hex].trace_id
@@ -940,7 +999,9 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
         parent_span_id = (
             _derive_span_id(parent_hex)
             if parent_hex
-            else active_parent[1] if active_parent else None
+            else active_parent[1]
+            if active_parent
+            else None
         )
         parent_path = (
             self._runs[parent_hex].entity_path
@@ -1015,10 +1076,14 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
             metadata=metadata,
         )
 
-    def on_chain_end(self, outputs: dict[str, Any], *, run_id: UUID, **kwargs: Any) -> None:
+    def on_chain_end(
+        self, outputs: dict[str, Any], *, run_id: UUID, **kwargs: Any
+    ) -> None:
         self._end_run(run_id=run_id, output_value=_serialize_value(outputs))
 
-    def on_chain_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
+    def on_chain_error(
+        self, error: BaseException, *, run_id: UUID, **kwargs: Any
+    ) -> None:
         self._end_run(run_id=run_id, error=error)
 
     def on_chat_model_start(
@@ -1044,10 +1109,16 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
                 _set_if_present(
                     extra_attrs,
                     f"{SpanAttributes.LLM_PROMPTS}.{index}.{key}",
-                    _to_json_string(value) if isinstance(value, (dict, list)) else value,
+                    _to_json_string(value)
+                    if isinstance(value, (dict, list))
+                    else value,
                 )
-        tool_names = _extract_tool_names_from_serialized(serialized)
-        _set_if_present(extra_attrs, RESPAN_SPAN_TOOLS, _to_json_string(tool_names))
+        tools = _extract_tools(serialized, kwargs)
+        _set_if_present(
+            extra_attrs,
+            SpanAttributes.LLM_REQUEST_FUNCTIONS,
+            _to_json_string(tools),
+        )
 
         self._start_run(
             run_id=run_id,
@@ -1073,7 +1144,7 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
         metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
-        extra_attrs: dict[str, Any] = {LLM_REQUEST_TYPE: LOG_TYPE_COMPLETION}
+        extra_attrs: dict[str, Any] = {LLM_REQUEST_TYPE: LOG_TYPE_CHAT}
         model = _extract_model(serialized, metadata=metadata)
         _set_if_present(extra_attrs, LLM_REQUEST_MODEL, model)
         for index, prompt in enumerate(prompts or []):
@@ -1088,8 +1159,8 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
             run_id=run_id,
             parent_run_id=parent_run_id,
             name=_extract_name(serialized, LLM_FALLBACK_NAME),
-            log_type=LOG_TYPE_COMPLETION,
-            span_kind=LOG_TYPE_COMPLETION,
+            log_type=LOG_TYPE_TEXT,
+            span_kind=LOG_TYPE_TEXT,
             input_value=prompts,
             serialized=serialized,
             tags=tags,
@@ -1101,6 +1172,7 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
         record = self._runs.get(_run_id_to_hex(run_id))
         if record is not None and token:
             record.streamed_tokens.append(token)
+            record.extra_attributes[SpanAttributes.LLM_IS_STREAMING] = True
 
     def on_llm_end(self, response: Any, *, run_id: UUID, **kwargs: Any) -> None:
         run_hex = _run_id_to_hex(run_id)
@@ -1109,20 +1181,22 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
         completion_messages = _normalize_output_for_logging(completion_messages)
         extra_attrs: dict[str, Any] = {}
         if record is not None:
-            model = _extract_model(record.serialized, response=response, metadata=record.metadata)
+            model = _extract_model(
+                record.serialized, response=response, metadata=record.metadata
+            )
             _set_if_present(extra_attrs, LLM_REQUEST_MODEL, model)
 
         for index, message in enumerate(completion_messages):
             for key, value in message.items():
+                if key == LANGCHAIN_TOOL_CALLS_KEY:
+                    value = _extract_tool_calls_from_messages([message])
                 _set_if_present(
                     extra_attrs,
                     f"{SpanAttributes.LLM_COMPLETIONS}.{index}.{key}",
-                    _to_json_string(value) if isinstance(value, (dict, list)) else value,
+                    _to_json_string(value)
+                    if isinstance(value, (dict, list))
+                    else value,
                 )
-
-        if completion_messages:
-            tool_calls = _extract_tool_calls_from_messages(completion_messages)
-            _set_if_present(extra_attrs, RESPAN_SPAN_TOOL_CALLS, _to_json_string(tool_calls))
 
         prompt_tokens, completion_tokens, total_tokens = _extract_usage(response)
         for key, value in (
@@ -1138,7 +1212,9 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
             extra_attributes=extra_attrs,
         )
 
-    def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
+    def on_llm_error(
+        self, error: BaseException, *, run_id: UUID, **kwargs: Any
+    ) -> None:
         self._end_run(run_id=run_id, error=error)
 
     def on_tool_start(
@@ -1178,10 +1254,14 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
         self._end_run(
             run_id=run_id,
             output_value=_serialize_value(output),
-            extra_attributes={GEN_AI_TOOL_CALL_RESULT: _to_json_string(_serialize_value(output))},
+            extra_attributes={
+                GEN_AI_TOOL_CALL_RESULT: _to_json_string(_serialize_value(output))
+            },
         )
 
-    def on_tool_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
+    def on_tool_error(
+        self, error: BaseException, *, run_id: UUID, **kwargs: Any
+    ) -> None:
         self._end_run(run_id=run_id, error=error)
 
     def on_retriever_start(
@@ -1208,10 +1288,14 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
             metadata=metadata,
         )
 
-    def on_retriever_end(self, documents: Sequence[Any], *, run_id: UUID, **kwargs: Any) -> None:
+    def on_retriever_end(
+        self, documents: Sequence[Any], *, run_id: UUID, **kwargs: Any
+    ) -> None:
         self._end_run(run_id=run_id, output_value=_serialize_value(list(documents)))
 
-    def on_retriever_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
+    def on_retriever_error(
+        self, error: BaseException, *, run_id: UUID, **kwargs: Any
+    ) -> None:
         self._end_run(run_id=run_id, error=error)
 
     def on_agent_action(
@@ -1224,7 +1308,9 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
         metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
-        tool_name = getattr(action, LANGCHAIN_TOOL_ATTR, None) or AGENT_ACTION_FALLBACK_NAME
+        tool_name = (
+            getattr(action, LANGCHAIN_TOOL_ATTR, None) or AGENT_ACTION_FALLBACK_NAME
+        )
         tool_input = getattr(action, LANGCHAIN_TOOL_INPUT_ATTR, None)
         log = getattr(action, LANGCHAIN_LOG_ATTR, None)
         self._emit_event_span(
@@ -1238,7 +1324,9 @@ class RespanCallbackHandler(_CallbackBase):  # type: ignore[misc, valid-type]
             metadata=metadata,
             extra_attributes={
                 GEN_AI_TOOL_NAME: str(tool_name),
-                GEN_AI_TOOL_CALL_ARGUMENTS: _to_json_string(_serialize_value(tool_input)),
+                GEN_AI_TOOL_CALL_ARGUMENTS: _to_json_string(
+                    _serialize_value(tool_input)
+                ),
             },
         )
 

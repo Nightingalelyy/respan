@@ -22,14 +22,6 @@ Auto-instrumentation:
         opentelemetry-instrument python your_app.py
 """
 
-__version__ = "0.2.0"
-
-import logging
-import os
-
-logger = logging.getLogger(__name__)
-
-# Import the instrumentor
 from .instrumentor import LangfuseInstrumentor
 
 __all__ = ["LangfuseInstrumentor"]

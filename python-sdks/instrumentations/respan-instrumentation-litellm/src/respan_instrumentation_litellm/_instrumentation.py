@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-from datetime import datetime, timezone
 import importlib
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any, Iterator
+from typing import Any
 
-from respan_instrumentation_litellm._callback import RespanLiteLLMCallback
-from respan_instrumentation_litellm._callback import _current_otel_parent
+from respan_tracing.core.tracer import RespanTracer
+
+from respan_instrumentation_litellm._callback import (
+    RespanLiteLLMCallback,
+    _current_otel_parent,
+)
 from respan_instrumentation_litellm._constants import (
     CONTENT_KEY,
     DELTA_KEY,
@@ -23,7 +28,6 @@ from respan_instrumentation_litellm._constants import (
     TOOL_CALLS_KEY,
     USAGE_KEY,
 )
-from respan_tracing.core.tracer import RespanTracer
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +102,7 @@ def _suppress_nested_openai_spans() -> Iterator[None]:
         from respan_instrumentation_openai._instrumentation import (
             suppress_openai_instrumentation,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional sibling instrumentation
         yield
         return
 
@@ -272,7 +276,7 @@ class LiteLLMInstrumentor:
         callbacks = _callback_list(getattr(litellm_module, "callbacks", []))
         if callback not in callbacks:
             callbacks.append(callback)
-        setattr(litellm_module, "callbacks", callbacks)
+        litellm_module.callbacks = callbacks
 
         self._callback = callback
         self._litellm_module = litellm_module
@@ -321,15 +325,40 @@ class LiteLLMInstrumentor:
                     parent_context=parent_context,
                 )
 
-            setattr(litellm_module, "completion", completion_wrapper)
+            litellm_module.completion = completion_wrapper
 
         if self._original_acompletion is not None:
             original_acompletion = self._original_acompletion
 
             async def acompletion_wrapper(*args: Any, **kwargs: Any) -> Any:
                 if not kwargs.get(STREAM_KEY):
-                    with _suppress_nested_openai_spans():
-                        return await original_acompletion(*args, **kwargs)
+                    event_kwargs = dict(kwargs)
+                    start_time = datetime.now(timezone.utc)
+                    parent_context = _current_otel_parent()
+                    try:
+                        with _suppress_nested_openai_spans():
+                            response = await original_acompletion(
+                                *args, **_with_skip_marker(kwargs)
+                            )
+                    except Exception as exc:
+                        callback._emit_event(
+                            kwargs=event_kwargs,
+                            response_obj=None,
+                            start_time=start_time,
+                            end_time=datetime.now(timezone.utc),
+                            error=exc,
+                            parent_context=parent_context,
+                        )
+                        raise
+                    callback._emit_event(
+                        kwargs=event_kwargs,
+                        response_obj=response,
+                        start_time=start_time,
+                        end_time=datetime.now(timezone.utc),
+                        error=None,
+                        parent_context=parent_context,
+                    )
+                    return response
 
                 event_kwargs = dict(kwargs)
                 start_time = datetime.now(timezone.utc)
@@ -357,15 +386,15 @@ class LiteLLMInstrumentor:
                     parent_context=parent_context,
                 )
 
-            setattr(litellm_module, "acompletion", acompletion_wrapper)
+            litellm_module.acompletion = acompletion_wrapper
 
     def deactivate(self) -> None:
         """Remove the Respan LiteLLM callback and restore wrapped methods."""
         if self._litellm_module is not None:
             if self._original_completion is not None:
-                setattr(self._litellm_module, "completion", self._original_completion)
+                self._litellm_module.completion = self._original_completion
             if self._original_acompletion is not None:
-                setattr(self._litellm_module, "acompletion", self._original_acompletion)
+                self._litellm_module.acompletion = self._original_acompletion
 
         if self._litellm_module is not None and self._callback is not None:
             callbacks = _callback_list(getattr(self._litellm_module, "callbacks", []))
@@ -374,7 +403,7 @@ class LiteLLMInstrumentor:
                 for existing_callback in callbacks
                 if existing_callback is not self._callback
             ]
-            setattr(self._litellm_module, "callbacks", callbacks)
+            self._litellm_module.callbacks = callbacks
 
         self._callback = None
         self._litellm_module = None

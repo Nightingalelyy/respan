@@ -6,12 +6,9 @@ from types import SimpleNamespace
 from opentelemetry.semconv._incubating.attributes import (
     gen_ai_attributes as GenAIAttributes,
 )
-from opentelemetry.semconv_ai import LLMRequestTypeValues
-from opentelemetry.semconv_ai import SpanAttributes
-
+from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
 from respan_instrumentation_litellm import _callback as callback_module
 from respan_instrumentation_litellm import _instrumentation as instrumentation
-from respan_instrumentation_openai import _instrumentation as openai_instrumentation
 from respan_instrumentation_litellm._callback import RespanLiteLLMCallback
 from respan_instrumentation_litellm._constants import (
     LITELLM_CHAT_SPAN_NAME,
@@ -19,6 +16,7 @@ from respan_instrumentation_litellm._constants import (
     RESPAN_SKIP_CALLBACK_KEY,
 )
 from respan_instrumentation_litellm._translator import build_litellm_span_data
+from respan_instrumentation_openai import _instrumentation as openai_instrumentation
 from respan_sdk.constants.span_attributes import (
     RESPAN_CUSTOMER_PARAMS_ID,
     RESPAN_LOG_METHOD,
@@ -245,8 +243,6 @@ def test_instrumentor_registers_and_removes_litellm_callback(monkeypatch):
     assert fake_litellm.callbacks == ["existing"]
 
 
-
-
 def test_non_streaming_wrapper_suppresses_nested_openai_spans(monkeypatch):
     suppression_states = []
 
@@ -343,3 +339,128 @@ def test_streaming_wrapper_emits_span_after_stream_consumption(monkeypatch):
 
     instrumentor.deactivate()
     assert fake_litellm.completion is fake_completion
+
+
+def test_async_streaming_wrapper_emits_span_after_consumption(monkeypatch):
+    emitted = []
+    suppression_states = []
+
+    class AsyncChunks:
+        def __init__(self):
+            self._chunks = iter(
+                [
+                    SimpleNamespace(
+                        model="openai/gpt-4o-mini",
+                        choices=[
+                            SimpleNamespace(delta=SimpleNamespace(content="async "))
+                        ],
+                    ),
+                    SimpleNamespace(
+                        model="openai/gpt-4o-mini",
+                        choices=[
+                            SimpleNamespace(delta=SimpleNamespace(content="stream"))
+                        ],
+                        usage=SimpleNamespace(
+                            prompt_tokens=5,
+                            completion_tokens=2,
+                            total_tokens=7,
+                        ),
+                    ),
+                ]
+            )
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._chunks)
+            except StopIteration:
+                raise StopAsyncIteration
+
+    async def fake_acompletion(*_args, **_kwargs):
+        suppression_states.append(
+            openai_instrumentation._is_openai_instrumentation_suppressed()
+        )
+        return AsyncChunks()
+
+    fake_litellm = SimpleNamespace(
+        callbacks=[],
+        completion=None,
+        acompletion=fake_acompletion,
+    )
+    monkeypatch.setattr(
+        instrumentation.importlib,
+        "import_module",
+        lambda module_name: fake_litellm if module_name == "litellm" else None,
+    )
+    monkeypatch.setattr(
+        RespanLiteLLMCallback,
+        "_emit_event",
+        lambda self, **kwargs: emitted.append(kwargs),
+    )
+
+    instrumentor = instrumentation.LiteLLMInstrumentor()
+    instrumentor.activate()
+
+    async def consume():
+        stream = await fake_litellm.acompletion(
+            model="openai/gpt-4o-mini",
+            messages=[{"role": "user", "content": "Hi"}],
+            stream=True,
+        )
+        return [chunk async for chunk in stream]
+
+    chunks = asyncio.run(consume())
+    assert len(chunks) == 2
+    assert suppression_states == [True]
+    assert len(emitted) == 1
+    assert emitted[0]["response_obj"].choices[0].message.content == "async stream"
+    assert emitted[0]["response_obj"].usage.total_tokens == 7
+    assert emitted[0]["kwargs"]["stream"] is True
+
+    instrumentor.deactivate()
+    assert fake_litellm.acompletion is fake_acompletion
+
+
+def test_async_non_streaming_wrapper_emits_deterministically(monkeypatch):
+    emitted = []
+    original_kwargs = {}
+
+    async def fake_acompletion(*_args, **kwargs):
+        original_kwargs.update(kwargs)
+        return _response(content="async response")
+
+    fake_litellm = SimpleNamespace(
+        callbacks=[],
+        completion=None,
+        acompletion=fake_acompletion,
+    )
+    monkeypatch.setattr(
+        instrumentation.importlib,
+        "import_module",
+        lambda module_name: fake_litellm if module_name == "litellm" else None,
+    )
+    monkeypatch.setattr(
+        RespanLiteLLMCallback,
+        "_emit_event",
+        lambda self, **kwargs: emitted.append(kwargs),
+    )
+
+    instrumentor = instrumentation.LiteLLMInstrumentor()
+    instrumentor.activate()
+    response = asyncio.run(
+        fake_litellm.acompletion(
+            model="openai/gpt-4o-mini",
+            messages=[{"role": "user", "content": "Hi"}],
+        )
+    )
+
+    assert response.choices[0].message.content == "async response"
+    assert original_kwargs["metadata"][RESPAN_SKIP_CALLBACK_KEY] is True
+    assert len(emitted) == 1
+    assert emitted[0]["error"] is None
+    assert emitted[0]["response_obj"] is response
+
+    instrumentor.deactivate()
+    assert fake_litellm.acompletion is fake_acompletion
