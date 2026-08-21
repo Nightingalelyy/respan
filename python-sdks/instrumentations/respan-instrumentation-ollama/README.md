@@ -2,6 +2,8 @@
 
 Respan instrumentation plugin for [Ollama](https://ollama.com/). It instruments the official Ollama Python client and emits chat, completion, and embedding spans into the Respan tracing pipeline.
 
+Chat spans include canonical request tool definitions and only the tool calls emitted by the current response turn. Streamed calls are marked with `llm.is_streaming`, and provider HTTP failures retain their explicit status code.
+
 ## Configuration
 
 ### 1. Install

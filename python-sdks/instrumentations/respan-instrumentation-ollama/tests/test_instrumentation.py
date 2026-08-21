@@ -8,13 +8,13 @@ from typing import Any
 
 import pytest
 from opentelemetry import context as context_api
+from opentelemetry import trace
 from opentelemetry.semconv._incubating.attributes import (
     gen_ai_attributes as GenAIAttributes,
 )
 from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
-
-from respan_instrumentation_ollama import OllamaInstrumentor
-from respan_instrumentation_ollama import _instrumentation
+from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
+from respan_instrumentation_ollama import OllamaInstrumentor, _instrumentation
 from respan_instrumentation_ollama._constants import (
     ASYNC_CLIENT_CLASS_NAME,
     CHAT_METHOD_NAME,
@@ -89,6 +89,8 @@ def reset_instrumentation_globals() -> None:
     _instrumentation._original_async_embed = None
     _instrumentation._original_sync_embeddings = None
     _instrumentation._original_async_embeddings = None
+    OllamaInstrumentor._patches_applied = False
+    OllamaInstrumentor._activation_count = 0
 
 
 @pytest.fixture()
@@ -193,7 +195,7 @@ def fake_ollama(monkeypatch: pytest.MonkeyPatch) -> tuple[type[Any], type[Any]]:
     client_module = ModuleType(OLLAMA_CLIENT_MODULE)
     setattr(client_module, CLIENT_CLASS_NAME, Client)
     setattr(client_module, ASYNC_CLIENT_CLASS_NAME, AsyncClient)
-    setattr(ollama_module, "_client", client_module)
+    ollama_module._client = client_module
 
     monkeypatch.setitem(sys.modules, "ollama", ollama_module)
     monkeypatch.setitem(sys.modules, OLLAMA_CLIENT_MODULE, client_module)
@@ -286,8 +288,129 @@ def test_generate_stream_emits_one_span_after_iterator_is_consumed(
     assert attrs[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"] == "Hello world."
     assert attrs[GenAIAttributes.GEN_AI_USAGE_INPUT_TOKENS] == 2
     assert attrs[GenAIAttributes.GEN_AI_USAGE_OUTPUT_TOKENS] == 3
+    assert attrs[SpanAttributes.LLM_IS_STREAMING] is True
     _assert_no_off_contract_aliases(attrs)
 
+    instrumentor.deactivate()
+
+
+def test_sync_stream_early_close_emits_once_with_call_time_parent(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_ollama: tuple[type[Any], type[Any]],
+    captured_spans: list[Any],
+) -> None:
+    Client, _ = fake_ollama
+
+    class CloseAwareIterator:
+        def __init__(self) -> None:
+            self._chunks = iter(
+                [
+                    _generate_response(model="llama3.2", response="Hello "),
+                    _generate_response(model="llama3.2", response="world."),
+                ]
+            )
+            self.close_count = 0
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return next(self._chunks)
+
+        def close(self) -> None:
+            self.close_count += 1
+
+    source = CloseAwareIterator()
+
+    def generate(
+        self: Any,
+        model: str = "",
+        prompt: str | None = None,
+        *,
+        system: str | None = None,
+        stream: bool = False,
+    ) -> Any:
+        return source
+
+    monkeypatch.setattr(Client, GENERATE_METHOD_NAME, generate)
+    instrumentor = OllamaInstrumentor()
+    instrumentor.activate()
+    call_parent = SpanContext(
+        trace_id=int("1" * 32, 16),
+        span_id=int("2" * 16, 16),
+        is_remote=False,
+        trace_flags=TraceFlags(TraceFlags.SAMPLED),
+    )
+    close_parent = SpanContext(
+        trace_id=int("3" * 32, 16),
+        span_id=int("4" * 16, 16),
+        is_remote=False,
+        trace_flags=TraceFlags(TraceFlags.SAMPLED),
+    )
+
+    with trace.use_span(NonRecordingSpan(call_parent), end_on_exit=False):
+        stream = Client().generate(
+            model="llama3.2",
+            prompt="Say hello",
+            stream=True,
+        )
+    assert next(stream).response == "Hello "
+    with trace.use_span(NonRecordingSpan(close_parent), end_on_exit=False):
+        stream.close()
+        stream.close()
+
+    assert len(captured_spans) == 1
+    span = captured_spans[0]
+    assert span.context.trace_id == call_parent.trace_id
+    assert span.parent is not None
+    assert span.parent.span_id == call_parent.span_id
+    assert span._attributes[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"] == ("Hello ")
+    assert source.close_count == 1
+    instrumentor.deactivate()
+
+
+def test_long_stream_retention_is_bounded_and_keeps_terminal_usage(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_ollama: tuple[type[Any], type[Any]],
+    captured_spans: list[Any],
+) -> None:
+    Client, _ = fake_ollama
+
+    def long_generate(
+        self: Any,
+        model: str = "",
+        prompt: str | None = None,
+        *,
+        system: str | None = None,
+        stream: bool = False,
+    ) -> Any:
+        def chunks():
+            for _ in range(100):
+                yield _generate_response(model=model, response="x" * 200)
+            yield _generate_response(
+                model=model,
+                response="",
+                prompt_tokens=123,
+                completion_tokens=456,
+            )
+
+        return chunks()
+
+    monkeypatch.setattr(Client, GENERATE_METHOD_NAME, long_generate)
+    instrumentor = OllamaInstrumentor()
+    instrumentor.activate()
+
+    assert len(
+        list(Client().generate(model="llama3.2", prompt="long", stream=True))
+    ) == (101)
+
+    assert len(captured_spans) == 1
+    attrs = captured_spans[0]._attributes
+    output = attrs[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"]
+    assert len(output) <= 8_000
+    assert output.endswith("...[truncated]")
+    assert attrs[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] == 123
+    assert attrs[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] == 456
     instrumentor.deactivate()
 
 
@@ -326,6 +449,82 @@ def test_async_methods_emit_spans(
             == "Async stream."
         )
 
+        instrumentor.deactivate()
+
+    asyncio.run(run())
+
+
+def test_async_stream_cancellation_emits_once_with_call_time_parent(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_ollama: tuple[type[Any], type[Any]],
+    captured_spans: list[Any],
+) -> None:
+    async def run() -> None:
+        _, AsyncClient = fake_ollama
+
+        class CloseAwareAsyncIterator:
+            def __init__(self) -> None:
+                self._first = True
+                self.close_count = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self._first:
+                    self._first = False
+                    return _chat_response(model="llama3.2", content="first")
+                await asyncio.Event().wait()
+                raise StopAsyncIteration
+
+            async def aclose(self) -> None:
+                self.close_count += 1
+                raise asyncio.CancelledError
+
+        source = CloseAwareAsyncIterator()
+
+        async def blocking_chat(
+            self: Any,
+            model: str = "",
+            messages: list[dict[str, Any]] | None = None,
+            *,
+            tools: list[Any] | None = None,
+            stream: bool = False,
+        ) -> Any:
+            return source
+
+        monkeypatch.setattr(AsyncClient, CHAT_METHOD_NAME, blocking_chat)
+        instrumentor = OllamaInstrumentor()
+        instrumentor.activate()
+        call_parent = SpanContext(
+            trace_id=int("5" * 32, 16),
+            span_id=int("6" * 16, 16),
+            is_remote=False,
+            trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        )
+
+        with trace.use_span(NonRecordingSpan(call_parent), end_on_exit=False):
+            stream = await AsyncClient().chat(
+                model="llama3.2",
+                messages=[{"role": "user", "content": "Stream"}],
+                stream=True,
+            )
+        assert (await anext(stream)).message.content == "first"
+        pending = asyncio.create_task(anext(stream))
+        await asyncio.sleep(0)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        await stream.aclose()
+
+        assert len(captured_spans) == 1
+        span = captured_spans[0]
+        assert span.context.trace_id == call_parent.trace_id
+        assert span.parent is not None
+        assert span.parent.span_id == call_parent.span_id
+        assert span.status.status_code.name == "ERROR"
+        assert span._attributes["error.message"] == "CancelledError"
+        assert source.close_count == 1
         instrumentor.deactivate()
 
     asyncio.run(run())
@@ -391,6 +590,41 @@ def test_error_path_emits_failed_span(
     instrumentor.deactivate()
 
 
+def test_error_path_preserves_explicit_provider_status(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_ollama: tuple[type[Any], type[Any]],
+    captured_spans: list[Any],
+) -> None:
+    Client, _ = fake_ollama
+
+    class ProviderError(RuntimeError):
+        status_code = 503
+
+    def raise_error(
+        self: Any,
+        model: str = "",
+        messages: list[dict[str, Any]] | None = None,
+        *,
+        tools: list[Any] | None = None,
+        stream: bool = False,
+    ) -> Any:
+        raise ProviderError("provider overloaded")
+
+    monkeypatch.setattr(Client, CHAT_METHOD_NAME, raise_error)
+    instrumentor = OllamaInstrumentor()
+    instrumentor.activate()
+
+    with pytest.raises(ProviderError, match="provider overloaded"):
+        Client().chat(model="llama3.2", messages=[{"role": "user", "content": "fail"}])
+
+    assert len(captured_spans) == 1
+    span = captured_spans[0]
+    assert span.status.status_code.name == "ERROR"
+    assert span._attributes["status_code"] == 503
+
+    instrumentor.deactivate()
+
+
 def test_deactivate_restores_original_methods(
     fake_ollama: tuple[type[Any], type[Any]],
 ) -> None:
@@ -412,6 +646,32 @@ def test_deactivate_restores_original_methods(
     assert getattr(Client, GENERATE_METHOD_NAME) is original_sync_generate
     assert getattr(Client, EMBED_METHOD_NAME) is original_sync_embed
     assert getattr(AsyncClient, CHAT_METHOD_NAME) is original_async_chat
+
+
+def test_multiple_instrumentors_keep_process_patch_until_last_deactivate(
+    fake_ollama: tuple[type[Any], type[Any]],
+) -> None:
+    Client, _ = fake_ollama
+    original_sync_chat = getattr(Client, CHAT_METHOD_NAME)
+    first = OllamaInstrumentor()
+    second = OllamaInstrumentor()
+
+    first.activate()
+    patched_sync_chat = getattr(Client, CHAT_METHOD_NAME)
+    second.activate()
+
+    assert patched_sync_chat is not original_sync_chat
+    assert getattr(Client, CHAT_METHOD_NAME) is patched_sync_chat
+    assert OllamaInstrumentor._activation_count == 2
+
+    first.deactivate()
+    assert getattr(Client, CHAT_METHOD_NAME) is patched_sync_chat
+    assert second._is_instrumented is True
+    assert OllamaInstrumentor._activation_count == 1
+
+    second.deactivate()
+    assert getattr(Client, CHAT_METHOD_NAME) is original_sync_chat
+    assert OllamaInstrumentor._activation_count == 0
 
 
 def test_active_workflow_name_is_attached_to_synthetic_span() -> None:
