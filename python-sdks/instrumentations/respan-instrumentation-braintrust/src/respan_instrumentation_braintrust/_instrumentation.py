@@ -361,6 +361,62 @@ def _build_metadata(record: Mapping[str, Any]) -> dict[str, Any] | None:
     return _sanitize_json(metadata)
 
 
+def _metadata_mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if not isinstance(value, str):
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return dict(parsed) if isinstance(parsed, Mapping) else {}
+
+
+def _merge_metadata(
+    braintrust_metadata: Mapping[str, Any] | None,
+    propagated_metadata: Any,
+) -> dict[str, Any] | None:
+    """Merge propagated metadata without replacing Braintrust evaluation data.
+
+    Propagated fields win generic-key collisions because they describe the
+    active Respan run. Braintrust-owned scores, metrics, tags, and identifiers
+    are namespaced under ``braintrust_*`` and therefore remain intact.
+    """
+
+    merged = dict(braintrust_metadata or {})
+    merged.update(_metadata_mapping(propagated_metadata))
+    return _sanitize_json(merged) if merged else None
+
+
+def _flatten_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    """Expose metadata through canonical per-key attributes used by OTLP."""
+
+    flattened: dict[str, Any] = {}
+    for key, value in metadata.items():
+        attribute = f"{RESPAN_METADATA}.{key}"
+        if value is None or isinstance(value, str | int | float | bool):
+            flattened[attribute] = value
+        else:
+            flattened[attribute] = json.dumps(_sanitize_json(value), default=str)
+    return flattened
+
+
+def _propagated_metadata(extra_attributes: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not extra_attributes:
+        return {}
+    metadata = _metadata_mapping(extra_attributes.get(RESPAN_METADATA))
+    prefix = f"{RESPAN_METADATA}."
+    metadata.update(
+        {
+            key[len(prefix) :]: value
+            for key, value in extra_attributes.items()
+            if key.startswith(prefix)
+        }
+    )
+    return metadata
+
+
 def _record_mapping(item: Any) -> Mapping[str, Any] | None:
     if isinstance(item, Mapping):
         return item
@@ -435,8 +491,10 @@ def _build_span_from_record(
         attrs[TLSpanAttributes.TRACELOOP_ENTITY_INPUT] = input_string
     if output_string is not None:
         attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = output_string
+    metadata = _merge_metadata(metadata, _propagated_metadata(extra_attributes))
     if metadata is not None:
         attrs[RESPAN_METADATA] = json.dumps(metadata, default=str)
+        attrs.update(_flatten_metadata(metadata))
 
     if log_type == LOG_TYPE_CHAT:
         attrs[LLM_REQUEST_TYPE] = LLMRequestTypeValues.CHAT.value
@@ -455,7 +513,13 @@ def _build_span_from_record(
             attrs[_LLM_USAGE_TOTAL_TOKENS] = total_tokens
 
     if extra_attributes:
-        attrs.update(extra_attributes)
+        attrs.update(
+            {
+                key: value
+                for key, value in extra_attributes.items()
+                if key != RESPAN_METADATA and not key.startswith(f"{RESPAN_METADATA}.")
+            }
+        )
     if workflow_name is not None:
         attrs[TLSpanAttributes.TRACELOOP_WORKFLOW_NAME] = workflow_name
 

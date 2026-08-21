@@ -144,3 +144,57 @@ def test_flush_injects_buffered_braintrust_records(monkeypatch):
         exported[0].attributes[TLSpanAttributes.TRACELOOP_WORKFLOW_NAME]
         == "Braintrust Basic Workflow"
     )
+
+
+def test_braintrust_and_propagated_metadata_are_merged() -> None:
+    record = _llm_record()
+    record["tags"] = ["evaluation", "release"]
+    record["scores"] = {
+        "overall": 0.94,
+        "completeness": 0.96,
+        "brevity": 0.9,
+    }
+    record["metrics"] = {
+        **record["metrics"],
+        "latency_ms": 1250,
+    }
+
+    span = _build_span_from_record(
+        record,
+        extra_attributes={
+            RESPAN_TRACE_GROUP_ID: "Braintrust Scored Evaluation Workflow",
+            f"{RESPAN_METADATA}.example_set": "braintrust",
+            f"{RESPAN_METADATA}.example_name": "03_scored_evaluation_workflow",
+            f"{RESPAN_METADATA}.workflow_name": "Braintrust Scored Evaluation Workflow",
+            f"{RESPAN_METADATA}.run_id": "otel2-fix-py-group-10",
+            f"{RESPAN_METADATA}.request_id": "propagated-request",
+        },
+    )
+
+    metadata = json.loads(span.attributes[RESPAN_METADATA])
+    assert metadata["example_set"] == "braintrust"
+    assert metadata["example_name"] == "03_scored_evaluation_workflow"
+    assert metadata["workflow_name"] == "Braintrust Scored Evaluation Workflow"
+    assert metadata["run_id"] == "otel2-fix-py-group-10"
+    assert metadata["request_id"] == "propagated-request"
+    assert metadata["braintrust_tags"] == ["evaluation", "release"]
+    assert metadata["braintrust_scores"] == {
+        "overall": 0.94,
+        "completeness": 0.96,
+        "brevity": 0.9,
+    }
+    assert metadata["braintrust_metrics"]["latency_ms"] == 1250
+    assert metadata["braintrust_log_id"] == "00000000000000000000000000000099"
+    assert json.loads(
+        span.attributes[f"{RESPAN_METADATA}.braintrust_scores"]
+    ) == metadata["braintrust_scores"]
+    assert json.loads(
+        span.attributes[f"{RESPAN_METADATA}.braintrust_metrics"]
+    ) == metadata["braintrust_metrics"]
+    assert json.loads(
+        span.attributes[f"{RESPAN_METADATA}.braintrust_tags"]
+    ) == metadata["braintrust_tags"]
+    assert (
+        span.attributes[f"{RESPAN_METADATA}.braintrust_log_id"]
+        == "00000000000000000000000000000099"
+    )

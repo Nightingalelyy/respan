@@ -39,6 +39,8 @@ from respan_sdk.constants.span_attributes import (
 from respan_sdk.utils.serialization import serialize_value
 
 logger = logging.getLogger(__name__)
+_BURR_METADATA_ATTRIBUTE = f"{RESPAN_METADATA}.burr"
+_MAX_CAPTURED_STREAM_ITEMS = 32
 
 
 @dataclasses.dataclass
@@ -47,6 +49,7 @@ class _ActiveSpan:
     span: Any
     token: Any
     metadata: dict[str, Any]
+    application_exception: BaseException | None = None
 
 
 _ACTIVE_SPANS: ContextVar[tuple[_ActiveSpan, ...]] = ContextVar(
@@ -151,6 +154,7 @@ class BurrLifecycleAdapter(
             RESPAN_LOG_TYPE: log_type,
             RESPAN_TRACE_GROUP_ID: str(app_id),
             RESPAN_METADATA: _json_string({"burr": metadata}),
+            _BURR_METADATA_ATTRIBUTE: _json_string(metadata),
             SpanAttributes.TRACELOOP_ENTITY_NAME: entity_name,
             SpanAttributes.TRACELOOP_ENTITY_PATH: entity_name,
         }
@@ -217,6 +221,43 @@ class BurrLifecycleAdapter(
         stack = _ACTIVE_SPANS.get()
         return stack[-1] if stack else None
 
+    @staticmethod
+    def _sync_metadata(active: _ActiveSpan) -> None:
+        active.span.set_attribute(
+            RESPAN_METADATA,
+            _json_string({"burr": active.metadata}),
+        )
+        active.span.set_attribute(
+            _BURR_METADATA_ATTRIBUTE,
+            _json_string(active.metadata),
+        )
+
+    def _remember_application_exception(self, exception: BaseException) -> None:
+        """Retain a failed child for Burr versions that drop the root error.
+
+        Burr 0.42 invokes the application post hook with ``exception=None``
+        after a failing action. Replace the nearest application entry in this
+        context-local immutable stack so nested or concurrent runs cannot
+        consume one another's failures.
+        """
+
+        stack = list(_ACTIVE_SPANS.get())
+        for index in range(len(stack) - 1, -1, -1):
+            active = stack[index]
+            if active.scope == "application":
+                stack[index] = dataclasses.replace(
+                    active,
+                    application_exception=exception,
+                )
+                _ACTIVE_SPANS.set(tuple(stack))
+                return
+
+    def _application_exception(self) -> BaseException | None:
+        for active in reversed(_ACTIVE_SPANS.get()):
+            if active.scope == "application":
+                return active.application_exception
+        return None
+
     def pre_run_execute_call(
         self,
         *,
@@ -259,6 +300,8 @@ class BurrLifecycleAdapter(
         **future_kwargs: Any,
     ) -> None:
         del future_kwargs
+        if exception is None:
+            exception = self._application_exception()
         output = (
             {"status": "completed", "state": _jsonable(state)}
             if exception is None
@@ -319,6 +362,12 @@ class BurrLifecycleAdapter(
         **future_kwargs: Any,
     ) -> None:
         del future_kwargs
+        if exception is not None:
+            self._remember_application_exception(exception)
+        active = self._current()
+        if active is not None and "stream" in active.metadata:
+            active.metadata["stream"]["completed"] = exception is None
+            self._sync_metadata(active)
         output = {
             "status": "completed" if exception is None else "error",
             "result": _jsonable(result),
@@ -392,10 +441,7 @@ class BurrLifecycleAdapter(
             active.metadata["logged_attributes"] = _jsonable(attributes)
         if tags:
             active.metadata["tags"] = _jsonable(tags)
-        active.span.set_attribute(
-            RESPAN_METADATA,
-            _json_string({"burr": active.metadata}),
-        )
+        self._sync_metadata(active)
 
     def pre_start_stream(
         self,
@@ -410,6 +456,18 @@ class BurrLifecycleAdapter(
         active = self._current()
         if not self.enabled or active is None:
             return
+        active.metadata["stream"] = {
+            "action": action,
+            "sequence_id": sequence_id,
+            "app_id": app_id,
+            "partition_key": partition_key,
+            "started": True,
+            "completed": False,
+            "item_count": 0,
+        }
+        if self.capture_content:
+            active.metadata["stream"]["items"] = []
+        self._sync_metadata(active)
         active.span.add_event(
             "burr.stream.start",
             {
@@ -433,6 +491,18 @@ class BurrLifecycleAdapter(
         active = self._current()
         if not self.enabled or active is None:
             return
+        stream = active.metadata.setdefault("stream", {})
+        if stream.get("action") != action:
+            return
+        stream["item_count"] = int(stream.get("item_count", 0)) + 1
+        items = stream.get("items")
+        if (
+            self.capture_content
+            and isinstance(items, list)
+            and len(items) < _MAX_CAPTURED_STREAM_ITEMS
+        ):
+            items.append({"index": item_index, "value": _jsonable(item)})
+        self._sync_metadata(active)
         attributes = {
             "burr.action": action,
             "burr.sequence_id": sequence_id,
@@ -453,6 +523,17 @@ class BurrLifecycleAdapter(
         active = self._current()
         if not self.enabled or active is None:
             return
+        stream = active.metadata.setdefault("stream", {})
+        if stream.get("action") != action:
+            return
+        stream.update(
+            {
+                "action": action,
+                "sequence_id": sequence_id,
+                "completed": True,
+            }
+        )
+        self._sync_metadata(active)
         active.span.add_event(
             "burr.stream.end",
             {
