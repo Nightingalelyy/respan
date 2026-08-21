@@ -1,0 +1,6 @@
+{
+  "summary": "Add OTLP serialization coverage for Together AI non-chat model and usage attributes",
+  "packages": {
+    "@respan/instrumentation-together-ai": "none"
+  }
+}
