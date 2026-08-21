@@ -1,0 +1,7 @@
+{
+  "summary": "Fix AgentScope custom-model activation and AgentSpec trace semantics",
+  "packages": {
+    "respan-instrumentation-agentscope": "patch",
+    "respan-instrumentation-agentspec": "patch"
+  }
+}

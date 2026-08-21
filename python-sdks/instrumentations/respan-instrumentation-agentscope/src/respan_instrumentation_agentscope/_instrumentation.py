@@ -8,7 +8,7 @@ import inspect
 import json
 import logging
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -1077,12 +1077,20 @@ class AgentScopeInstrumentor:
         *,
         agent: Any | None = None,
         model: Any | None = None,
+        models: Sequence[Any] | None = None,
         toolkit: Any | None = None,
         instrument_models: bool = True,
         instrument_tools: bool = True,
     ) -> None:
+        if model is not None and models is not None:
+            raise ValueError("Pass either model or models, not both")
+
         self._agent = agent
-        self._model = model
+        self._models = (
+            tuple(models)
+            if models is not None
+            else (() if model is None else (model,))
+        )
         self._toolkit = toolkit
         self._instrument_models = instrument_models
         self._instrument_tools = instrument_tools
@@ -1205,11 +1213,17 @@ class AgentScopeInstrumentor:
                 )
 
         if self._instrument_models:
-            if self._model is not None:
-                patched_any |= self._patch_model_target(
-                    self._model,
-                    is_bound_method=True,
-                )
+            if self._models:
+                seen_model_classes: set[type[Any]] = set()
+                for model in self._models:
+                    model_class = type(model)
+                    if model_class in seen_model_classes:
+                        continue
+                    seen_model_classes.add(model_class)
+                    patched_any |= self._patch_model_target(
+                        model,
+                        is_bound_method=True,
+                    )
             else:
                 try:
                     model_module = self._load_model_module()
