@@ -1,0 +1,8 @@
+{
+  "summary": "Repair OpenTelemetry 2.x span structure, content, privacy, errors, streaming, and lifecycle behavior for the Python SageMaker, Semantic Kernel, and Smolagents instrumentations",
+  "packages": {
+    "respan-instrumentation-sagemaker": "patch",
+    "respan-instrumentation-semantic-kernel": "patch",
+    "respan-instrumentation-smolagents": "patch"
+  }
+}

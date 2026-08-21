@@ -14,21 +14,7 @@ from opentelemetry.semconv._incubating.attributes import (
 )
 from opentelemetry.semconv_ai import LLMRequestTypeValues
 from opentelemetry.semconv_ai import SpanAttributes as TLSpanAttributes
-
-from respan_instrumentation_sagemaker._constants import (
-    SAGEMAKER_CHAT_SPAN_NAME,
-    SAGEMAKER_COMPLETION_SPAN_NAME,
-    SAGEMAKER_SYSTEM_NAME,
-)
-from respan_instrumentation_sagemaker._translator import (
-    SageMakerResponse,
-    parse_sagemaker_request,
-    parse_sagemaker_response,
-    parse_sagemaker_stream_response,
-    safe_json,
-    to_json_attr,
-)
-from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT, LOG_TYPE_TEXT
+from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT, LOG_TYPE_TASK, LOG_TYPE_TEXT
 from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
 from respan_sdk.utils.data_processing.id_processing import (
     format_span_id,
@@ -36,15 +22,29 @@ from respan_sdk.utils.data_processing.id_processing import (
 )
 from respan_tracing.utils.span_factory import build_readable_span, inject_span
 
+from respan_instrumentation_sagemaker._constants import (
+    SAGEMAKER_ASYNC_SPAN_NAME,
+    SAGEMAKER_CHAT_SPAN_NAME,
+    SAGEMAKER_COMPLETION_SPAN_NAME,
+    SAGEMAKER_SYSTEM_NAME,
+)
+from respan_instrumentation_sagemaker._translator import (
+    SageMakerResponse,
+    SageMakerStreamAccumulator,
+    parse_sagemaker_request,
+    parse_sagemaker_response,
+    parse_sagemaker_stream_response,
+    redact_text,
+    safe_json,
+    to_json_attr,
+)
+
 logger = logging.getLogger(__name__)
 
 
 def _current_trace_parent_ids() -> tuple[str | None, str | None]:
-    try:
-        current_span = trace.get_current_span()
-        span_context = current_span.get_span_context()
-    except Exception:
-        return None, None
+    current_span = trace.get_current_span()
+    span_context = current_span.get_span_context()
 
     trace_id = getattr(span_context, "trace_id", 0) or 0
     span_id = getattr(span_context, "span_id", 0) or 0
@@ -69,6 +69,7 @@ def _base_attrs(request_type: str) -> dict[str, Any]:
     span_name = _span_name_for_request_type(request_type)
     attrs = {
         TLSpanAttributes.LLM_SYSTEM: SAGEMAKER_SYSTEM_NAME,
+        GenAIAttributes.GEN_AI_PROVIDER_NAME: SAGEMAKER_SYSTEM_NAME,
         TLSpanAttributes.LLM_REQUEST_TYPE: request_type,
         TLSpanAttributes.TRACELOOP_ENTITY_NAME: span_name,
         TLSpanAttributes.TRACELOOP_ENTITY_PATH: span_name,
@@ -115,9 +116,10 @@ def _set_usage_attrs(attrs: dict[str, Any], usage: Mapping[str, int]) -> None:
 
 
 def _set_response_attrs(attrs: dict[str, Any], response: SageMakerResponse) -> None:
+    content = redact_text(response.content)
     attrs[f"{TLSpanAttributes.LLM_COMPLETIONS}.0.role"] = response.role
-    attrs[f"{TLSpanAttributes.LLM_COMPLETIONS}.0.content"] = response.content
-    attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = response.content
+    attrs[f"{TLSpanAttributes.LLM_COMPLETIONS}.0.content"] = content
+    attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = content
     if response.tool_calls:
         attrs[f"{TLSpanAttributes.LLM_COMPLETIONS}.0.tool_calls"] = safe_json(
             response.tool_calls
@@ -130,13 +132,39 @@ def build_sagemaker_attrs(
     operation_name: str,
     api_params: Mapping[str, Any] | None,
     response_payload: Any = None,
-    stream_events: list[Any] | None = None,
+    stream_events: list[Any] | SageMakerStreamAccumulator | None = None,
 ) -> dict[str, Any]:
     request = parse_sagemaker_request(
         operation_name=operation_name,
         api_params=api_params,
     )
+    if operation_name == "InvokeEndpointAsync":
+        attrs = {
+            RESPAN_LOG_TYPE: LOG_TYPE_TASK,
+            TLSpanAttributes.TRACELOOP_ENTITY_NAME: SAGEMAKER_ASYNC_SPAN_NAME,
+            TLSpanAttributes.TRACELOOP_ENTITY_PATH: SAGEMAKER_ASYNC_SPAN_NAME,
+            TLSpanAttributes.TRACELOOP_ENTITY_INPUT: safe_json(
+                {
+                    "endpoint_name": request.endpoint_name,
+                    "input_location": (request.raw_payload or {}).get("InputLocation")
+                    if isinstance(request.raw_payload, Mapping)
+                    else None,
+                }
+            ),
+        }
+        if isinstance(response_payload, Mapping):
+            attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safe_json(
+                {
+                    "inference_id": response_payload.get("InferenceId"),
+                    "output_location": response_payload.get("OutputLocation"),
+                    "state": "submitted",
+                }
+            )
+        return attrs
+
     attrs = _base_attrs(request.request_type)
+    if stream_events is not None:
+        attrs[TLSpanAttributes.LLM_IS_STREAMING] = True
 
     model_id = request.model_id or request.endpoint_name
     if model_id:
@@ -172,9 +200,11 @@ def emit_sagemaker_span(
     api_params: Mapping[str, Any] | None,
     start_ns: int,
     response_payload: Any = None,
-    stream_events: list[Any] | None = None,
+    stream_events: list[Any] | SageMakerStreamAccumulator | None = None,
     error_message: str | None = None,
     status_code: int = 200,
+    trace_id: str | None = None,
+    parent_id: str | None = None,
 ) -> None:
     """Build a ReadableSpan for a SageMaker Runtime call and inject it."""
     try:
@@ -188,12 +218,16 @@ def emit_sagemaker_span(
             attrs["error.message"] = error_message
             status_code = status_code if status_code >= 400 else 500
 
-        request_type = attrs.get(
-            TLSpanAttributes.LLM_REQUEST_TYPE,
-            LLMRequestTypeValues.COMPLETION.value,
+        request_type = attrs.get(TLSpanAttributes.LLM_REQUEST_TYPE)
+        span_name = (
+            SAGEMAKER_ASYNC_SPAN_NAME
+            if operation_name == "InvokeEndpointAsync"
+            else _span_name_for_request_type(
+                str(request_type or LLMRequestTypeValues.COMPLETION.value)
+            )
         )
-        span_name = _span_name_for_request_type(str(request_type))
-        trace_id, parent_id = _current_trace_parent_ids()
+        if trace_id is None or parent_id is None:
+            trace_id, parent_id = _current_trace_parent_ids()
         span = build_readable_span(
             name=span_name,
             trace_id=trace_id,

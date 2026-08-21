@@ -4,14 +4,32 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from ast import literal_eval
 from collections.abc import Callable, Mapping
 from typing import Any
 
 from opentelemetry import trace
 from opentelemetry.context import Context
 from opentelemetry.sdk.trace import ReadableSpan, Span, SpanProcessor
-from opentelemetry.semconv._incubating.attributes import gen_ai_attributes as GenAIAttributes
+from opentelemetry.semconv._incubating.attributes import (
+    gen_ai_attributes as GenAIAttributes,
+)
 from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
+from respan_sdk.constants.llm_logging import (
+    LOG_TYPE_CHAT,
+    LOG_TYPE_TASK,
+    LOG_TYPE_TEXT,
+    LOG_TYPE_TOOL,
+    LogMethodChoices,
+)
+from respan_sdk.constants.span_attributes import (
+    RESPAN_LOG_METHOD,
+    RESPAN_LOG_TYPE,
+    RESPAN_SPAN_HANDOFFS,
+    RESPAN_SPAN_TOOL_CALLS,
+    RESPAN_SPAN_TOOLS,
+)
 
 from respan_instrumentation_semantic_kernel._constants import (
     SEMANTIC_KERNEL_SCOPE_PREFIX,
@@ -19,6 +37,7 @@ from respan_instrumentation_semantic_kernel._constants import (
     SK_AVAILABLE_FUNCTIONS_ATTR,
     SK_CHAT_COMPLETION_OPERATION,
     SK_CHAT_MESSAGE_INDEX_ATTR,
+    SK_CHAT_OPERATION,
     SK_CHAT_STREAMING_COMPLETION_OPERATION,
     SK_CHOICE_EVENT,
     SK_COMPLETION_ATTR,
@@ -36,23 +55,15 @@ from respan_instrumentation_semantic_kernel._constants import (
     SK_TOOL_OPERATION,
     SK_USER_MESSAGE_EVENT,
 )
-from respan_sdk.constants.llm_logging import (
-    LOG_TYPE_CHAT,
-    LOG_TYPE_TEXT,
-    LOG_TYPE_TOOL,
-    LogMethodChoices,
-)
-from respan_sdk.constants.span_attributes import (
-    RESPAN_LOG_METHOD,
-    RESPAN_LOG_TYPE,
-    RESPAN_SPAN_HANDOFFS,
-    RESPAN_SPAN_TOOL_CALLS,
-    RESPAN_SPAN_TOOLS,
+from respan_instrumentation_semantic_kernel._serialization import (
+    json_string,
+    redact_text,
 )
 
 logger = logging.getLogger(__name__)
 
 _CHAT_OPERATIONS = {
+    SK_CHAT_OPERATION,
     SK_CHAT_COMPLETION_OPERATION,
     SK_CHAT_STREAMING_COMPLETION_OPERATION,
 }
@@ -80,6 +91,7 @@ _OFF_CONTRACT_ALIASES = {
     "has_tool_calls",
     "parallel_tool_calls",
 }
+_GENERATED_PROMPT_NAME = re.compile(r"^[A-Za-z0-9_-]{12,32}$")
 
 
 def _safe_json_loads(value: Any) -> Any:
@@ -92,11 +104,13 @@ def _safe_json_loads(value: Any) -> Any:
 
 
 def _json_string(value: Any) -> str | None:
-    if value is None:
-        return None
     if isinstance(value, str):
-        return value
-    return json.dumps(value, default=str)
+        try:
+            parsed = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return redact_text(value)
+        return json_string(parsed)
+    return json_string(value)
 
 
 def _as_int(value: Any) -> int | None:
@@ -154,7 +168,7 @@ def _message_content(message: Mapping[str, Any]) -> Any:
             continue
         text = item.get("text") or item.get("content")
         if text is not None:
-            text_parts.append(str(text))
+            text_parts.append(redact_text(text) if isinstance(text, str) else "")
     return "\n".join(text_parts) if text_parts else None
 
 
@@ -247,7 +261,10 @@ def _promote_legacy_event_payloads(span: ReadableSpan, attrs: dict[str, Any]) ->
                 messages=event_attrs[SK_PROMPT_ATTR],
                 fallback_role="user",
             )
-        if event_name == SK_CONTENT_COMPLETION_EVENT and SK_COMPLETION_ATTR in event_attrs:
+        if (
+            event_name == SK_CONTENT_COMPLETION_EVENT
+            and SK_COMPLETION_ATTR in event_attrs
+        ):
             _promote_messages(
                 attrs,
                 prefix=SpanAttributes.LLM_COMPLETIONS,
@@ -256,13 +273,15 @@ def _promote_legacy_event_payloads(span: ReadableSpan, attrs: dict[str, Any]) ->
             )
 
 
-def _collect_indexed_messages(attrs: Mapping[str, Any], prefix: str) -> list[dict[str, Any]]:
+def _collect_indexed_messages(
+    attrs: Mapping[str, Any], prefix: str
+) -> list[dict[str, Any]]:
     buckets: dict[int, dict[str, Any]] = {}
     indexed_prefix = f"{prefix}."
     for key, value in attrs.items():
         if not key.startswith(indexed_prefix):
             continue
-        rest = key[len(indexed_prefix):]
+        rest = key[len(indexed_prefix) :]
         index_text, _, field = rest.partition(".")
         if not index_text.isdigit() or not field:
             continue
@@ -288,7 +307,11 @@ def _normalize_available_functions(value: Any) -> list[dict[str, Any]] | None:
     if isinstance(parsed, str):
         names = [name.strip() for name in parsed.split(",") if name.strip()]
     elif isinstance(parsed, list):
-        names = [str(name) for name in parsed if isinstance(name, str) and name]
+        names = [
+            redact_text(name, limit=256)
+            for name in parsed
+            if isinstance(name, str) and name
+        ]
     else:
         return None
 
@@ -353,15 +376,25 @@ def _map_completion_span(
     attrs[RESPAN_LOG_TYPE] = log_type
     attrs[RESPAN_LOG_METHOD] = LogMethodChoices.TRACING_INTEGRATION.value
     attrs[SpanAttributes.LLM_REQUEST_TYPE] = request_type
-    attrs.setdefault(SpanAttributes.TRACELOOP_ENTITY_NAME, getattr(span, "name", ""))
-    attrs.setdefault(SpanAttributes.TRACELOOP_ENTITY_PATH, "")
+    entity_name = attrs.setdefault(
+        SpanAttributes.TRACELOOP_ENTITY_NAME,
+        redact_text(getattr(span, "name", ""), limit=256),
+    )
+    attrs.setdefault(
+        SpanAttributes.TRACELOOP_ENTITY_PATH,
+        "" if getattr(span, "parent", None) is None else entity_name,
+    )
     _map_usage(attrs)
 
     prompt_messages = _collect_indexed_messages(attrs, SpanAttributes.LLM_PROMPTS)
     if prompt_messages:
-        attrs.setdefault(SpanAttributes.TRACELOOP_ENTITY_INPUT, _json_string(prompt_messages))
+        attrs.setdefault(
+            SpanAttributes.TRACELOOP_ENTITY_INPUT, _json_string(prompt_messages)
+        )
 
-    completion_messages = _collect_indexed_messages(attrs, SpanAttributes.LLM_COMPLETIONS)
+    completion_messages = _collect_indexed_messages(
+        attrs, SpanAttributes.LLM_COMPLETIONS
+    )
     if completion_messages:
         attrs.setdefault(
             SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
@@ -385,7 +418,7 @@ def _tool_name_from_span(span: ReadableSpan, attrs: Mapping[str, Any]) -> str:
     name = getattr(span, "name", "")
     prefix = f"{SK_TOOL_OPERATION} "
     if isinstance(name, str) and name.startswith(prefix):
-        return name[len(prefix):]
+        return name[len(prefix) :]
     return str(name or SK_TOOL_OPERATION)
 
 
@@ -394,15 +427,22 @@ def _map_tool_span(span: ReadableSpan, attrs: dict[str, Any]) -> None:
     attrs[RESPAN_LOG_TYPE] = LOG_TYPE_TOOL
     attrs[RESPAN_LOG_METHOD] = LogMethodChoices.TRACING_INTEGRATION.value
     attrs[SpanAttributes.TRACELOOP_ENTITY_NAME] = tool_name
-    attrs[SpanAttributes.TRACELOOP_ENTITY_PATH] = tool_name
+    attrs[SpanAttributes.TRACELOOP_ENTITY_PATH] = (
+        "" if getattr(span, "parent", None) is None else tool_name
+    )
 
     arguments = attrs.get(GenAIAttributes.GEN_AI_TOOL_CALL_ARGUMENTS)
     if arguments is not None:
-        attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = _json_string(arguments)
+        parsed_arguments = _safe_json_loads(arguments)
+        attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = _json_string(
+            {"name": tool_name, "arguments": parsed_arguments}
+        )
 
     result = attrs.get(GenAIAttributes.GEN_AI_TOOL_CALL_RESULT)
     if result is not None:
-        attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _json_string(result)
+        attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = json_string(
+            _safe_json_loads(result)
+        )
 
     for key in (
         GenAIAttributes.GEN_AI_TOOL_CALL_ARGUMENTS,
@@ -413,6 +453,80 @@ def _map_tool_span(span: ReadableSpan, attrs: dict[str, Any]) -> None:
         GenAIAttributes.GEN_AI_TOOL_TYPE,
     ):
         attrs.pop(key, None)
+
+
+def _is_generated_prompt_wrapper(tool_name: str) -> bool:
+    return "-" not in tool_name and bool(_GENERATED_PROMPT_NAME.fullmatch(tool_name))
+
+
+def _prompt_result_content(result: Any) -> str | None:
+    if not isinstance(result, str):
+        return None
+    if "ChatMessageContent(" not in result:
+        return redact_text(result)
+    match = re.search(
+        r"\bcontent=(?P<literal>'(?:\\.|[^'])*'|\"(?:\\.|[^\"])*\")", result
+    )
+    if match is None:
+        return None
+    try:
+        value = literal_eval(match.group("literal"))
+    except (SyntaxError, ValueError):
+        return None
+    return redact_text(value) if isinstance(value, str) else None
+
+
+def _map_prompt_wrapper(span: ReadableSpan, attrs: dict[str, Any]) -> None:
+    attrs[RESPAN_LOG_TYPE] = LOG_TYPE_TASK
+    attrs[RESPAN_LOG_METHOD] = LogMethodChoices.TRACING_INTEGRATION.value
+    attrs[SpanAttributes.TRACELOOP_ENTITY_NAME] = "semantic_kernel.prompt"
+    attrs[SpanAttributes.TRACELOOP_ENTITY_PATH] = (
+        "" if getattr(span, "parent", None) is None else "semantic_kernel.prompt"
+    )
+    arguments = _safe_json_loads(attrs.get(GenAIAttributes.GEN_AI_TOOL_CALL_ARGUMENTS))
+    attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = _json_string(
+        {"operation": "prompt", "arguments": arguments or {}}
+    )
+    result = attrs.get(GenAIAttributes.GEN_AI_TOOL_CALL_RESULT)
+    attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _json_string(
+        {
+            "type": "prompt_result",
+            "content": _prompt_result_content(result),
+        }
+    )
+    for key in (
+        GenAIAttributes.GEN_AI_TOOL_CALL_ARGUMENTS,
+        GenAIAttributes.GEN_AI_TOOL_CALL_ID,
+        GenAIAttributes.GEN_AI_TOOL_CALL_RESULT,
+        GenAIAttributes.GEN_AI_TOOL_DESCRIPTION,
+        GenAIAttributes.GEN_AI_TOOL_NAME,
+        GenAIAttributes.GEN_AI_TOOL_TYPE,
+    ):
+        attrs.pop(key, None)
+
+
+def _map_error(span: ReadableSpan, attrs: dict[str, Any]) -> None:
+    status = getattr(span, "status", None)
+    status_code = getattr(status, "status_code", None)
+    if getattr(status_code, "name", "") != "ERROR":
+        return
+    error_type = "SemanticKernelError"
+    error_message = getattr(status, "description", None)
+    for event in getattr(span, "events", ()) or ():
+        event_attrs = dict(getattr(event, "attributes", None) or {})
+        event_type = event_attrs.get("exception.type")
+        event_message = event_attrs.get("exception.message")
+        if isinstance(event_type, str) and event_type:
+            error_type = redact_text(event_type, limit=256)
+        if isinstance(event_message, str) and event_message:
+            error_message = event_message
+            break
+    attrs["error.type"] = error_type
+    attrs["error.message"] = redact_text(error_message or error_type)
+    attrs["http.response.status_code"] = 500
+    attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _json_string(
+        {"error": {"type": error_type, "message": error_message or error_type}}
+    )
 
 
 def _cleanup_attrs(attrs: dict[str, Any]) -> None:
@@ -426,7 +540,41 @@ def _cleanup_attrs(attrs: dict[str, Any]) -> None:
         attrs.pop(key, None)
 
 
-def enrich_semantic_kernel_span(span: ReadableSpan) -> bool:
+def _sanitize_contract_attrs(attrs: dict[str, Any]) -> None:
+    for key in (
+        SpanAttributes.LLM_REQUEST_MODEL,
+        SpanAttributes.LLM_SYSTEM,
+        GenAIAttributes.GEN_AI_PROVIDER_NAME,
+        SpanAttributes.TRACELOOP_ENTITY_NAME,
+        SpanAttributes.TRACELOOP_ENTITY_PATH,
+    ):
+        value = attrs.get(key)
+        if isinstance(value, str):
+            attrs[key] = redact_text(value, limit=256)
+
+
+def _strip_content(attrs: dict[str, Any]) -> None:
+    for key in (
+        SK_PROMPT_ATTR,
+        SK_COMPLETION_ATTR,
+        SK_AVAILABLE_FUNCTIONS_ATTR,
+        GenAIAttributes.GEN_AI_TOOL_CALL_ARGUMENTS,
+        GenAIAttributes.GEN_AI_TOOL_CALL_RESULT,
+        SpanAttributes.LLM_REQUEST_FUNCTIONS,
+        SpanAttributes.TRACELOOP_ENTITY_INPUT,
+        SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
+    ):
+        attrs.pop(key, None)
+    for key in list(attrs):
+        if key.startswith(
+            (f"{SpanAttributes.LLM_PROMPTS}.", f"{SpanAttributes.LLM_COMPLETIONS}.")
+        ):
+            attrs.pop(key, None)
+
+
+def enrich_semantic_kernel_span(
+    span: ReadableSpan, *, capture_content: bool = True
+) -> bool:
     """Normalize a Semantic Kernel span in place.
 
     Returns ``True`` when the span belonged to Semantic Kernel and was handled.
@@ -453,12 +601,22 @@ def enrich_semantic_kernel_span(span: ReadableSpan) -> bool:
             request_type=LLMRequestTypeValues.COMPLETION.value,
         )
     elif operation == SK_TOOL_OPERATION:
-        _map_tool_span(span, attrs)
+        tool_name = _tool_name_from_span(span, attrs)
+        if _is_generated_prompt_wrapper(tool_name):
+            _map_prompt_wrapper(span, attrs)
+        else:
+            _map_tool_span(span, attrs)
     else:
         return False
 
     _cleanup_attrs(attrs)
+    _map_error(span, attrs)
+    _sanitize_contract_attrs(attrs)
+    if not capture_content:
+        _strip_content(attrs)
     span._attributes = attrs
+    if hasattr(span, "_events"):
+        span._events = ()
     return True
 
 
@@ -548,15 +706,22 @@ class SemanticKernelLogRecordHandler(logging.Handler):
 class SemanticKernelSpanProcessor(SpanProcessor):
     """Translate Semantic Kernel spans to the Respan span contract."""
 
+    def __init__(self, *, capture_content: bool = True) -> None:
+        self.capture_content = capture_content
+
     def on_start(
         self,
         span: Span,
         parent_context: Context | None = None,
     ) -> None:
-        return None
+        parent = trace.get_current_span(parent_context)
+        parent_attrs = getattr(parent, "attributes", None) or {}
+        available_functions = parent_attrs.get(SK_AVAILABLE_FUNCTIONS_ATTR)
+        if available_functions is not None:
+            span.set_attribute(SK_AVAILABLE_FUNCTIONS_ATTR, available_functions)
 
     def on_end(self, span: ReadableSpan) -> None:
-        enrich_semantic_kernel_span(span)
+        enrich_semantic_kernel_span(span, capture_content=self.capture_content)
 
     def shutdown(self) -> None:
         return None

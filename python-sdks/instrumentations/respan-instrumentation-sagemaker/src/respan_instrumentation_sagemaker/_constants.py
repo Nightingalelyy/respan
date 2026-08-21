@@ -4,6 +4,7 @@ SAGEMAKER_INSTRUMENTATION_NAME = "sagemaker"
 SAGEMAKER_SYSTEM_NAME = "sagemaker"
 SAGEMAKER_CHAT_SPAN_NAME = "sagemaker.chat"
 SAGEMAKER_COMPLETION_SPAN_NAME = "sagemaker.completion"
+SAGEMAKER_ASYNC_SPAN_NAME = "sagemaker.invoke_endpoint_async"
 
 SAGEMAKER_RUNTIME_SERVICE_NAME = "sagemaker-runtime"
 

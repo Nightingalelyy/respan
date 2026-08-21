@@ -2,24 +2,13 @@ import json
 import logging
 import sys
 from types import ModuleType, SimpleNamespace
+from typing import ClassVar
 
 import pytest
+from opentelemetry.sdk.trace import ReadableSpan
+from opentelemetry.sdk.util.instrumentation import InstrumentationScope
 from opentelemetry.semconv_ai import SpanAttributes as TLSpanAttributes
-from respan_sdk.constants.span_attributes import (
-    RESPAN_SPAN_TOOL_CALLS,
-    RESPAN_SPAN_TOOLS,
-)
-from respan_instrumentation_smolagents._constants import (
-    SPAN_ALIAS_COMPLETION_TOKENS,
-    SPAN_ALIAS_MODEL,
-    SPAN_ALIAS_PROMPT_TOKENS,
-    SPAN_ALIAS_TOOL_CALLS,
-    SPAN_ALIAS_TOOLS,
-    SPAN_ALIAS_TOTAL_REQUEST_TOKENS,
-)
-
-from respan_instrumentation_smolagents import SmolagentsInstrumentor
-from respan_instrumentation_smolagents import _instrumentation
+from respan_instrumentation_smolagents import SmolagentsInstrumentor, _instrumentation
 from respan_instrumentation_smolagents._constants import (
     GEN_AI_COMPLETION_CONTENT_ATTR,
     GEN_AI_COMPLETION_ROLE_ATTR,
@@ -32,11 +21,18 @@ from respan_instrumentation_smolagents._constants import (
     OPENINFERENCE_MESSAGE_CONTENT_TYPE_ATTR,
     OPENINFERENCE_MESSAGE_CONTENTS_ATTR,
     OPENINFERENCE_MESSAGE_ROLE_ATTR,
-    OPENINFERENCE_SMOLAGENTS_MODULE,
     OPENINFERENCE_OUTPUT_MESSAGES_ATTR,
+    OPENINFERENCE_SMOLAGENTS_MODULE,
     OTEL_SCOPE_NAME,
     SMOLAGENTS_FINAL_ANSWER_ARGUMENT,
     SMOLAGENTS_FINAL_ANSWER_TOOL_NAME,
+    SMOLAGENTS_TOOL_NAME_HINT,
+    SPAN_ALIAS_COMPLETION_TOKENS,
+    SPAN_ALIAS_MODEL,
+    SPAN_ALIAS_PROMPT_TOKENS,
+    SPAN_ALIAS_TOOL_CALLS,
+    SPAN_ALIAS_TOOLS,
+    SPAN_ALIAS_TOTAL_REQUEST_TOKENS,
     TOOL_CALL_FUNCTION_ARGUMENTS_FIELD,
     TOOL_CALL_FUNCTION_FIELD,
     TOOL_CALL_FUNCTION_NAME_FIELD,
@@ -44,6 +40,10 @@ from respan_instrumentation_smolagents._constants import (
 from respan_instrumentation_smolagents._processor import (
     SmolagentsSpanContentProcessor,
     SmolagentsSpanContractProcessor,
+)
+from respan_sdk.constants.span_attributes import (
+    RESPAN_SPAN_TOOL_CALLS,
+    RESPAN_SPAN_TOOLS,
 )
 from respan_tracing.core.tracer import RespanTracer
 
@@ -55,7 +55,7 @@ def _install_fake_modules(monkeypatch):
         pass
 
     class FakeOpenInferenceInstrumentor:
-        created = []
+        created: ClassVar[list["FakeOpenInferenceInstrumentor"]] = []
 
         def __init__(self, instrumentor_class, **kwargs):
             self.instrumentor_class = instrumentor_class
@@ -127,8 +127,18 @@ def _oi_message_content_attr(
 
 @pytest.fixture(autouse=True)
 def reset_tracer():
+    _instrumentation._RUNTIME_COUNT = 0
+    _instrumentation._RUNTIME_CONFIG = None
+    _instrumentation._RUNTIME_DELEGATE = None
+    _instrumentation._RUNTIME_CONTENT_PROCESSOR = None
+    _instrumentation._RUNTIME_CONTRACT_PROCESSOR = None
     RespanTracer.reset_instance()
     yield
+    _instrumentation._RUNTIME_COUNT = 0
+    _instrumentation._RUNTIME_CONFIG = None
+    _instrumentation._RUNTIME_DELEGATE = None
+    _instrumentation._RUNTIME_CONTENT_PROCESSOR = None
+    _instrumentation._RUNTIME_CONTRACT_PROCESSOR = None
     RespanTracer.reset_instance()
 
 
@@ -186,6 +196,50 @@ def test_activate_is_idempotent(monkeypatch):
     instrumentor.activate()
 
     assert len(fake.openinference_instrumentor_class.created) == 1
+
+
+def test_multiple_instances_share_delegate_and_processors_until_final_release(
+    monkeypatch,
+):
+    fake = _install_fake_modules(monkeypatch)
+
+    class FakeOpenInferenceTranslator:
+        pass
+
+    translator = FakeOpenInferenceTranslator()
+    tracer_provider = _make_fake_tracer_provider((translator, "exporter"))
+    monkeypatch.setattr(
+        _instrumentation,
+        "OpenInferenceTranslator",
+        FakeOpenInferenceTranslator,
+    )
+    monkeypatch.setattr(
+        _instrumentation.trace,
+        "get_tracer_provider",
+        lambda: tracer_provider,
+    )
+    first = SmolagentsInstrumentor()
+    second = SmolagentsInstrumentor()
+
+    first.activate()
+    second.activate()
+    assert len(fake.openinference_instrumentor_class.created) == 1
+    assert (
+        sum(
+            isinstance(item, SmolagentsSpanContractProcessor)
+            for item in tracer_provider._active_span_processor._span_processors
+        )
+        == 1
+    )
+
+    first.deactivate()
+    assert fake.openinference_instrumentor_class.created[0].is_deactivated is False
+    second.deactivate()
+    assert fake.openinference_instrumentor_class.created[0].is_deactivated is True
+    assert tracer_provider._active_span_processor._span_processors == (
+        translator,
+        "exporter",
+    )
 
 
 def test_activate_cleans_up_delegate_when_activation_fails(monkeypatch, caplog):
@@ -406,7 +460,9 @@ def test_contract_processor_normalizes_and_removes_aliases_from_smolagents_spans
     assert json.loads(span._attributes[LLM_REQUEST_FUNCTIONS_ATTR]) == [
         {"type": "function"}
     ]
-    assert span._attributes[GEN_AI_COMPLETION_TOOL_CALLS_ATTR] == [{"id": "call_1"}]
+    assert json.loads(span._attributes[GEN_AI_COMPLETION_TOOL_CALLS_ATTR]) == [
+        {"id": "call_1"}
+    ]
     assert nested_tool_call_attr not in span._attributes
     assert span._attributes[GEN_AI_COMPLETION_ROLE_ATTR] == "assistant"
     assert span._attributes[GEN_AI_COMPLETION_CONTENT_ATTR] == ""
@@ -427,7 +483,9 @@ def test_contract_processor_backfills_canonical_tool_fields_from_helpers():
     assert json.loads(span._attributes[LLM_REQUEST_FUNCTIONS_ATTR]) == [
         {"type": "function"}
     ]
-    assert span._attributes[GEN_AI_COMPLETION_TOOL_CALLS_ATTR] == [{"id": "call_1"}]
+    assert json.loads(span._attributes[GEN_AI_COMPLETION_TOOL_CALLS_ATTR]) == [
+        {"id": "call_1"}
+    ]
     assert RESPAN_SPAN_TOOLS not in span._attributes
     assert RESPAN_SPAN_TOOL_CALLS not in span._attributes
 
@@ -484,3 +542,183 @@ def test_contract_processor_ignores_non_smolagents_spans():
 
     assert span._attributes[SPAN_ALIAS_MODEL] == "openai/gpt-4o-mini"
     assert span._attributes[SPAN_ALIAS_TOOLS] == [{"type": "function"}]
+
+
+def test_content_and_contract_processors_use_real_tool_name_and_canonical_io():
+    content = SmolagentsSpanContentProcessor()
+    contract = SmolagentsSpanContractProcessor()
+    span = SimpleNamespace(
+        name="SimpleTool",
+        context=SimpleNamespace(trace_id=101),
+        instrumentation_scope=SimpleNamespace(name=OPENINFERENCE_SMOLAGENTS_MODULE),
+        _attributes={
+            OTEL_SCOPE_NAME: OPENINFERENCE_SMOLAGENTS_MODULE,
+            "openinference.span.kind": "TOOL",
+            "tool.name": "calculate_invoice_total",
+            TLSpanAttributes.TRACELOOP_ENTITY_INPUT: '{"unit_price_usd":9,"quantity":7}',
+            TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT: "7 items cost $63",
+            "respan.entity.log_type": "tool",
+            "tool_calls": "bad-alias",
+        },
+    )
+
+    content.on_end(span)
+    contract.on_end(span)
+
+    assert span._attributes[TLSpanAttributes.TRACELOOP_ENTITY_NAME] == (
+        "calculate_invoice_total"
+    )
+    assert json.loads(span._attributes[TLSpanAttributes.TRACELOOP_ENTITY_INPUT]) == {
+        "arguments": {"quantity": 7, "unit_price_usd": 9},
+        "name": "calculate_invoice_total",
+    }
+    assert "tool_calls" not in span._attributes
+    assert "smolagents.respan.tool_name" not in span._attributes
+
+
+def test_step_is_stable_task_without_runtime_repr():
+    processor = SmolagentsSpanContractProcessor()
+    span = SimpleNamespace(
+        name="Step 2",
+        context=SimpleNamespace(trace_id=102),
+        instrumentation_scope=SimpleNamespace(name=OPENINFERENCE_SMOLAGENTS_MODULE),
+        _attributes={
+            OTEL_SCOPE_NAME: OPENINFERENCE_SMOLAGENTS_MODULE,
+            "respan.entity.log_type": "workflow",
+            TLSpanAttributes.TRACELOOP_ENTITY_INPUT: (
+                "ActionStep(step_number=2, timing=Timing(start_time=123.4))"
+            ),
+        },
+    )
+
+    processor.on_end(span)
+
+    assert span._attributes["respan.entity.log_type"] == "task"
+    assert span._attributes[TLSpanAttributes.TRACELOOP_ENTITY_NAME] == (
+        "smolagents.step"
+    )
+    assert json.loads(span._attributes[TLSpanAttributes.TRACELOOP_ENTITY_INPUT]) == {
+        "step_number": 2
+    }
+    assert "123.4" not in json.dumps(span._attributes)
+
+
+def test_agent_does_not_duplicate_child_model_or_usage():
+    processor = SmolagentsSpanContractProcessor()
+    child = SimpleNamespace(
+        name="LiteLLMModel.generate",
+        context=SimpleNamespace(trace_id=103),
+        instrumentation_scope=SimpleNamespace(name=OPENINFERENCE_SMOLAGENTS_MODULE),
+        _attributes={
+            OTEL_SCOPE_NAME: OPENINFERENCE_SMOLAGENTS_MODULE,
+            "respan.entity.log_type": "chat",
+            TLSpanAttributes.LLM_REQUEST_MODEL: "openai/gpt-4o-mini",
+        },
+    )
+    agent = SimpleNamespace(
+        name="CodeAgent.run",
+        context=SimpleNamespace(trace_id=103),
+        instrumentation_scope=SimpleNamespace(name=OPENINFERENCE_SMOLAGENTS_MODULE),
+        _attributes={
+            OTEL_SCOPE_NAME: OPENINFERENCE_SMOLAGENTS_MODULE,
+            "respan.entity.log_type": "agent",
+            TLSpanAttributes.LLM_USAGE_PROMPT_TOKENS: 100,
+            TLSpanAttributes.LLM_USAGE_COMPLETION_TOKENS: 20,
+            TLSpanAttributes.LLM_USAGE_TOTAL_TOKENS: 120,
+        },
+    )
+
+    processor.on_end(child)
+    processor.on_end(agent)
+
+    assert TLSpanAttributes.LLM_REQUEST_MODEL not in agent._attributes
+    assert TLSpanAttributes.LLM_USAGE_PROMPT_TOKENS not in agent._attributes
+    assert TLSpanAttributes.LLM_USAGE_COMPLETION_TOKENS not in agent._attributes
+    assert TLSpanAttributes.LLM_USAGE_TOTAL_TOKENS not in agent._attributes
+
+
+def test_streaming_agent_output_is_semantic_and_common_only():
+    processor = SmolagentsSpanContractProcessor()
+    agent = SimpleNamespace(
+        name="ToolCallingAgent.run",
+        context=SimpleNamespace(trace_id=104),
+        instrumentation_scope=SimpleNamespace(name=OPENINFERENCE_SMOLAGENTS_MODULE),
+        _attributes={
+            OTEL_SCOPE_NAME: OPENINFERENCE_SMOLAGENTS_MODULE,
+            "respan.entity.log_type": "agent",
+            TLSpanAttributes.LLM_REQUEST_MODEL: "openai/gpt-4o-mini",
+            TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT: (
+                "ToolCall(name='final_answer')"
+                "ActionOutput(output='streamed result', is_final_answer=True)"
+            ),
+        },
+    )
+    processor.on_end(agent)
+
+    assert TLSpanAttributes.LLM_REQUEST_MODEL not in agent._attributes
+    assert (
+        json.loads(agent._attributes[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT])
+        == "streamed result"
+    )
+
+
+def test_hostile_and_oversized_values_fail_open_with_valid_bounded_json():
+    class HostileMapping(dict):
+        def items(self):
+            raise RuntimeError("must not escape")
+
+    span = SimpleNamespace(
+        name="weather_tool",
+        context=SimpleNamespace(trace_id=105),
+        instrumentation_scope=SimpleNamespace(name=OPENINFERENCE_SMOLAGENTS_MODULE),
+        _attributes={
+            OTEL_SCOPE_NAME: OPENINFERENCE_SMOLAGENTS_MODULE,
+            "respan.entity.log_type": "tool",
+            SMOLAGENTS_TOOL_NAME_HINT: "weather_tool",
+            TLSpanAttributes.TRACELOOP_ENTITY_INPUT: HostileMapping(
+                {"api_key": "plain-input-secret"}
+            ),
+            TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT: {
+                "client_secret": "plain-secret",
+                "content": "😀" * 10_000,
+            },
+        },
+    )
+
+    SmolagentsSpanContractProcessor().on_end(span)
+    input_value = json.loads(span._attributes[TLSpanAttributes.TRACELOOP_ENTITY_INPUT])
+    output_json = span._attributes[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT]
+    assert input_value["arguments"] == {
+        "serialization_error": True,
+        "type": "HostileMapping",
+    }
+    assert "plain-secret" not in output_json
+    assert len(output_json.encode("utf-8")) <= 16_000
+    json.loads(output_json)
+
+
+def test_real_readable_span_reaches_canonical_tool_contract():
+    span = ReadableSpan(
+        name="SimpleTool",
+        attributes={
+            OTEL_SCOPE_NAME: OPENINFERENCE_SMOLAGENTS_MODULE,
+            "openinference.span.kind": "TOOL",
+            "tool.name": "calculate_invoice_total",
+            TLSpanAttributes.TRACELOOP_ENTITY_INPUT: '{"quantity":7,"price":9}',
+            TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT: "63",
+            "respan.entity.log_type": "tool",
+            "tool_calls": "legacy-alias",
+        },
+        instrumentation_scope=InstrumentationScope(OPENINFERENCE_SMOLAGENTS_MODULE),
+    )
+
+    SmolagentsSpanContentProcessor().on_end(span)
+    SmolagentsSpanContractProcessor().on_end(span)
+    assert span.attributes[TLSpanAttributes.TRACELOOP_ENTITY_NAME] == (
+        "calculate_invoice_total"
+    )
+    assert json.loads(span.attributes[TLSpanAttributes.TRACELOOP_ENTITY_INPUT]) == {
+        "arguments": {"price": 9, "quantity": 7},
+        "name": "calculate_invoice_total",
+    }
+    assert "tool_calls" not in span.attributes

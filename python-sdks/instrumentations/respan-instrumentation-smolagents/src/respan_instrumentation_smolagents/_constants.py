@@ -1,12 +1,16 @@
 """Internal constants for smolagents instrumentation."""
 
-from opentelemetry.semconv.attributes import otel_attributes
-from opentelemetry.semconv_ai import SpanAttributes as TLSpanAttributes
 from openinference.semconv.trace import (
     MessageAttributes as OIMessageAttributes,
+)
+from openinference.semconv.trace import (
     MessageContentAttributes as OIMessageContentAttributes,
+)
+from openinference.semconv.trace import (
     SpanAttributes as OISpanAttributes,
 )
+from opentelemetry.semconv.attributes import otel_attributes
+from opentelemetry.semconv_ai import SpanAttributes as TLSpanAttributes
 
 SMOLAGENTS_INSTRUMENTATION_NAME = "smolagents"
 ASSISTANT_ROLE = "assistant"
@@ -16,10 +20,14 @@ TOOL_CALL_FUNCTION_ARGUMENTS_FIELD = "arguments"
 TOOL_CALL_FUNCTION_FIELD = "function"
 TOOL_CALL_FUNCTION_NAME_FIELD = "name"
 OPENINFERENCE_INSTRUMENTATION_MODULE = "openinference.instrumentation"
-OPENINFERENCE_SMOLAGENTS_MODULE = (
-    f"{OPENINFERENCE_INSTRUMENTATION_MODULE}.smolagents"
-)
+OPENINFERENCE_SMOLAGENTS_MODULE = f"{OPENINFERENCE_INSTRUMENTATION_MODULE}.smolagents"
 OTEL_SCOPE_NAME = otel_attributes.OTEL_SCOPE_NAME
+SMOLAGENTS_TOOL_NAME_HINT = "smolagents.respan.tool_name"
+
+OPENINFERENCE_SPAN_KIND_ATTR = OISpanAttributes.OPENINFERENCE_SPAN_KIND
+OPENINFERENCE_INPUT_VALUE_ATTR = OISpanAttributes.INPUT_VALUE
+OPENINFERENCE_OUTPUT_VALUE_ATTR = OISpanAttributes.OUTPUT_VALUE
+OPENINFERENCE_TOOL_NAME_ATTR = OISpanAttributes.TOOL_NAME
 
 GEN_AI_COMPLETION_ROLE_ATTR = f"{TLSpanAttributes.LLM_COMPLETIONS}.0.role"
 GEN_AI_COMPLETION_CONTENT_ATTR = f"{TLSpanAttributes.LLM_COMPLETIONS}.0.content"
