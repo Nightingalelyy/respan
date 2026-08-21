@@ -22,15 +22,24 @@ import {
   type Trace,
   type Span,
 } from "@openai/agents";
-import { emitSdkItem } from "./_otel_emitter.js";
+import {
+  clearSdkTrace,
+  clearSdkTraceContexts,
+  emitSdkItem,
+  registerSdkTrace,
+} from "./_otel_emitter.js";
 
 class _RespanTracingProcessor implements TracingProcessor {
-  async onTraceStart(_trace: Trace): Promise<void> {
-    // no-op
+  async onTraceStart(traceObj: Trace): Promise<void> {
+    registerSdkTrace(traceObj);
   }
 
   async onTraceEnd(traceObj: Trace): Promise<void> {
-    emitSdkItem(traceObj);
+    try {
+      emitSdkItem(traceObj);
+    } finally {
+      clearSdkTrace(traceObj.traceId);
+    }
   }
 
   async onSpanStart(_span: Span<any>): Promise<void> {
@@ -61,5 +70,6 @@ export class OpenAIAgentsInstrumentor {
 
   deactivate(): void {
     this._processor = null;
+    clearSdkTraceContexts();
   }
 }

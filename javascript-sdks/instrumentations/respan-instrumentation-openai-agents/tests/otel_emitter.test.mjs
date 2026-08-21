@@ -1,14 +1,21 @@
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import test from "node:test";
 
 import { trace } from "@opentelemetry/api";
 import { RespanSpanAttributes } from "@respan/respan-sdk";
 import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
 
-import { emitSdkItem } from "../dist/_otel_emitter.js";
+import {
+  clearSdkTrace,
+  emitSdkItem,
+  registerSdkTrace,
+} from "../dist/_otel_emitter.js";
 
 const captureState = { spans: [] };
 const originalGetTracerProvider = trace.getTracerProvider.bind(trace);
+const packageRequire = createRequire(import.meta.url);
+const { version: packageVersion } = packageRequire("../package.json");
 
 test.before(() => {
   Object.defineProperty(trace, "getTracerProvider", {
@@ -92,7 +99,7 @@ test("emit trace stores SDK trace metadata on workflow span", () => {
   const attrs = span.attributes;
 
   assert.equal(attrs[RespanSpanAttributes.RESPAN_LOG_TYPE], "workflow");
-  assert.equal(span.instrumentationScope.version, "1.0.6");
+  assert.equal(span.instrumentationScope.version, packageVersion);
   assert.equal(
     attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME],
     "openai_agents_gateway_basic.workflow",
@@ -548,7 +555,7 @@ test("emit response handles modern agents item and content variants", () => {
   assertNoOffContractAliases(attrs);
 });
 
-test("emit agent omits tool and handoff aliases", () => {
+test("emit agent preserves tool, handoff, and output configuration in canonical metadata", () => {
   const attrs = emitAndCapture(
     makeBaseSpanData({
       type: "agent",
@@ -562,8 +569,88 @@ test("emit agent omits tool and handoff aliases", () => {
   assert.equal(attrs[RespanSpanAttributes.RESPAN_LOG_TYPE], "agent");
   assert.equal(attrs[SpanAttributes.TRACELOOP_ENTITY_NAME], "Router");
   assert.equal(attrs[RespanSpanAttributes.RESPAN_METADATA_AGENT_NAME], "Router");
+  assert.equal(
+    attrs["respan.metadata.openai_agents.agent_configuration.tools"],
+    JSON.stringify(["lookup_docs"]),
+  );
+  assert.equal(
+    attrs["respan.metadata.openai_agents.agent_configuration.handoffs"],
+    JSON.stringify(["Support"]),
+  );
+  assert.equal(
+    attrs["respan.metadata.openai_agents.agent_configuration.output_type"],
+    "text",
+  );
   assertNoOffContractAliases(attrs);
   assert.equal(attrs["traceloop.span.kind"], undefined);
+});
+
+test("noncanonical SDK IDs map to deterministic full-width nonzero OTel IDs", () => {
+  const seenTraceIds = new Set();
+  const seenSpanIds = new Set();
+
+  for (let index = 0; index < 4096; index += 1) {
+    const item = {
+      ...makeBaseSpanData({
+        type: "agent",
+        name: `Agent ${index}`,
+      }),
+      traceId: `trace_test_${index}`,
+      spanId: `span_test_${index}`,
+      parentId: `parent_test_${index}`,
+    };
+    const span = emitAndCaptureSpan(item);
+    const first = span.spanContext();
+
+    const repeat = emitAndCaptureSpan(item).spanContext();
+
+    assert.equal(first.traceId, repeat.traceId);
+    assert.equal(first.spanId, repeat.spanId);
+    assert.match(first.traceId, /^(?!0{32}$)[0-9a-f]{32}$/);
+    assert.match(first.spanId, /^(?!0{16}$)[0-9a-f]{16}$/);
+    assert.notEqual(first.traceId.slice(0, 8), first.traceId.slice(8, 16));
+    assert.notEqual(first.spanId.slice(0, 8), first.spanId.slice(8, 16));
+    seenTraceIds.add(first.traceId);
+    seenSpanIds.add(first.spanId);
+  }
+
+  assert.equal(seenTraceIds.size, 4096);
+  assert.equal(seenSpanIds.size, 4096);
+});
+
+test("registered trace marker and grouping propagate to every emitted child", () => {
+  const traceId = "trace_marker_context";
+  registerSdkTrace({
+    traceId,
+    name: "marker-workflow",
+    groupId: "marker-group",
+    metadata: {
+      custom_identifier: "otel2-fix-marker",
+      run_id: "otel2-fix-marker",
+    },
+  });
+
+  try {
+    const attrs = emitAndCapture({
+      ...makeBaseSpanData({ type: "agent", name: "Marker Agent" }),
+      traceId,
+    });
+    assert.equal(
+      attrs[RespanSpanAttributes.RESPAN_SPAN_CUSTOM_ID],
+      "otel2-fix-marker",
+    );
+    assert.equal(
+      attrs[RespanSpanAttributes.RESPAN_TRACE_GROUP_ID],
+      "marker-group",
+    );
+    assert.equal(
+      attrs["respan.metadata.custom_identifier"],
+      "otel2-fix-marker",
+    );
+    assert.equal(attrs["respan.metadata.run_id"], "otel2-fix-marker");
+  } finally {
+    clearSdkTrace(traceId);
+  }
 });
 
 test("emit handoff, guardrail, custom, and mcp tools use common contract attrs", () => {
