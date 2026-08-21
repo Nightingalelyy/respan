@@ -5,11 +5,33 @@ from __future__ import annotations
 import ast
 import json
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
+from opentelemetry.semconv._incubating.attributes.http_attributes import (
+    HTTP_STATUS_CODE,
+)
+from opentelemetry.semconv.attributes.http_attributes import (
+    HTTP_RESPONSE_STATUS_CODE,
+)
 from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
+from respan_sdk.constants import ERROR_MESSAGE_ATTR
+from respan_sdk.constants.llm_logging import (
+    LOG_TYPE_AGENT,
+    LOG_TYPE_CHAT,
+    LOG_TYPE_TASK,
+    LOG_TYPE_TOOL,
+    LOG_TYPE_WORKFLOW,
+)
+from respan_sdk.constants.span_attributes import (
+    RESPAN_LOG_TYPE,
+    RESPAN_SESSION_ID,
+    RESPAN_SPAN_HANDOFFS,
+    RESPAN_SPAN_TOOL_CALLS,
+    RESPAN_SPAN_TOOLS,
+)
 
 from respan_instrumentation_microsoft_agent_framework._constants import (
     AGENT_FRAMEWORK_SCOPE_PREFIX,
@@ -41,21 +63,6 @@ from respan_instrumentation_microsoft_agent_framework._constants import (
     TOP_LEVEL_ALIAS_ATTRS,
     WORKFLOW_SPAN_PREFIXES,
 )
-from respan_sdk.constants import ERROR_MESSAGE_ATTR
-from respan_sdk.constants.llm_logging import (
-    LOG_TYPE_AGENT,
-    LOG_TYPE_CHAT,
-    LOG_TYPE_TASK,
-    LOG_TYPE_TOOL,
-    LOG_TYPE_WORKFLOW,
-)
-from respan_sdk.constants.span_attributes import (
-    RESPAN_LOG_TYPE,
-    RESPAN_SESSION_ID,
-    RESPAN_SPAN_HANDOFFS,
-    RESPAN_SPAN_TOOL_CALLS,
-    RESPAN_SPAN_TOOLS,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +88,35 @@ _ERROR_TYPE_ATTR = "error.type"
 _EXCEPTION_TYPE_ATTR = "exception.type"
 _EXCEPTION_MESSAGE_ATTR = "exception.message"
 _STATUS_CODE_ATTR = "status_code"
+_HTTP_STATUS_ATTRS = (
+    _STATUS_CODE_ATTR,
+    HTTP_RESPONSE_STATUS_CODE,
+    HTTP_STATUS_CODE,
+)
+_HTTP_STATUS_PATTERNS = (
+    re.compile(r"\b(?:error|status)\s*(?:code)?\s*[:=]\s*([45]\d{2})\b", re.IGNORECASE),
+    re.compile(r"\bHTTP(?:/\d(?:\.\d)?)?\s+([45]\d{2})\b", re.IGNORECASE),
+    re.compile(
+        r"""["'](?:status|status_code|code)["']\s*:\s*([45]\d{2})""", re.IGNORECASE
+    ),
+)
+_COMMON_SPAN_RAW_PREFIXES = (
+    "agent_framework.",
+    "edge_group.",
+    "executor.",
+    "gen_ai.",
+    "llm.",
+    "message.",
+    "workflow.",
+    "workflow_builder.",
+)
+_COMMON_SPAN_RAW_ATTRS = frozenset(
+    {
+        "server.address",
+        "server.port",
+    }
+)
+_PROVIDER_EXCEPTION_TYPE_PREFIX = "ChatClient"
 
 
 def _span_attr(name: str, fallback: str) -> str:
@@ -221,18 +257,20 @@ def is_agent_framework_span(span: ReadableSpan, attrs: Mapping[str, Any]) -> boo
         return True
     if any(key.startswith("agent_framework.") for key in attrs):
         return True
-    if ATTR_WORKFLOW_NAME in attrs or ATTR_WORKFLOW_ID in attrs:
-        return True
-    return False
+    return ATTR_WORKFLOW_NAME in attrs or ATTR_WORKFLOW_ID in attrs
 
 
 def _operation_name(attrs: Mapping[str, Any]) -> str | None:
-    operation = attrs.get(_GEN_AI_OPERATION_NAME) or attrs.get(ATTR_GEN_AI_OPERATION_NAME)
+    operation = attrs.get(_GEN_AI_OPERATION_NAME) or attrs.get(
+        ATTR_GEN_AI_OPERATION_NAME
+    )
     return str(operation) if operation else None
 
 
 def _has_any_prefix(span_name: str, prefixes: Sequence[str]) -> bool:
-    return any(span_name == prefix or span_name.startswith(f"{prefix} ") for prefix in prefixes)
+    return any(
+        span_name == prefix or span_name.startswith(f"{prefix} ") for prefix in prefixes
+    )
 
 
 def _log_type(span: ReadableSpan, attrs: Mapping[str, Any]) -> str | None:
@@ -245,7 +283,10 @@ def _log_type(span: ReadableSpan, attrs: Mapping[str, Any]) -> str | None:
         return LOG_TYPE_TOOL
     if operation in {OPERATION_INVOKE_AGENT, OPERATION_CREATE_AGENT}:
         return LOG_TYPE_AGENT
-    if _has_any_prefix(span_name, WORKFLOW_SPAN_PREFIXES) or ATTR_WORKFLOW_NAME in attrs:
+    if (
+        _has_any_prefix(span_name, WORKFLOW_SPAN_PREFIXES)
+        or ATTR_WORKFLOW_NAME in attrs
+    ):
         return LOG_TYPE_WORKFLOW
     if _has_any_prefix(span_name, TASK_SPAN_PREFIXES):
         return LOG_TYPE_TASK
@@ -416,7 +457,9 @@ def _apply_messages(
         if content is not None:
             attrs.setdefault(f"{prefix}.content", content)
         if tool_calls:
-            attrs.setdefault(f"{prefix}.tool_calls", json.dumps(tool_calls, default=str))
+            attrs.setdefault(
+                f"{prefix}.tool_calls", json.dumps(tool_calls, default=str)
+            )
 
 
 def _system_instruction_messages(value: Any) -> list[dict[str, Any]]:
@@ -497,7 +540,9 @@ def _apply_chat_attrs(
         ATTR_GEN_AI_PROVIDER_NAME
     )
     if attrs.get(_GEN_AI_SYSTEM) in (None, "", AGENT_FRAMEWORK_SYSTEM):
-        attrs[_GEN_AI_SYSTEM] = str(provider).lower() if provider else AGENT_FRAMEWORK_SYSTEM
+        attrs[_GEN_AI_SYSTEM] = (
+            str(provider).lower() if provider else AGENT_FRAMEWORK_SYSTEM
+        )
 
     model = raw_attrs.get(SpanAttributes.LLM_REQUEST_MODEL) or raw_attrs.get(
         _GEN_AI_RESPONSE_MODEL
@@ -540,7 +585,9 @@ def _apply_chat_attrs(
     )
 
     if prompt_messages:
-        attrs.setdefault(SpanAttributes.TRACELOOP_ENTITY_INPUT, _json_string(prompt_messages))
+        attrs.setdefault(
+            SpanAttributes.TRACELOOP_ENTITY_INPUT, _json_string(prompt_messages)
+        )
     if completion_messages:
         attrs.setdefault(
             SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
@@ -554,11 +601,14 @@ def _apply_chat_attrs(
             json.dumps(tool_definitions, default=str),
         )
 
+    entity_name = _entity_name_for_log_type(span, attrs, LOG_TYPE_CHAT)
+    attrs.setdefault(SpanAttributes.TRACELOOP_ENTITY_NAME, entity_name)
+    parent = getattr(span, "parent", None)
+    is_root = parent is None or not getattr(parent, "span_id", 0)
     attrs.setdefault(
-        SpanAttributes.TRACELOOP_ENTITY_NAME,
-        _entity_name_for_log_type(span, attrs, LOG_TYPE_CHAT),
+        SpanAttributes.TRACELOOP_ENTITY_PATH,
+        "" if is_root else entity_name,
     )
-    attrs.setdefault(SpanAttributes.TRACELOOP_ENTITY_PATH, "")
 
 
 def _apply_tool_attrs(
@@ -610,9 +660,11 @@ def _apply_common_span_attrs(
     attrs[RESPAN_LOG_TYPE] = log_type
     entity_name = _entity_name_for_log_type(span, raw_attrs, log_type)
     attrs.setdefault(SpanAttributes.TRACELOOP_ENTITY_NAME, entity_name)
+    parent = getattr(span, "parent", None)
+    is_root = parent is None or not getattr(parent, "span_id", 0)
     attrs.setdefault(
         SpanAttributes.TRACELOOP_ENTITY_PATH,
-        "" if log_type == LOG_TYPE_WORKFLOW else entity_name,
+        "" if is_root else entity_name,
     )
 
     input_value = raw_attrs.get(ATTR_GEN_AI_INPUT_MESSAGES)
@@ -631,6 +683,13 @@ def _apply_common_span_attrs(
     conversation_id = raw_attrs.get(ATTR_GEN_AI_CONVERSATION_ID)
     if conversation_id and attrs.get(RESPAN_SESSION_ID) in (None, ""):
         attrs[RESPAN_SESSION_ID] = str(conversation_id)
+
+    # Agent/workflow/task spans are common-only under the Respan contract.
+    # Agent Framework repeats descendant LLM model/provider/usage data on the
+    # agent span; keeping it would make the wrapper look like another LLM call.
+    for key in list(attrs):
+        if key in _COMMON_SPAN_RAW_ATTRS or key.startswith(_COMMON_SPAN_RAW_PREFIXES):
+            attrs.pop(key, None)
 
 
 def _span_status_is_error(span: ReadableSpan) -> bool:
@@ -657,25 +716,102 @@ def _error_message(span: ReadableSpan, raw_attrs: Mapping[str, Any]) -> str | No
     return None
 
 
+def _provider_http_status(
+    span: ReadableSpan,
+    raw_attrs: Mapping[str, Any],
+    *,
+    allow_text_extraction: bool,
+) -> int | None:
+    for key in _HTTP_STATUS_ATTRS:
+        value = _int_value(raw_attrs.get(key))
+        if value is not None and 400 <= value <= 599:
+            return value
+
+    if not allow_text_extraction:
+        return None
+
+    messages: list[str] = []
+    message = _error_message(span=span, raw_attrs=raw_attrs)
+    if message:
+        messages.append(message)
+    for event in getattr(span, "events", None) or ():
+        event_attrs = getattr(event, "attributes", None)
+        if not isinstance(event_attrs, Mapping):
+            continue
+        for key in (_EXCEPTION_MESSAGE_ATTR, ERROR_MESSAGE_ATTR):
+            value = event_attrs.get(key)
+            if value not in (None, ""):
+                messages.append(str(value))
+
+    for candidate in messages:
+        for pattern in _HTTP_STATUS_PATTERNS:
+            match = pattern.search(candidate)
+            if match:
+                return int(match.group(1))
+    return None
+
+
+def _has_provider_exception_type(
+    span: ReadableSpan,
+    raw_attrs: Mapping[str, Any],
+) -> bool:
+    """Return whether Agent Framework identified a chat-provider exception."""
+    exception_types = [
+        raw_attrs.get(_ERROR_TYPE_ATTR),
+        raw_attrs.get(_EXCEPTION_TYPE_ATTR),
+    ]
+    for event in getattr(span, "events", None) or ():
+        event_attrs = getattr(event, "attributes", None)
+        if isinstance(event_attrs, Mapping):
+            exception_types.extend(
+                (
+                    event_attrs.get(_ERROR_TYPE_ATTR),
+                    event_attrs.get(_EXCEPTION_TYPE_ATTR),
+                )
+            )
+
+    return any(
+        str(exception_type)
+        .rsplit(".", 1)[-1]
+        .startswith(_PROVIDER_EXCEPTION_TYPE_PREFIX)
+        for exception_type in exception_types
+        if exception_type not in (None, "")
+    )
+
+
 def _apply_error_attrs(
     span: ReadableSpan,
     attrs: dict[str, Any],
     raw_attrs: Mapping[str, Any],
 ) -> None:
-    is_error = any(
-        raw_attrs.get(key) not in (None, "")
-        for key in (
-            ERROR_MESSAGE_ATTR,
-            _EXCEPTION_MESSAGE_ATTR,
-            _ERROR_TYPE_ATTR,
-            _EXCEPTION_TYPE_ATTR,
+    provider_status = _provider_http_status(
+        span=span,
+        raw_attrs=raw_attrs,
+        allow_text_extraction=(
+            attrs.get(RESPAN_LOG_TYPE) == LOG_TYPE_CHAT
+            or _has_provider_exception_type(span=span, raw_attrs=raw_attrs)
+        ),
+    )
+    is_error = (
+        provider_status is not None
+        or any(
+            raw_attrs.get(key) not in (None, "")
+            for key in (
+                ERROR_MESSAGE_ATTR,
+                _EXCEPTION_MESSAGE_ATTR,
+                _ERROR_TYPE_ATTR,
+                _EXCEPTION_TYPE_ATTR,
+            )
         )
-    ) or _span_status_is_error(span)
+        or _span_status_is_error(span)
+    )
     if not is_error:
         return
 
-    status_code = _int_value(attrs.get(_STATUS_CODE_ATTR))
-    if status_code is None or status_code < 400:
+    status_code = provider_status or _int_value(attrs.get(_STATUS_CODE_ATTR))
+    if status_code is not None and status_code >= 400:
+        attrs[_STATUS_CODE_ATTR] = status_code
+    else:
         attrs[_STATUS_CODE_ATTR] = 500
 
     message = _error_message(span=span, raw_attrs=raw_attrs)

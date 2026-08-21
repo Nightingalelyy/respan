@@ -3,8 +3,9 @@
 import importlib
 import json
 import logging
-from collections.abc import Callable
-from typing import Any, NamedTuple
+from collections.abc import Callable, Mapping, Sequence
+from threading import RLock
+from typing import Any, ClassVar, NamedTuple
 
 from opentelemetry import trace
 from opentelemetry.instrumentation.utils import unwrap
@@ -23,6 +24,35 @@ OPENINFERENCE_MCP_MODULE = "openinference.instrumentation.mcp"
 MCP_CLIENT_SESSION_MODULE = "mcp.client.session"
 
 _MAX_ATTRIBUTE_CHARS = 16000
+_MAX_SERIALIZATION_DEPTH = 6
+_MAX_JSON_SCHEMA_DEPTH = 20
+_SENSITIVE_KEY_MARKERS = frozenset(
+    {
+        "apikey",
+        "apitoken",
+        "authorization",
+        "authtoken",
+        "bearertoken",
+        "cookie",
+        "credential",
+        "idtoken",
+        "password",
+        "privatekey",
+        "refreshtoken",
+        "secret",
+        "sessiontoken",
+        "accesstoken",
+    }
+)
+_JSON_SCHEMA_KEYS = frozenset(
+    {
+        "inputSchema",
+        "outputSchema",
+        "input_schema",
+        "output_schema",
+        "json_schema",
+    }
+)
 
 
 class _OperationConfig(NamedTuple):
@@ -64,20 +94,53 @@ def _load_openinference_mcp_class() -> type:
     return mcp_module.MCPInstrumentor
 
 
-def _to_jsonable(value: Any, *, depth: int = 0) -> Any:
-    if depth > 6:
-        return repr(value)
+def _type_name(value: Any) -> str:
+    value_type = type(value)
+    return f"{value_type.__module__}.{value_type.__qualname__}"
+
+
+def _is_sensitive_key(key: object) -> bool:
+    compact = "".join(
+        character for character in str(key).lower() if character.isalnum()
+    )
+    return compact == "token" or any(
+        marker in compact for marker in _SENSITIVE_KEY_MARKERS
+    )
+
+
+def _to_jsonable(
+    value: Any,
+    *,
+    depth: int = 0,
+    in_json_schema: bool = False,
+) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
+    max_depth = _MAX_JSON_SCHEMA_DEPTH if in_json_schema else _MAX_SERIALIZATION_DEPTH
+    if depth > max_depth:
+        return {"type": _type_name(value), "truncated": True}
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
-    if isinstance(value, tuple):
-        return [_to_jsonable(item, depth=depth + 1) for item in value]
-    if isinstance(value, list):
-        return [_to_jsonable(item, depth=depth + 1) for item in value]
-    if isinstance(value, dict):
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [
+            _to_jsonable(
+                item,
+                depth=depth + 1,
+                in_json_schema=in_json_schema,
+            )
+            for item in value
+        ]
+    if isinstance(value, Mapping):
         return {
-            str(key): _to_jsonable(item, depth=depth + 1)
+            str(key): (
+                "<redacted>"
+                if _is_sensitive_key(key)
+                else _to_jsonable(
+                    item,
+                    depth=depth + 1,
+                    in_json_schema=in_json_schema or str(key) in _JSON_SCHEMA_KEYS,
+                )
+            )
             for key, item in value.items()
             if not callable(item)
         }
@@ -88,32 +151,91 @@ def _to_jsonable(value: Any, *, depth: int = 0) -> Any:
             return _to_jsonable(
                 model_dump(mode="json", exclude_none=True),
                 depth=depth + 1,
+                in_json_schema=in_json_schema,
             )
         except TypeError:
-            return _to_jsonable(model_dump(), depth=depth + 1)
+            try:
+                return _to_jsonable(
+                    model_dump(),
+                    depth=depth + 1,
+                    in_json_schema=in_json_schema,
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to serialize %s with model_dump",
+                    _type_name(value),
+                    exc_info=True,
+                )
+        except Exception:
+            logger.debug(
+                "Failed to serialize %s with model_dump",
+                _type_name(value),
+                exc_info=True,
+            )
 
     to_dict = getattr(value, "dict", None)
     if callable(to_dict):
-        return _to_jsonable(to_dict(), depth=depth + 1)
+        try:
+            return _to_jsonable(
+                to_dict(),
+                depth=depth + 1,
+                in_json_schema=in_json_schema,
+            )
+        except Exception:
+            logger.debug(
+                "Failed to serialize %s with dict",
+                _type_name(value),
+                exc_info=True,
+            )
 
     if hasattr(value, "__dict__"):
-        return {
-            key: _to_jsonable(item, depth=depth + 1)
+        public_attributes = {
+            key: item
             for key, item in vars(value).items()
             if not key.startswith("_") and not callable(item)
         }
+        if public_attributes:
+            return _to_jsonable(
+                public_attributes,
+                depth=depth + 1,
+                in_json_schema=in_json_schema,
+            )
 
-    return repr(value)
+    return {"type": _type_name(value)}
 
 
 def _json_dumps(value: Any) -> str:
     serialized = json.dumps(_to_jsonable(value), default=str, sort_keys=True)
     if len(serialized) <= _MAX_ATTRIBUTE_CHARS:
         return serialized
-    return f"{serialized[:_MAX_ATTRIBUTE_CHARS]}..."
+
+    def build_wrapper(preview_length: int) -> str:
+        return json.dumps(
+            {
+                "original_length": len(serialized),
+                "preview": serialized[:preview_length],
+                "truncated": True,
+            },
+            sort_keys=True,
+        )
+
+    lower = 0
+    upper = min(len(serialized), _MAX_ATTRIBUTE_CHARS)
+    best = build_wrapper(0)
+    while lower <= upper:
+        middle = (lower + upper) // 2
+        candidate = build_wrapper(middle)
+        if len(candidate) <= _MAX_ATTRIBUTE_CHARS:
+            best = candidate
+            lower = middle + 1
+        else:
+            upper = middle - 1
+    return best
 
 
-def _arg_or_kw(args: tuple[Any, ...], kwargs: dict[str, Any], index: int, key: str) -> Any:
+def _arg_or_kw(
+    args: tuple[Any, ...], kwargs: dict[str, Any], index: int, key: str
+) -> Any:
     if key in kwargs:
         return kwargs[key]
     if len(args) > index:
@@ -121,7 +243,9 @@ def _arg_or_kw(args: tuple[Any, ...], kwargs: dict[str, Any], index: int, key: s
     return None
 
 
-def _method_input(method_name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
+def _method_input(
+    method_name: str, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> dict[str, Any]:
     if method_name == "call_tool":
         payload = {
             "name": _arg_or_kw(args, kwargs, 0, "name"),
@@ -145,16 +269,16 @@ def _method_input(method_name: str, args: tuple[Any, ...], kwargs: dict[str, Any
     if args:
         payload["args"] = args
     filtered_kwargs = {
-        key: value
-        for key, value in kwargs.items()
-        if not callable(value)
+        key: value for key, value in kwargs.items() if not callable(value)
     }
     if filtered_kwargs:
         payload["kwargs"] = filtered_kwargs
     return payload
 
 
-def _entity_name(method_name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
+def _entity_name(
+    method_name: str, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> str:
     if method_name == "call_tool":
         name = _arg_or_kw(args, kwargs, 0, "name")
         return str(name) if name else _CLIENT_METHODS[method_name].entity_name
@@ -187,12 +311,15 @@ class MCPInstrumentor:
 
     name = MCP_INSTRUMENTATION_NAME
     _patches_applied = False
+    _activation_count = 0
+    _shared_delegate: ClassVar[object | None] = None
+    _shared_patched_methods: ClassVar[list[str]] = []
+    _state_lock: ClassVar[RLock] = RLock()
 
     def __init__(self, **instrumentor_kwargs: Any) -> None:
         self._instrumentor_kwargs = instrumentor_kwargs
         self._delegate = None
         self._is_instrumented = False
-        self._patched_methods: list[str] = []
 
     @staticmethod
     def _is_respan_tracing_enabled() -> bool:
@@ -222,8 +349,9 @@ class MCPInstrumentor:
             logger.exception("Failed to activate MCP context propagation")
             return None
 
-    def _patch_client_session(self) -> bool:
-        if MCPInstrumentor._patches_applied:
+    @classmethod
+    def _patch_client_session(cls) -> bool:
+        if cls._patches_applied:
             return True
 
         try:
@@ -252,7 +380,7 @@ class MCPInstrumentor:
                 *,
                 _method_name: str = method_name,
             ) -> Any:
-                return await self._trace_async_method(
+                return await cls._trace_async_method(
                     _method_name,
                     wrapped,
                     args,
@@ -264,13 +392,13 @@ class MCPInstrumentor:
                 f"ClientSession.{method_name}",
                 traced_method,
             )
-            self._patched_methods.append(method_name)
+            cls._shared_patched_methods.append(method_name)
 
-        MCPInstrumentor._patches_applied = bool(self._patched_methods)
-        return MCPInstrumentor._patches_applied
+        cls._patches_applied = bool(cls._shared_patched_methods)
+        return cls._patches_applied
 
+    @staticmethod
     async def _trace_async_method(
-        self,
         method_name: str,
         wrapped: Callable[..., Any],
         args: tuple[Any, ...],
@@ -313,43 +441,71 @@ class MCPInstrumentor:
 
     def activate(self) -> None:
         """Activate MCP context propagation and native client spans."""
-        if self._is_instrumented:
-            return
+        cls = type(self)
+        with cls._state_lock:
+            if self._is_instrumented:
+                return
 
-        if not self._is_respan_tracing_enabled():
-            logger.info("MCP instrumentation skipped because Respan tracing is disabled")
-            return
+            if not self._is_respan_tracing_enabled():
+                logger.info(
+                    "MCP instrumentation skipped because Respan tracing is disabled"
+                )
+                return
 
-        self._delegate = self._activate_context_propagation()
-        patches_applied = self._patch_client_session()
+            if cls._activation_count:
+                cls._activation_count += 1
+                self._delegate = cls._shared_delegate
+                self._is_instrumented = True
+                logger.info("MCP instrumentation activation shared")
+                return
 
-        if self._delegate is None and not patches_applied:
-            return
+            delegate = self._activate_context_propagation()
+            patches_applied = cls._patch_client_session()
 
-        self._is_instrumented = True
+            if delegate is None and not patches_applied:
+                return
+
+            cls._shared_delegate = delegate
+            cls._activation_count = 1
+            self._delegate = delegate
+            self._is_instrumented = True
         logger.info("MCP instrumentation activated")
 
     def deactivate(self) -> None:
         """Deactivate MCP context propagation and native client spans."""
-        if self._patched_methods:
-            for method_name in reversed(self._patched_methods):
+        cls = type(self)
+        with cls._state_lock:
+            if not self._is_instrumented:
+                return
+
+            self._delegate = None
+            self._is_instrumented = False
+            cls._activation_count -= 1
+            if cls._activation_count:
+                logger.info("MCP instrumentation remains active for another owner")
+                return
+
+            for method_name in reversed(cls._shared_patched_methods):
                 try:
-                    unwrap(MCP_CLIENT_SESSION_MODULE, f"ClientSession.{method_name}")
+                    unwrap(
+                        f"{MCP_CLIENT_SESSION_MODULE}.ClientSession",
+                        method_name,
+                    )
                 except Exception:
                     logger.debug(
                         "Failed to unwrap MCP ClientSession.%s",
                         method_name,
                         exc_info=True,
                     )
-            self._patched_methods.clear()
-            MCPInstrumentor._patches_applied = False
+            cls._shared_patched_methods.clear()
+            cls._patches_applied = False
 
-        if self._delegate is not None:
-            try:
-                self._delegate.deactivate()
-            except Exception:
-                logger.exception("Failed to deactivate MCP context propagation")
+            delegate = cls._shared_delegate
+            cls._shared_delegate = None
+            if delegate is not None:
+                try:
+                    delegate.deactivate()
+                except Exception:
+                    logger.exception("Failed to deactivate MCP context propagation")
 
-        self._delegate = None
-        self._is_instrumented = False
         logger.info("MCP instrumentation deactivated")

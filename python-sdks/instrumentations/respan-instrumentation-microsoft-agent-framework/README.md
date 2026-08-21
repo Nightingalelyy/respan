@@ -66,3 +66,11 @@ respan.shutdown()
   `gen_ai.prompt.N.*`, `gen_ai.completion.N.*`, `llm.request.functions`, and
   `traceloop.entity.*`. It strips Agent Framework raw message/tool payload
   fields and off-contract aliases before export.
+- Agent Framework request tools are bridged into its native telemetry only;
+  provider call arguments are not changed. Tool definitions appear on each
+  chat request, while `gen_ai.completion.0.tool_calls` contains only calls from
+  that response turn.
+- Agent, workflow, and task wrappers stay common-only. Model, provider, and
+  token attributes belong to their descendant chat spans.
+- Explicit provider HTTP failures such as 401/429/503 retain that status;
+  unclassified application exceptions use status 500.

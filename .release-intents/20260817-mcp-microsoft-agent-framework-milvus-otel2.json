@@ -1,0 +1,8 @@
+{
+  "summary": "Repair MCP, Microsoft Agent Framework, and Milvus OTel 2.x span semantics and coverage",
+  "packages": {
+    "respan-instrumentation-mcp": "patch",
+    "respan-instrumentation-microsoft-agent-framework": "patch",
+    "respan-instrumentation-milvus": "patch"
+  }
+}
