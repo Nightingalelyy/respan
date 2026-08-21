@@ -1,13 +1,12 @@
 """Shared utility functions for span data serialization and formatting."""
 
-import json
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from respan_sdk.utils.serialization import serialize_value
+from respan_instrumentation_openai_agents._serialization import json_string, json_value
 
 
-def _responses_api_item_to_message(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _responses_api_item_to_message(item: dict[str, Any]) -> dict[str, Any] | None:
     """Convert a single Responses API input/output item to a chat message dict."""
     item_type = item.get("type", "")
 
@@ -27,7 +26,7 @@ def _responses_api_item_to_message(item: Dict[str, Any]) -> Optional[Dict[str, A
                 elif bt == "input_file":
                     text_parts.append("[file]")
                 else:
-                    text_parts.append(block.get("text", str(block)))
+                    text_parts.append(block.get("text", json_string(block)))
             elif isinstance(block, str):
                 text_parts.append(block)
         return {"role": role, "content": "\n".join(text_parts)}
@@ -36,14 +35,16 @@ def _responses_api_item_to_message(item: Dict[str, Any]) -> Optional[Dict[str, A
         return {
             "role": "assistant",
             "content": "",
-            "tool_calls": [{
-                "id": item.get("call_id", ""),
-                "type": "function",
-                "function": {
-                    "name": item.get("name", ""),
-                    "arguments": item.get("arguments", ""),
-                },
-            }],
+            "tool_calls": [
+                {
+                    "id": item.get("call_id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": item.get("name", ""),
+                        "arguments": item.get("arguments", ""),
+                    },
+                }
+            ],
         }
 
     if item_type == "function_call_output":
@@ -56,15 +57,14 @@ def _responses_api_item_to_message(item: Dict[str, Any]) -> Optional[Dict[str, A
     return None
 
 
-def _format_input_messages(raw_input: Any) -> List[Dict[str, Any]]:
+def _format_input_messages(raw_input: Any) -> list[dict[str, Any]]:
     """Wrap raw input into proper ``[{"role": ..., "content": ...}]`` format."""
-    serialized = serialize_value(raw_input)
+    serialized = json_value(raw_input)
     if serialized is None:
         return []
     if isinstance(serialized, list):
         has_responses_api_items = any(
-            isinstance(item, dict) and "type" in item
-            for item in serialized
+            isinstance(item, dict) and "type" in item for item in serialized
         )
         if has_responses_api_items:
             messages = []
@@ -84,8 +84,8 @@ def _format_input_messages(raw_input: Any) -> List[Dict[str, Any]]:
     if isinstance(serialized, str):
         return [{"role": "user", "content": serialized}]
     if isinstance(serialized, dict):
-        return [{"role": "user", "content": json.dumps(serialized, default=str)}]
-    return [{"role": "user", "content": str(serialized)}]
+        return [{"role": "user", "content": json_string(serialized)}]
+    return [{"role": "user", "content": json_string(serialized)}]
 
 
 def _format_output(resp_output: Any) -> str:
@@ -96,7 +96,7 @@ def _format_output(resp_output: Any) -> str:
     they are extracted separately via ``_extract_tool_calls`` and stored
     as their own span attribute.
     """
-    serialized = serialize_value(resp_output)
+    serialized = json_value(resp_output)
     if not serialized:
         return ""
 
@@ -104,18 +104,22 @@ def _format_output(resp_output: Any) -> str:
         return serialized
 
     if isinstance(serialized, dict):
+        if serialized.get("type") in ("function_call", "function_call_output"):
+            return ""
+        if serialized.get("tool_calls") and serialized.get("content") is None:
+            return ""
         content = serialized.get("content")
         if content is None:
-            return json.dumps(serialized, default=str)
+            return json_string(serialized)
         if isinstance(content, str):
             return content
-        return json.dumps(content, default=str)
+        return json_string(content)
 
     if isinstance(serialized, list):
-        text_parts: List[str] = []
+        text_parts: list[str] = []
         for item in serialized:
             if not isinstance(item, dict):
-                text_parts.append(str(item))
+                text_parts.append(json_string(item))
                 continue
             item_type = item.get("type", "")
             if item_type in ("function_call", "function_call_output"):
@@ -139,12 +143,14 @@ def _format_output(resp_output: Any) -> str:
             if "content" in item:
                 content = item["content"]
                 if content is not None:
-                    text_parts.append(str(content))
+                    text_parts.append(
+                        content if isinstance(content, str) else json_string(content)
+                    )
                 continue
-            text_parts.append(str(item))
+            text_parts.append(json_string(item))
         return "\n".join(text_parts) if text_parts else ""
 
-    return str(serialized)
+    return json_string(serialized)
 
 
 def _parse_ts(ts: str) -> datetime:

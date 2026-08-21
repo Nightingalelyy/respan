@@ -35,6 +35,7 @@ SYNC_RESPONSES_CLASS = "Responses"
 ASYNC_RESPONSES_CLASS = "AsyncResponses"
 
 CREATE_METHOD = "create"
+PARSE_METHOD = "parse"
 
 # --- request-type values (what the backend keys on via llm.request.type) ----
 
@@ -42,24 +43,8 @@ REQUEST_TYPE_CHAT = "chat"
 REQUEST_TYPE_COMPLETION = "completion"
 REQUEST_TYPE_EMBEDDING = "embedding"
 
-# --- attribute-name strings (the documented ingest contract) ----------------
-# These mirror the wire format the Respan backend parses. We define them here so
-# the package carries no Traceloop dependency.
-
-TRACELOOP_SPAN_KIND = "traceloop.span.kind"
-TRACELOOP_ENTITY_NAME = "traceloop.entity.name"
-TRACELOOP_ENTITY_PATH = "traceloop.entity.path"
-TRACELOOP_ENTITY_INPUT = "traceloop.entity.input"
-TRACELOOP_ENTITY_OUTPUT = "traceloop.entity.output"
-
-LLM_USAGE_TOTAL_TOKENS = "gen_ai.usage.total_tokens"
-LLM_PROMPTS = "gen_ai.prompt"
-LLM_COMPLETIONS = "gen_ai.completion"
-LLM_REQUEST_FUNCTIONS = "llm.request.functions"
-LLM_RESPONSE_MODEL = "gen_ai.response.model"
-LLM_RESPONSE_ID = "gen_ai.response.id"
-
-SPAN_KIND_LLM = "llm"
+# ``opentelemetry-semantic-conventions-ai`` 0.5.x does not expose this key.
+GEN_AI_RESPONSE_ID = "gen_ai.response.id"
 
 # --- response / message field keys ------------------------------------------
 
