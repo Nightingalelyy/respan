@@ -2,7 +2,6 @@
 
 from respan_sdk.constants.llm_logging import LOG_TYPE_TASK, LOG_TYPE_WORKFLOW
 
-
 PYTEST_INSTRUMENTATION_NAME = "pytest"
 PYTEST_RUNTIME_PLUGIN_NAME = "respan-pytest-runtime"
 

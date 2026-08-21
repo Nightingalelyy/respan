@@ -1,0 +1,8 @@
+{
+  "summary": "Repair Pydantic AI, Pytest, and Qdrant OpenTelemetry 2.x span normalization, lifecycle ownership, bounded content capture, and real-runtime coverage.",
+  "packages": {
+    "respan-instrumentation-pydantic-ai": "patch",
+    "respan-instrumentation-pytest": "patch",
+    "respan-instrumentation-qdrant": "patch"
+  }
+}

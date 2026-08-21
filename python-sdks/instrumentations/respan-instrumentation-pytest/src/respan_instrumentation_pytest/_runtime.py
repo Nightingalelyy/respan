@@ -7,17 +7,30 @@ import os
 from typing import Any
 
 import pytest
+from opentelemetry.semconv.trace import SpanAttributes as OTelSpanAttributes
 from opentelemetry.semconv_ai import SpanAttributes
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from respan_instrumentation_pytest._constants import TASK_LOG_TYPE
 from respan_instrumentation_pytest._instrumentation import (
     PytestInstrumentor,
-    _TestState,
     _json_dumps,
+    _TestState,
 )
+from respan_instrumentation_pytest._serialization import safe_text
 
 logger = logging.getLogger(__name__)
+
+
+def _exception_message(exception: BaseException) -> str:
+    try:
+        arguments = exception.args
+    except Exception:  # noqa: BLE001 - hostile exception attributes are ignored.
+        arguments = ()
+    for argument in arguments:
+        if isinstance(argument, str | bool | int | float):
+            return safe_text(argument)
+    return type(exception).__name__
 
 
 class PytestRuntimePlugin(PytestInstrumentor):
@@ -87,13 +100,23 @@ class PytestRuntimePlugin(PytestInstrumentor):
                 if isinstance(exception, BaseException):
                     state.error = exception
                     state.error_when = report.when
-                    if isinstance(exception, Exception) and self._capture_content:
-                        state.span.record_exception(exception)
                     message = (
-                        str(exception)
+                        _exception_message(exception)
                         if self._capture_content
                         else type(exception).__name__
                     )
+                    if self._capture_content:
+                        add_event = getattr(state.span, "add_event", None)
+                        if callable(add_event):
+                            add_event(
+                                "exception",
+                                {
+                                    OTelSpanAttributes.EXCEPTION_MESSAGE: message,
+                                    OTelSpanAttributes.EXCEPTION_TYPE: type(
+                                        exception
+                                    ).__name__,
+                                },
+                            )
                 else:
                     state.error_when = report.when
                     message = "Pytest phase failed"
@@ -135,13 +158,13 @@ class PytestRuntimePlugin(PytestInstrumentor):
                 "phase": state.error_when,
             }
             if self._capture_content:
-                error["message"] = str(state.error)
+                error["message"] = _exception_message(state.error)
             output["error"] = error
         if outcome != "failed":
             state.span.set_attribute("status_code", 200)
         state.span.set_attribute(
             SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
-            _json_dumps(output, max_chars=self._max_attribute_chars),
+            _json_dumps(output, max_bytes=self._max_attribute_chars),
         )
 
     def _finish_session_span(self, exitstatus: Any) -> None:
@@ -159,7 +182,7 @@ class PytestRuntimePlugin(PytestInstrumentor):
         }
         self._session_span.set_attribute(
             SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
-            _json_dumps(output, max_chars=self._max_attribute_chars),
+            _json_dumps(output, max_bytes=self._max_attribute_chars),
         )
         if failed:
             message = f"Pytest exited with status {numeric_status}"
@@ -178,6 +201,7 @@ class PytestRuntimePlugin(PytestInstrumentor):
             self._session_context_manager.__exit__(None, None, None)
             self._session_context_manager = None
             self._session_span = None
+            self._exit_propagation()
             if self._telemetry is not None:
                 try:
                     self._telemetry.flush()

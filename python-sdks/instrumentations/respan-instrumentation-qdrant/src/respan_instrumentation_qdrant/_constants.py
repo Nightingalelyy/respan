@@ -1,6 +1,7 @@
 """Qdrant SDK-specific instrumentation constants."""
 
 QDRANT_INSTRUMENTATION_NAME = "qdrant"
+QDRANT_INSTRUMENTATION_VERSION = "0.1.0"
 
 # Public operations that issue work against Qdrant. Local model-selection and
 # introspection helpers are intentionally excluded because they do not perform
@@ -69,6 +70,8 @@ QDRANT_OPERATIONS = (
 
 MAX_ATTRIBUTE_CHARS = 16_000
 MAX_PREVIEW_ITEMS = 64
+MAX_SERIALIZATION_DEPTH = 8
+MAX_STRING_BYTES = 4_000
 SENSITIVE_KEY_PARTS = (
     "api_key",
     "authorization",

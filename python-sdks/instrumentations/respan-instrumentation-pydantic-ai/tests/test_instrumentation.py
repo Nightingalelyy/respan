@@ -3,14 +3,28 @@ import json
 import logging
 import sys
 from types import ModuleType, SimpleNamespace
+from typing import ClassVar
 
+import pytest
 from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+    InMemorySpanExporter,
+)
 from opentelemetry.semconv_ai import SpanAttributes
-
-from respan_instrumentation_pydantic_ai import PydanticAIInstrumentor, _processor
+from respan_instrumentation_pydantic_ai import (
+    PydanticAIInstrumentor,
+    _instrumentation,
+    _processor,
+)
 from respan_instrumentation_pydantic_ai._processor import (
     PydanticAISpanProcessor,
     enrich_pydantic_ai_span,
+)
+from respan_instrumentation_pydantic_ai._serialization import (
+    MAX_ATTRIBUTE_BYTES,
+    json_string,
 )
 
 _BANNED_ALIASES = {
@@ -31,6 +45,27 @@ _BANNED_ALIASES = {
     "has_tool_calls",
     "parallel_tool_calls",
 }
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_lifecycle():
+    PydanticAIInstrumentor._shared_processor = None
+    PydanticAIInstrumentor._shared_provider = None
+    PydanticAIInstrumentor._processor_refcount = 0
+    PydanticAIInstrumentor._global_refcount = 0
+    PydanticAIInstrumentor._global_config = None
+    PydanticAIInstrumentor._global_agent_class = None
+    PydanticAIInstrumentor._global_previous = _instrumentation._UNSET
+    PydanticAIInstrumentor._specific_agents = {}
+    yield
+    PydanticAIInstrumentor._shared_processor = None
+    PydanticAIInstrumentor._shared_provider = None
+    PydanticAIInstrumentor._processor_refcount = 0
+    PydanticAIInstrumentor._global_refcount = 0
+    PydanticAIInstrumentor._global_config = None
+    PydanticAIInstrumentor._global_agent_class = None
+    PydanticAIInstrumentor._global_previous = _instrumentation._UNSET
+    PydanticAIInstrumentor._specific_agents = {}
 
 
 def _assert_otel_safe_attrs(attrs):
@@ -63,7 +98,7 @@ def _install_fake_modules(monkeypatch):
 
     class FakeAgent:
         _instrument_default = "existing-default"
-        instrument_all_calls = []
+        instrument_all_calls: ClassVar[list[object]] = []
 
         @classmethod
         def instrument_all(cls, instrument):
@@ -168,18 +203,23 @@ def test_enrich_pydantic_ai_tool_span_maps_tool_fields():
     assert span._attributes["respan.entity.log_type"] == "tool"
     assert span._attributes["respan.entity.log_method"] == "tracing_integration"
     assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "add"
-    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_PATH] == "add"
-    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT] == '{"a":1,"b":2}'
-    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] == "3"
-    assert span._attributes[SpanAttributes.LLM_REQUEST_MODEL] == "gpt-4o-mini"
-    assert span._attributes[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] == 11
-    assert span._attributes[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] == 7
-    assert span._attributes[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] == 18
+    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_PATH] == ""
+    assert json.loads(span._attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT]) == {
+        "name": "add",
+        "arguments": {"a": 1, "b": 2},
+    }
+    assert json.loads(span._attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == 3
+    assert SpanAttributes.LLM_REQUEST_MODEL not in span._attributes
+    assert SpanAttributes.LLM_USAGE_PROMPT_TOKENS not in span._attributes
+    assert SpanAttributes.LLM_USAGE_COMPLETION_TOKENS not in span._attributes
+    assert SpanAttributes.LLM_USAGE_TOTAL_TOKENS not in span._attributes
+    assert "gen_ai.usage.input_tokens" not in span._attributes
+    assert "gen_ai.usage.output_tokens" not in span._attributes
     assert "gen_ai.tool.name" not in span._attributes
     _assert_no_banned_aliases(span._attributes)
 
 
-def test_enrich_pydantic_ai_agent_span_sets_workflow_name_and_response_format():
+def test_enrich_pydantic_ai_agent_span_stays_common_only():
     span = SimpleNamespace(
         name="invoke_agent weather",
         _attributes={
@@ -209,26 +249,11 @@ def test_enrich_pydantic_ai_agent_span_sets_workflow_name_and_response_format():
 
     assert span._attributes["respan.entity.log_type"] == "agent"
     assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "weather"
-    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_PATH] == "weather"
+    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_PATH] == ""
     assert span._attributes[SpanAttributes.TRACELOOP_WORKFLOW_NAME] == "weather"
-    assert span._attributes[SpanAttributes.LLM_REQUEST_MODEL] == "gpt-4o-mini"
-    assert json.loads(span._attributes[SpanAttributes.LLM_REQUEST_FUNCTIONS]) == [
-        {
-            "type": "function",
-            "function": {
-                "name": "lookup_weather",
-                "description": "Look up the weather.",
-                "parameters": {"type": "object"},
-            },
-        }
-    ]
-    assert json.loads(span._attributes["response_format"]) == {
-        "type": "json_schema",
-        "json_schema": {
-            "schema": {"type": "object"},
-            "name": "WeatherAnswer",
-        },
-    }
+    assert SpanAttributes.LLM_REQUEST_MODEL not in span._attributes
+    assert SpanAttributes.LLM_REQUEST_FUNCTIONS not in span._attributes
+    assert "response_format" not in span._attributes
     assert "gen_ai.agent.name" not in span._attributes
     _assert_no_banned_aliases(span._attributes)
 
@@ -248,12 +273,13 @@ def test_enrich_pydantic_ai_chat_span_maps_messages():
 
     assert span._attributes["respan.entity.log_type"] == "chat"
     assert span._attributes[SpanAttributes.LLM_REQUEST_TYPE] == "chat"
-    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT] == (
-        '[{"role": "user", "content": "hi"}]'
-    )
-    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] == (
-        '{"role": "assistant", "content": "hello"}'
-    )
+    assert json.loads(span._attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT]) == [
+        {"role": "user", "content": "hi"}
+    ]
+    assert json.loads(span._attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == {
+        "role": "assistant",
+        "content": "hello",
+    }
     assert span._attributes[f"{SpanAttributes.LLM_PROMPTS}.0.role"] == "user"
     assert span._attributes[f"{SpanAttributes.LLM_PROMPTS}.0.content"] == "hi"
     assert span._attributes[f"{SpanAttributes.LLM_COMPLETIONS}.0.role"] == "assistant"
@@ -322,9 +348,7 @@ def test_enrich_pydantic_ai_chat_span_flattens_structured_message_parts():
     assert span._attributes[f"{SpanAttributes.LLM_PROMPTS}.1.content"] == (
         "What is the capital of France?"
     )
-    assert span._attributes[f"{SpanAttributes.LLM_COMPLETIONS}.0.role"] == (
-        "assistant"
-    )
+    assert span._attributes[f"{SpanAttributes.LLM_COMPLETIONS}.0.role"] == ("assistant")
     assert span._attributes[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"] == (
         "The capital of France is Paris."
     )
@@ -347,12 +371,13 @@ def test_enrich_pydantic_ai_response_operation_maps_as_chat_span():
 
     assert span._attributes["respan.entity.log_type"] == "chat"
     assert span._attributes[SpanAttributes.LLM_REQUEST_TYPE] == "chat"
-    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT] == (
-        '[{"role": "user", "content": "hi"}]'
-    )
-    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] == (
-        '{"role": "assistant", "content": "hello"}'
-    )
+    assert json.loads(span._attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT]) == [
+        {"role": "user", "content": "hi"}
+    ]
+    assert json.loads(span._attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == {
+        "role": "assistant",
+        "content": "hello",
+    }
     _assert_no_banned_aliases(span._attributes)
 
 
@@ -369,7 +394,7 @@ def test_enrich_pydantic_ai_running_tools_span_maps_task_fields():
 
     assert span._attributes["respan.entity.log_type"] == "task"
     assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "running_tools"
-    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_PATH] == "running_tools"
+    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_PATH] == ""
     _assert_no_banned_aliases(span._attributes)
 
 
@@ -399,3 +424,151 @@ def test_activate_logs_warning_when_dependencies_are_missing(monkeypatch, caplog
         instrumentor.activate()
 
     assert "Failed to activate PydanticAI instrumentation" in caplog.text
+
+
+def test_global_lifecycle_is_shared_and_config_mismatch_is_rejected(monkeypatch):
+    tracer_provider = _make_fake_tracer_provider()
+    tracer_provider._active_span_processor._span_processors = ("exporter",)
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: tracer_provider)
+    fake = _install_fake_modules(monkeypatch)
+    first = PydanticAIInstrumentor()
+    second = PydanticAIInstrumentor()
+
+    first.activate()
+    second.activate()
+    assert len(fake.agent_class.instrument_all_calls) == 1
+    processors = tracer_provider._active_span_processor._span_processors
+    assert isinstance(processors[0], PydanticAISpanProcessor)
+    assert processors[1:] == ("exporter",)
+
+    mismatch = PydanticAIInstrumentor(include_content=False)
+    with pytest.raises(ValueError, match="same content and version"):
+        mismatch.activate()
+
+    first.deactivate()
+    assert (
+        fake.agent_class._instrument_default is fake.agent_class.instrument_all_calls[0]
+    )
+    second.deactivate()
+    assert fake.agent_class._instrument_default == "existing-default"
+    assert tracer_provider._active_span_processor._span_processors == ("exporter",)
+
+
+def test_serializer_is_bounded_redacting_and_never_calls_hostile_string_hooks():
+    class Hostile:
+        def __str__(self):
+            raise AssertionError("hostile __str__ called")
+
+        def __repr__(self):
+            raise AssertionError("hostile __repr__ called")
+
+    encoded = json_string(
+        {
+            "api_key": "plain-secret",
+            "nested": {"client_secret": "also-secret"},
+            "hostile": Hostile(),
+            "unicode": "😀" * 10_000,
+        }
+    )
+    assert len(encoded.encode("utf-8")) <= MAX_ATTRIBUTE_BYTES
+    assert "plain-secret" not in encoded
+    assert "also-secret" not in encoded
+    assert json.loads(encoded)
+
+
+def test_real_pydantic_ai_tool_round_exports_canonical_connected_spans(monkeypatch):
+    from pydantic_ai import Agent
+    from pydantic_ai.models.test import TestModel
+
+    exporter = InMemorySpanExporter()
+    tracer_provider = TracerProvider()
+    tracer_provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: tracer_provider)
+    instrumentor = PydanticAIInstrumentor()
+    instrumentor.activate()
+
+    agent = Agent(TestModel(), name="calculator", instructions="Use the add tool.")
+
+    @agent.tool_plain
+    def add(a: int, b: int) -> int:
+        return a + b
+
+    result = agent.run_sync("Use add for 15 plus 27.")
+    assert result.output == '{"add":0}'
+    assert tracer_provider.force_flush()
+
+    spans = list(exporter.get_finished_spans())
+    assert len(spans) == 4
+    assert len({span.context.span_id for span in spans}) == 4
+    agent_span = next(span for span in spans if span.name == "invoke_agent calculator")
+    chats = [span for span in spans if span.name == "chat test"]
+    tool_span = next(span for span in spans if span.name == "execute_tool add")
+    assert len(chats) == 2
+    assert all(span.parent.span_id == agent_span.context.span_id for span in chats)
+    assert tool_span.parent.span_id == agent_span.context.span_id
+
+    agent_attrs = agent_span.attributes
+    assert agent_attrs["respan.entity.log_type"] == "agent"
+    assert agent_attrs[SpanAttributes.TRACELOOP_ENTITY_PATH] == ""
+    assert json.loads(agent_attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT])[0] == {
+        "content": "Use add for 15 plus 27.",
+        "role": "user",
+    }
+    assert json.loads(agent_attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == {"add": 0}
+    assert SpanAttributes.LLM_REQUEST_MODEL not in agent_attrs
+    assert SpanAttributes.LLM_USAGE_TOTAL_TOKENS not in agent_attrs
+
+    first_chat, second_chat = sorted(chats, key=lambda span: span.start_time)
+    first_attrs = first_chat.attributes
+    first_calls = json.loads(
+        first_attrs[f"{SpanAttributes.LLM_COMPLETIONS}.0.tool_calls"]
+    )
+    assert first_calls == [
+        {
+            "function": {
+                "arguments": '{"a":0,"b":0}',
+                "name": "add",
+            },
+            "id": "pyd_ai_tool_call_id__add",
+            "type": "function",
+        }
+    ]
+    assert (
+        json.loads(first_attrs[SpanAttributes.LLM_REQUEST_FUNCTIONS])[0]["function"][
+            "name"
+        ]
+        == "add"
+    )
+    assert first_attrs["gen_ai.usage.input_tokens"] > 0
+    assert first_attrs["gen_ai.usage.output_tokens"] > 0
+    assert (
+        first_attrs["gen_ai.usage.input_tokens"]
+        == first_attrs[SpanAttributes.LLM_USAGE_PROMPT_TOKENS]
+    )
+    assert (
+        first_attrs["gen_ai.usage.output_tokens"]
+        == first_attrs[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS]
+    )
+
+    second_attrs = second_chat.attributes
+    assert second_attrs[f"{SpanAttributes.LLM_PROMPTS}.1.role"] == "assistant"
+    assert (
+        json.loads(second_attrs[f"{SpanAttributes.LLM_PROMPTS}.1.tool_calls"])
+        == first_calls
+    )
+    assert second_attrs[f"{SpanAttributes.LLM_PROMPTS}.2.role"] == "tool"
+    assert json.loads(second_attrs[f"{SpanAttributes.LLM_PROMPTS}.2.content"]) == {
+        "name": "add",
+        "result": 0,
+        "tool_call_id": "pyd_ai_tool_call_id__add",
+    }
+    assert json.loads(tool_span.attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT]) == {
+        "arguments": {"a": 0, "b": 0},
+        "name": "add",
+    }
+    _assert_no_banned_aliases(agent_attrs)
+    for span in (*chats, tool_span):
+        _assert_no_banned_aliases(span.attributes)
+
+    instrumentor.deactivate()
+    tracer_provider.shutdown()

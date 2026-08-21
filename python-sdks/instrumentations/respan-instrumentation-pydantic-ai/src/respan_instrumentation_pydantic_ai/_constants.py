@@ -7,7 +7,6 @@ This module separates:
 
 from opentelemetry.semconv_ai import SpanAttributes
 
-
 # PydanticAI native / vendor attributes
 PYDANTIC_AI_AGENT_NAME_ATTR = "gen_ai.agent.name"
 PYDANTIC_AI_OPERATION_NAME_ATTR = "gen_ai.operation.name"
@@ -24,7 +23,9 @@ PYDANTIC_AI_RESPONSE_FINISH_REASONS_ATTR = "gen_ai.response.finish_reasons"
 PYDANTIC_AI_USAGE_INPUT_TOKENS_ATTR = "gen_ai.usage.input_tokens"
 PYDANTIC_AI_USAGE_OUTPUT_TOKENS_ATTR = "gen_ai.usage.output_tokens"
 PYDANTIC_AI_AGGREGATED_USAGE_INPUT_TOKENS_ATTR = "gen_ai.aggregated_usage.input_tokens"
-PYDANTIC_AI_AGGREGATED_USAGE_OUTPUT_TOKENS_ATTR = "gen_ai.aggregated_usage.output_tokens"
+PYDANTIC_AI_AGGREGATED_USAGE_OUTPUT_TOKENS_ATTR = (
+    "gen_ai.aggregated_usage.output_tokens"
+)
 PYDANTIC_AI_AGGREGATED_USAGE_TOTAL_TOKENS_ATTR = "gen_ai.aggregated_usage.total_tokens"
 PYDANTIC_AI_USAGE_DETAILS_INPUT_TOKENS_ATTR = "gen_ai.usage.details.input_tokens"
 PYDANTIC_AI_USAGE_DETAILS_OUTPUT_TOKENS_ATTR = "gen_ai.usage.details.output_tokens"
@@ -80,8 +81,6 @@ PYDANTIC_AI_STRIP_ATTRS = frozenset(
         PYDANTIC_AI_RESPONSE_ID_ATTR,
         PYDANTIC_AI_RESPONSE_FINISH_REASONS_ATTR,
         SpanAttributes.GEN_AI_OPENAI_API_BASE,
-        PYDANTIC_AI_USAGE_INPUT_TOKENS_ATTR,
-        PYDANTIC_AI_USAGE_OUTPUT_TOKENS_ATTR,
         SpanAttributes.GEN_AI_USAGE_TOTAL_TOKENS,
         PYDANTIC_AI_AGGREGATED_USAGE_INPUT_TOKENS_ATTR,
         PYDANTIC_AI_AGGREGATED_USAGE_OUTPUT_TOKENS_ATTR,
