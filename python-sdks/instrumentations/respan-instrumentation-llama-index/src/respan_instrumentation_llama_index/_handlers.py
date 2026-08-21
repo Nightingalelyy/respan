@@ -7,12 +7,12 @@ import logging
 import re
 from typing import Any
 
+from llama_index.core.tools.types import BaseTool
 from llama_index_instrumentation.dispatcher import active_instrument_tags
 from llama_index_instrumentation.event_handlers import BaseEventHandler
 from llama_index_instrumentation.span import BaseSpan
 from llama_index_instrumentation.span_handlers import BaseSpanHandler
-from opentelemetry import context
-from opentelemetry import trace
+from opentelemetry import context, trace
 from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
 from opentelemetry.trace import Status, StatusCode
 from pydantic import ConfigDict, PrivateAttr
@@ -20,9 +20,9 @@ from respan_sdk.constants import ERROR_MESSAGE_ATTR
 from respan_sdk.constants.llm_logging import (
     LOG_TYPE_AGENT,
     LOG_TYPE_CHAT,
-    LOG_TYPE_COMPLETION,
     LOG_TYPE_EMBEDDING,
     LOG_TYPE_TASK,
+    LOG_TYPE_TEXT,
     LOG_TYPE_TOOL,
     LOG_TYPE_WORKFLOW,
     LogMethodChoices,
@@ -42,13 +42,12 @@ from respan_instrumentation_llama_index._constants import (
     LLAMA_INDEX_COMPLETION_SPAN_NAME,
     LLAMA_INDEX_DEFAULT_TOOL_NAME,
     LLAMA_INDEX_EMBEDDING_SPAN_NAME,
-    LLAMA_INDEX_USAGE_INPUT_TOKENS,
-    LLAMA_INDEX_USAGE_OUTPUT_TOKENS,
     LLAMA_INDEX_RUN_ID_TAG,
     LLAMA_INDEX_START_EVENT_TAG,
     LLAMA_INDEX_STEP_INPUT_EVENT_TAG,
     LLAMA_INDEX_STEP_INPUT_SUMMARY_TAG,
-    LLAMA_INDEX_TOOL_SPAN_PREFIX,
+    LLAMA_INDEX_USAGE_INPUT_TOKENS,
+    LLAMA_INDEX_USAGE_OUTPUT_TOKENS,
     MESSAGE_ROLE_ASSISTANT,
     MESSAGE_ROLE_USER,
     STATUS_CODE_ATTR,
@@ -115,20 +114,31 @@ class RespanLlamaIndexSpanHandler(BaseSpanHandler[RespanLlamaIndexSpan]):
         **kwargs: Any,
     ) -> RespanLlamaIndexSpan:
         tags = tags or active_instrument_tags.get()
-        entity_name = _span_entity_name(span_id=id_)
+        source_entity_name = _span_entity_name(span_id=id_)
+        is_tool_execution = _is_executable_tool_span(
+            entity_name=source_entity_name,
+            instance=instance,
+        )
+        entity_name = (
+            _tool_name(tool=instance) if is_tool_execution else source_entity_name
+        )
         log_type = _span_log_type(
-            entity_name=entity_name,
+            entity_name=source_entity_name,
             instance=instance,
             parent_span_id=parent_span_id,
         )
         attributes = _base_attributes(
             entity_name=entity_name,
             log_type=log_type,
-            entity_path=entity_name,
+            entity_path=entity_name if parent_span_id is not None else "",
         )
         if self.capture_content:
             attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safe_json(
-                _span_input_payload(bound_args=bound_args, tags=tags)
+                _span_input_payload(
+                    bound_args=bound_args,
+                    tags=tags,
+                    tool_name=entity_name if is_tool_execution else None,
+                )
             )
 
         otel_span, context_token, span_context = _start_otel_span(
@@ -174,7 +184,7 @@ class RespanLlamaIndexSpanHandler(BaseSpanHandler[RespanLlamaIndexSpan]):
                 instance=None,
                 parent_span_id=None,
             ),
-            entity_path=entity_name,
+            entity_path="",
         )
         parent_context = context.get_current()
         otel_span = _start_detached_otel_span(
@@ -203,7 +213,7 @@ class RespanLlamaIndexSpanHandler(BaseSpanHandler[RespanLlamaIndexSpan]):
                 SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
                 safe_json(
                     _span_output_payload(
-                        entity_name=active_span.entity_name,
+                        log_type=active_span.log_type,
                         result=result,
                     )
                 ),
@@ -276,8 +286,6 @@ class RespanLlamaIndexEventHandler(BaseEventHandler):
             self._handle_embedding_start(event=event)
         elif event_name == "EmbeddingEndEvent":
             self._handle_embedding_end(event=event)
-        elif event_name == "AgentToolCallEvent":
-            self._handle_tool_call(event=event)
         elif event_name == "ExceptionEvent":
             self._handle_exception(event=event)
 
@@ -341,8 +349,8 @@ class RespanLlamaIndexEventHandler(BaseEventHandler):
         prompt = getattr(event, "prompt", "")
         attributes = _llm_base_attributes(
             entity_name=LLAMA_INDEX_COMPLETION_SPAN_NAME,
-            log_type=LOG_TYPE_COMPLETION,
-            request_type=LLMRequestTypeValues.COMPLETION.value,
+            log_type=LOG_TYPE_TEXT,
+            request_type=LLMRequestTypeValues.CHAT.value,
             model_dict=model_dict,
         )
         if self.capture_content:
@@ -420,27 +428,6 @@ class RespanLlamaIndexEventHandler(BaseEventHandler):
             active_event_span=active_event_span,
             attributes=attributes,
         )
-
-    def _handle_tool_call(self, *, event: Any) -> None:
-        tool = getattr(event, "tool", None)
-        tool_name = _tool_name(tool=tool)
-        attributes = _base_attributes(
-            entity_name=tool_name,
-            log_type=LOG_TYPE_TOOL,
-            entity_path=tool_name,
-        )
-        if self.capture_content:
-            attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safe_json(
-                {
-                    "name": tool_name,
-                    "arguments": getattr(event, "arguments", ""),
-                }
-            )
-        active_event_span = _start_event_span(
-            span_name=f"{LLAMA_INDEX_TOOL_SPAN_PREFIX}{tool_name}",
-            attributes=attributes,
-        )
-        _finish_event_span(active_event_span=active_event_span, attributes={})
 
     def _handle_exception(self, *, event: Any) -> None:
         span_id = getattr(event, "span_id", None)
@@ -640,7 +627,9 @@ def _content_attribute(*, value: Any) -> str:
     return safe_json(jsonable_value)
 
 
-def _span_output_payload(*, entity_name: str, result: Any) -> Any:
+def _span_output_payload(*, log_type: str, result: Any) -> Any:
+    if log_type == LOG_TYPE_TOOL:
+        return _tool_output_payload(result=result)
     return result
 
 
@@ -648,6 +637,7 @@ def _span_input_payload(
     *,
     bound_args: inspect.BoundArguments,
     tags: dict[str, Any] | None,
+    tool_name: str | None = None,
 ) -> Any:
     """Prefer public Workflows event summaries over internal runtime state.
 
@@ -657,6 +647,12 @@ def _span_input_payload(
     for integrations, so consume those and keep the raw vendor tags off the
     exported span.
     """
+
+    if tool_name is not None:
+        return {
+            "name": tool_name,
+            "arguments": _tool_arguments(bound_args=bound_args),
+        }
 
     tags = tags or {}
     if LLAMA_INDEX_START_EVENT_TAG in tags:
@@ -704,8 +700,10 @@ def _span_log_type(
 ) -> str:
     normalized_name = entity_name.lower()
     instance_name = type(instance).__name__.lower() if instance is not None else ""
-    if "tool" in normalized_name or "tool" in instance_name:
+    if _is_executable_tool_span(entity_name=entity_name, instance=instance):
         return LOG_TYPE_TOOL
+    if _is_tool_orchestration_span(entity_name=entity_name):
+        return LOG_TYPE_TASK
     if "agent" in normalized_name or "agent" in instance_name:
         return LOG_TYPE_AGENT
     if parent_span_id is None:
@@ -713,7 +711,34 @@ def _span_log_type(
     return LOG_TYPE_TASK
 
 
+def _is_executable_tool_span(*, entity_name: str, instance: Any | None) -> bool:
+    """Return whether a native span wraps the tool implementation itself.
+
+    Agent workflow methods such as ``call_tool`` and
+    ``aggregate_tool_results`` coordinate a call but do not execute the
+    application function. LlamaIndex's ``BaseTool.call`` / ``acall`` boundary
+    is the one span that owns both the invocation arguments and result.
+    """
+
+    operation_name = entity_name.rsplit(".", maxsplit=1)[-1]
+    return isinstance(instance, BaseTool) and operation_name in {"call", "acall"}
+
+
+def _is_tool_orchestration_span(*, entity_name: str) -> bool:
+    operation_name = entity_name.rsplit(".", maxsplit=1)[-1]
+    return operation_name in {"_call_tool", "call_tool", "aggregate_tool_results"}
+
+
 def _tool_name(*, tool: Any) -> str:
+    metadata = getattr(tool, "metadata", None)
+    if metadata is not None:
+        for attr_name in ("name", "tool_name"):
+            value = getattr(metadata, attr_name, None)
+            if value:
+                return str(value)
+        get_name = getattr(metadata, "get_name", None)
+        if callable(get_name):
+            return str(get_name())
     for attr_name in ("name", "tool_name"):
         value = getattr(tool, attr_name, None)
         if value:
@@ -722,3 +747,23 @@ def _tool_name(*, tool: Any) -> str:
     if callable(get_name):
         return str(get_name())
     return LLAMA_INDEX_DEFAULT_TOOL_NAME
+
+
+def _tool_arguments(*, bound_args: inspect.BoundArguments) -> Any:
+    positional = to_jsonable(getattr(bound_args, "args", ()))
+    keyword = to_jsonable(getattr(bound_args, "kwargs", {}))
+    if not positional:
+        return keyword
+    if not keyword:
+        return positional
+    return {"args": positional, "kwargs": keyword}
+
+
+def _tool_output_payload(*, result: Any) -> Any:
+    raw_output = getattr(result, "raw_output", None)
+    if raw_output is not None:
+        return raw_output
+    content = getattr(result, "content", None)
+    if content is not None:
+        return content
+    return result

@@ -7,9 +7,18 @@ from typing import Any
 
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 from opentelemetry.semconv_ai import SpanAttributes
+from respan_sdk.constants.span_attributes import (
+    RESPAN_SPAN_CUSTOM_ID,
+    RESPAN_TRACE_GROUP_ID,
+)
+from respan_sdk.utils.data_processing.id_processing import (
+    format_span_id,
+    format_trace_id,
+)
 
 from respan_instrumentation_livekit._constants import (
     ATTR_LLM_METRICS,
+    LIVEKIT_RESPAN_PROVIDER_NAME_ATTR,
     LIVEKIT_RESPAN_TOOL_DEFINITIONS_ATTR,
     LIVEKIT_SCOPE_NAME,
 )
@@ -19,14 +28,6 @@ from respan_instrumentation_livekit._otel_emitter import (
 from respan_instrumentation_livekit._translator import (
     build_livekit_llm_attrs,
     is_livekit_llm_span,
-)
-from respan_sdk.constants.span_attributes import (
-    RESPAN_SPAN_CUSTOM_ID,
-    RESPAN_TRACE_GROUP_ID,
-)
-from respan_sdk.utils.data_processing.id_processing import (
-    format_span_id,
-    format_trace_id,
 )
 
 
@@ -54,7 +55,7 @@ def _tool_call_ids(attrs: dict[str, Any]) -> list[str]:
         return []
     try:
         parsed = json.loads(value) if isinstance(value, str) else value
-    except Exception:
+    except json.JSONDecodeError:
         return []
     if not isinstance(parsed, list):
         return []
@@ -127,6 +128,8 @@ class LiveKitSpanProcessor(SpanProcessor):
             events=tuple(getattr(span, "events", ()) or ()),
         )
         attrs.update(translated)
+        attrs.pop(LIVEKIT_RESPAN_PROVIDER_NAME_ATTR, None)
+        attrs.pop(LIVEKIT_RESPAN_TOOL_DEFINITIONS_ATTR, None)
         _rename_span_to_workflow(span=span, attrs=attrs)
         _register_tool_parent_contexts(span=span, attrs=attrs)
         span._attributes = attrs

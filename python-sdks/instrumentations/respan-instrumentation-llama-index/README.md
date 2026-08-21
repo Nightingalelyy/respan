@@ -60,10 +60,11 @@ index = SummaryIndex.from_documents(
 )
 query_engine = index.as_query_engine()
 
-response = query_engine.query("What does Respan capture?")
-print(response)
-
-respan.flush()
+try:
+    response = query_engine.query("What does Respan capture?")
+    print(response)
+finally:
+    respan.shutdown()
 ```
 
 ### 4. View Dashboard

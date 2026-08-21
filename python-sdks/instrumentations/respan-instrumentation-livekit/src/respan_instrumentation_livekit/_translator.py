@@ -10,6 +10,17 @@ from opentelemetry.semconv._incubating.attributes import (
     gen_ai_attributes as GenAIAttributes,
 )
 from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
+from respan_sdk.constants.llm_logging import (
+    LOG_TYPE_CHAT,
+    LOG_TYPE_TOOL,
+    LogMethodChoices,
+)
+from respan_sdk.constants.span_attributes import (
+    RESPAN_LOG_METHOD,
+    RESPAN_LOG_TYPE,
+    RESPAN_METADATA,
+    RESPAN_TRACE_GROUP_ID,
+)
 
 from respan_instrumentation_livekit._constants import (
     ASSISTANT_ROLE,
@@ -25,6 +36,7 @@ from respan_instrumentation_livekit._constants import (
     ID_KEY,
     LIVEKIT_CHAT_SPAN_NAME,
     LIVEKIT_LLM_REQUEST_SPAN_NAME,
+    LIVEKIT_RESPAN_PROVIDER_NAME_ATTR,
     LIVEKIT_RESPAN_TOOL_DEFINITIONS_ATTR,
     NAME_KEY,
     ROLE_KEY,
@@ -36,13 +48,6 @@ from respan_instrumentation_livekit._serialization import (
     get_value,
     parse_jsonish,
     safe_json,
-)
-from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT, LOG_TYPE_TOOL, LogMethodChoices
-from respan_sdk.constants.span_attributes import (
-    RESPAN_LOG_METHOD,
-    RESPAN_LOG_TYPE,
-    RESPAN_METADATA,
-    RESPAN_TRACE_GROUP_ID,
 )
 
 _PROMPT_EVENT_ROLES = {
@@ -75,9 +80,7 @@ def _tool_calls_from_event(value: Any) -> list[dict[str, Any]]:
         return []
     if isinstance(value, (str, bytes, bytearray)):
         value = [value.decode() if isinstance(value, bytes) else value]
-    elif isinstance(value, Mapping):
-        value = [value]
-    elif not isinstance(value, Sequence):
+    elif isinstance(value, Mapping) or not isinstance(value, Sequence):
         value = [value]
 
     tool_calls: list[dict[str, Any]] = []
@@ -115,7 +118,7 @@ def _metrics(attrs: Mapping[str, Any]) -> Mapping[str, Any]:
         return {}
     try:
         loaded = json.loads(value)
-    except Exception:
+    except json.JSONDecodeError:
         return {}
     return loaded if isinstance(loaded, Mapping) else {}
 
@@ -131,8 +134,10 @@ def _int_value(value: Any) -> int | None:
 
 
 def _provider_name(attrs: Mapping[str, Any]) -> str:
-    provider = attrs.get(GenAIAttributes.GEN_AI_PROVIDER_NAME) or attrs.get(
-        SpanAttributes.LLM_SYSTEM
+    provider = (
+        attrs.get(LIVEKIT_RESPAN_PROVIDER_NAME_ATTR)
+        or attrs.get(GenAIAttributes.GEN_AI_PROVIDER_NAME)
+        or attrs.get(SpanAttributes.LLM_SYSTEM)
     )
     if not provider:
         return "livekit"
@@ -210,7 +215,9 @@ def _apply_completion_event(
 def _apply_usage(translated: dict[str, Any], attrs: Mapping[str, Any]) -> None:
     metrics = _metrics(attrs)
     input_tokens = _int_value(
-        attrs.get(GenAIAttributes.GEN_AI_USAGE_INPUT_TOKENS, metrics.get("prompt_tokens"))
+        attrs.get(
+            GenAIAttributes.GEN_AI_USAGE_INPUT_TOKENS, metrics.get("prompt_tokens")
+        )
     )
     output_tokens = _int_value(
         attrs.get(
@@ -241,7 +248,9 @@ def _apply_usage(translated: dict[str, Any], attrs: Mapping[str, Any]) -> None:
         translated[cache_read_attr] = cached_tokens
 
 
-def _apply_livekit_metadata(translated: dict[str, Any], attrs: Mapping[str, Any]) -> None:
+def _apply_livekit_metadata(
+    translated: dict[str, Any], attrs: Mapping[str, Any]
+) -> None:
     metrics = attrs.get(ATTR_LLM_METRICS)
     if isinstance(metrics, str) and metrics:
         translated[f"{RESPAN_METADATA}.livekit_llm_metrics"] = metrics
@@ -255,7 +264,9 @@ def _apply_livekit_metadata(translated: dict[str, Any], attrs: Mapping[str, Any]
         )
 
 
-def _apply_tool_definitions(translated: dict[str, Any], attrs: Mapping[str, Any]) -> None:
+def _apply_tool_definitions(
+    translated: dict[str, Any], attrs: Mapping[str, Any]
+) -> None:
     value = attrs.get(LIVEKIT_RESPAN_TOOL_DEFINITIONS_ATTR)
     parsed = parse_jsonish(value)
     if parsed:
@@ -279,10 +290,12 @@ def build_livekit_llm_attrs(
     events: Sequence[Any],
 ) -> dict[str, Any]:
     """Build canonical Respan chat attributes from a LiveKit LLM span."""
+    provider_name = _provider_name(attrs)
     translated: dict[str, Any] = {
         RESPAN_LOG_METHOD: LogMethodChoices.TRACING_INTEGRATION.value,
         RESPAN_LOG_TYPE: LOG_TYPE_CHAT,
-        SpanAttributes.LLM_SYSTEM: _provider_name(attrs),
+        GenAIAttributes.GEN_AI_PROVIDER_NAME: provider_name,
+        SpanAttributes.LLM_SYSTEM: provider_name,
         SpanAttributes.LLM_REQUEST_TYPE: LLMRequestTypeValues.CHAT.value,
         SpanAttributes.TRACELOOP_ENTITY_NAME: LIVEKIT_CHAT_SPAN_NAME,
         SpanAttributes.TRACELOOP_ENTITY_PATH: LIVEKIT_CHAT_SPAN_NAME,
@@ -293,6 +306,9 @@ def build_livekit_llm_attrs(
     )
     if model:
         translated[SpanAttributes.LLM_REQUEST_MODEL] = str(model)
+
+    if attrs.get(SpanAttributes.LLM_IS_STREAMING):
+        translated[SpanAttributes.LLM_IS_STREAMING] = True
 
     workflow_name = attrs.get(RESPAN_TRACE_GROUP_ID)
     if workflow_name:
@@ -325,15 +341,17 @@ def normalize_livekit_tools(tools: Any) -> list[dict[str, Any]]:
         parsed = ToolContext(tools).parse_function_tools("openai")
         if isinstance(parsed, list):
             return [tool for tool in parsed if isinstance(tool, dict)]
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 - third-party tool objects may fail arbitrarily
+        parsed = None
 
     normalized: list[dict[str, Any]] = []
     for tool in tools:
         info = get_value(tool, "info")
         raw_schema = get_value(info, "raw_schema")
         if isinstance(raw_schema, Mapping) and raw_schema.get(NAME_KEY):
-            normalized.append({TYPE_KEY: FUNCTION_TOOL_TYPE, FUNCTION_KEY: dict(raw_schema)})
+            normalized.append(
+                {TYPE_KEY: FUNCTION_TOOL_TYPE, FUNCTION_KEY: dict(raw_schema)}
+            )
             continue
 
         name = get_value(info, NAME_KEY) or get_value(tool, ID_KEY)

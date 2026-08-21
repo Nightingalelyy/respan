@@ -2,20 +2,29 @@ import asyncio
 import json
 import logging
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from llama_index.core import instrumentation
-from workflows import Workflow, step
-from workflows.events import Event, StartEvent, StopEvent
+from llama_index.core.agent.workflow import ReActAgent
+from llama_index.core.llms import CompletionResponse, LLMMetadata, MockLLM
+from llama_index.core.tools import FunctionTool
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.semconv_ai import SpanAttributes
 from opentelemetry.trace import StatusCode
+from pydantic import PrivateAttr
+from respan_instrumentation_llama_index import LlamaIndexInstrumentor, _instrumentation
+from respan_instrumentation_llama_index._handlers import (
+    RespanLlamaIndexEventHandler,
+    RespanLlamaIndexSpanHandler,
+)
+from respan_instrumentation_llama_index._serialization import extract_usage
 from respan_sdk.constants.llm_logging import (
     LOG_TYPE_AGENT,
     LOG_TYPE_CHAT,
-    LOG_TYPE_COMPLETION,
     LOG_TYPE_EMBEDDING,
     LOG_TYPE_TASK,
+    LOG_TYPE_TEXT,
     LOG_TYPE_TOOL,
     LOG_TYPE_WORKFLOW,
 )
@@ -26,14 +35,8 @@ from respan_sdk.constants.span_attributes import (
 from respan_tracing import RespanTelemetry
 from respan_tracing.core.tracer import RespanTracer
 from respan_tracing.testing import InMemorySpanExporter
-
-from respan_instrumentation_llama_index import LlamaIndexInstrumentor
-from respan_instrumentation_llama_index import _instrumentation
-from respan_instrumentation_llama_index._handlers import (
-    RespanLlamaIndexEventHandler,
-    RespanLlamaIndexSpanHandler,
-)
-from respan_instrumentation_llama_index._serialization import extract_usage
+from workflows import Workflow, step
+from workflows.events import Event, StartEvent, StopEvent
 
 
 @pytest.fixture(autouse=True)
@@ -164,6 +167,10 @@ def test_span_handler_emits_workflow_and_task_spans(span_exporter):
         == LOG_TYPE_WORKFLOW
     )
     assert attrs_by_name["BaseRetriever.retrieve"][RESPAN_LOG_TYPE] == LOG_TYPE_TASK
+    assert (
+        attrs_by_name["BaseRetriever.retrieve"][SpanAttributes.TRACELOOP_ENTITY_NAME]
+        == "BaseRetriever.retrieve"
+    )
     assert (
         attrs_by_name["RetrieverQueryEngine.query"][
             SpanAttributes.TRACELOOP_ENTITY_OUTPUT
@@ -579,8 +586,12 @@ def test_chat_events_can_disable_content_capture(span_exporter):
     assert SpanAttributes.TRACELOOP_ENTITY_INPUT not in chat_span.attributes
     assert SpanAttributes.TRACELOOP_ENTITY_OUTPUT not in chat_span.attributes
     assert not any(
-        key.startswith(f"{SpanAttributes.LLM_PROMPTS}.")
-        or key.startswith(f"{SpanAttributes.LLM_COMPLETIONS}.")
+        key.startswith(
+            (
+                f"{SpanAttributes.LLM_PROMPTS}.",
+                f"{SpanAttributes.LLM_COMPLETIONS}.",
+            )
+        )
         for key in chat_span.attributes
     )
     assert "hidden" not in json.dumps(dict(chat_span.attributes))
@@ -615,8 +626,12 @@ def test_completion_events_can_disable_content_capture(span_exporter):
     assert SpanAttributes.TRACELOOP_ENTITY_INPUT not in completion_span.attributes
     assert SpanAttributes.TRACELOOP_ENTITY_OUTPUT not in completion_span.attributes
     assert not any(
-        key.startswith(f"{SpanAttributes.LLM_PROMPTS}.")
-        or key.startswith(f"{SpanAttributes.LLM_COMPLETIONS}.")
+        key.startswith(
+            (
+                f"{SpanAttributes.LLM_PROMPTS}.",
+                f"{SpanAttributes.LLM_COMPLETIONS}.",
+            )
+        )
         for key in completion_span.attributes
     )
     assert completion_span.attributes[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] == 3
@@ -659,8 +674,8 @@ def test_completion_events_emit_text_span(span_exporter):
     )
     attributes = text_span.attributes
 
-    assert attributes[RESPAN_LOG_TYPE] == LOG_TYPE_COMPLETION
-    assert attributes[SpanAttributes.LLM_REQUEST_TYPE] == "completion"
+    assert attributes[RESPAN_LOG_TYPE] == LOG_TYPE_TEXT
+    assert attributes[SpanAttributes.LLM_REQUEST_TYPE] == "chat"
     assert (
         attributes[f"{SpanAttributes.LLM_PROMPTS}.0.content"]
         == "Complete this sentence"
@@ -719,9 +734,111 @@ def test_embedding_events_capture_full_vectors(span_exporter):
     assert "llm.embeddings.0" not in attributes
 
 
-def test_tool_event_emits_tool_span(span_exporter):
+def test_registered_react_runtime_emits_one_logical_tool_execution(span_exporter):
+    class ScriptedReActLLM(MockLLM):
+        _responses: list[str] = PrivateAttr()
+        _response_index: int = PrivateAttr(default=0)
+
+        def __init__(self) -> None:
+            super().__init__(is_chat_model=True)
+            self._responses = [
+                (
+                    "Thought: I need multiplication.\n"
+                    "Action: multiply_numbers\n"
+                    'Action Input: {"a": 7, "b": 6}'
+                ),
+                ("Thought: I can answer without using any more tools.\nAnswer: 42"),
+            ]
+
+        @property
+        def metadata(self) -> LLMMetadata:
+            return LLMMetadata(
+                is_chat_model=True,
+                model_name="scripted-react",
+            )
+
+        def complete(
+            self,
+            prompt: str,
+            formatted: bool = False,
+            **kwargs: Any,
+        ) -> CompletionResponse:
+            del prompt, formatted, kwargs
+            response = self._responses[
+                min(self._response_index, len(self._responses) - 1)
+            ]
+            self._response_index += 1
+            return CompletionResponse(text=response)
+
+    def multiply_numbers(a: int, b: int) -> int:
+        return a * b
+
+    async def run_agent(agent: ReActAgent) -> Any:
+        return await agent.run(user_msg="What is 7 multiplied by 6?")
+
+    instrumentor = LlamaIndexInstrumentor()
+    instrumentor.activate()
+    try:
+        agent = ReActAgent(
+            tools=[
+                FunctionTool.from_defaults(
+                    fn=multiply_numbers,
+                    name="multiply_numbers",
+                    description="Multiply two integers.",
+                )
+            ],
+            llm=ScriptedReActLLM(),
+            system_prompt="Use tools for arithmetic.",
+            streaming=False,
+        )
+        result = asyncio.run(run_agent(agent))
+    finally:
+        instrumentor.deactivate()
+
+    assert str(result) == "42"
+    spans = span_exporter.get_finished_spans()
+    tool_spans = [
+        span for span in spans if span.attributes.get(RESPAN_LOG_TYPE) == LOG_TYPE_TOOL
+    ]
+    assert len(tool_spans) == 1
+
+    root_span = next(span for span in spans if span.name == "ReActAgent.run")
+    call_span = next(
+        span for span in spans if span.name == "BaseWorkflowAgent.call_tool"
+    )
+    aggregate_span = next(
+        span
+        for span in spans
+        if span.name == "BaseWorkflowAgent.aggregate_tool_results"
+    )
+    tool_span = tool_spans[0]
+
+    assert root_span.parent is None
+    assert call_span.parent.span_id == root_span.context.span_id
+    assert aggregate_span.parent.span_id == root_span.context.span_id
+    assert tool_span.parent.span_id == call_span.context.span_id
+    assert tool_span.context.trace_id == root_span.context.trace_id
+    assert call_span.attributes[RESPAN_LOG_TYPE] == LOG_TYPE_TASK
+    assert aggregate_span.attributes[RESPAN_LOG_TYPE] == LOG_TYPE_TASK
+    assert tool_span.name == "multiply_numbers"
+    assert json.loads(tool_span.attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT]) == {
+        "name": "multiply_numbers",
+        "arguments": {"a": 7, "b": 6},
+    }
+    assert (
+        json.loads(tool_span.attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == 42
+    )
+    for alias in (
+        "traceloop.span.kind",
+        "respan.span.tool_calls",
+        "tool_calls",
+        "has_tool_calls",
+    ):
+        assert alias not in tool_span.attributes
+
+
+def test_agent_tool_call_event_does_not_claim_an_execution(span_exporter):
     handler = RespanLlamaIndexEventHandler()
-
     handler.handle(
         SimpleNamespace(
             class_name=lambda: "AgentToolCallEvent",
@@ -730,35 +847,34 @@ def test_tool_event_emits_tool_span(span_exporter):
         )
     )
 
-    tool_span = next(
-        span
-        for span in span_exporter.get_finished_spans()
-        if span.name == "llama_index.tool.lookup_order"
+    assert not span_exporter.get_finished_spans()
+
+
+def test_native_tool_span_respects_content_capture_setting(span_exporter):
+    handler = RespanLlamaIndexSpanHandler(capture_content=False)
+    tool = FunctionTool.from_defaults(fn=lambda value: value, name="echo")
+    span_id = "FunctionTool.call-55555555-5555-5555-5555-555555555555"
+    bound_args = SimpleNamespace(args=(), kwargs={"value": "secret"})
+
+    handler.span_enter(
+        id_=span_id,
+        bound_args=bound_args,
+        instance=tool,
+        parent_id=None,
+    )
+    handler.span_exit(
+        id_=span_id,
+        bound_args=bound_args,
+        instance=tool,
+        result=SimpleNamespace(raw_output="secret"),
     )
 
-    assert tool_span.attributes[RESPAN_LOG_TYPE] == LOG_TYPE_TOOL
-    assert "ord_123" in tool_span.attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT]
-
-
-def test_tool_event_respects_content_capture_setting(span_exporter):
-    handler = RespanLlamaIndexEventHandler(capture_content=False)
-
-    handler.handle(
-        SimpleNamespace(
-            class_name=lambda: "AgentToolCallEvent",
-            tool=SimpleNamespace(name="lookup_order"),
-            arguments='{"order_id": "ord_123"}',
-        )
-    )
-
-    tool_span = next(
-        span
-        for span in span_exporter.get_finished_spans()
-        if span.name == "llama_index.tool.lookup_order"
-    )
-
+    tool_span = span_exporter.get_finished_spans()[0]
+    assert tool_span.name == "echo"
     assert tool_span.attributes[RESPAN_LOG_TYPE] == LOG_TYPE_TOOL
     assert SpanAttributes.TRACELOOP_ENTITY_INPUT not in tool_span.attributes
+    assert SpanAttributes.TRACELOOP_ENTITY_OUTPUT not in tool_span.attributes
+    assert "secret" not in json.dumps(dict(tool_span.attributes))
 
 
 def test_exception_event_marks_open_event_span_error(span_exporter):
