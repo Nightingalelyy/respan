@@ -1,0 +1,8 @@
+{
+  "summary": "Repair Watsonx, Weaviate, and Writer OTel 2.x stream, lifecycle, privacy, and semantic span behavior",
+  "packages": {
+    "respan-instrumentation-watsonx": "patch",
+    "respan-instrumentation-weaviate": "patch",
+    "respan-instrumentation-writer": "patch"
+  }
+}

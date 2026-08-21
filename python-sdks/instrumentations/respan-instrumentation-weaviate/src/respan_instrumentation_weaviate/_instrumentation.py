@@ -6,45 +6,142 @@ import importlib
 import inspect
 import json
 import logging
+import math
+import re
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import asdict, is_dataclass
 from enum import Enum
+from importlib import metadata
+from itertools import islice
 from numbers import Real
-from typing import Any
+from threading import RLock
+from typing import Any, ClassVar
 
 from opentelemetry import trace
 from opentelemetry.instrumentation.utils import unwrap
 from opentelemetry.semconv.trace import SpanAttributes as OTelSpanAttributes
 from opentelemetry.semconv_ai import SpanAttributes
 from opentelemetry.trace import SpanKind, Status, StatusCode
-from respan_instrumentation_weaviate._constants import (
-    MAX_ATTRIBUTE_CHARS,
-    MAX_PREVIEW_ITEMS,
-    SENSITIVE_KEY_PARTS,
-    WEAVIATE_INSTRUMENTATION_NAME,
-    WEAVIATE_PATCH_SPECS,
-    PatchSpec,
-)
 from respan_sdk.constants import ERROR_MESSAGE_ATTR
 from respan_sdk.constants.llm_logging import LOG_TYPE_TASK
 from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
 from respan_tracing.core.tracer import RespanTracer
 from wrapt import wrap_function_wrapper
 
+from respan_instrumentation_weaviate._constants import (
+    MAX_ATTRIBUTE_CHARS,
+    MAX_PREVIEW_ITEMS,
+    WEAVIATE_INSTRUMENTATION_NAME,
+    WEAVIATE_PATCH_SPECS,
+    PatchSpec,
+)
+
 logger = logging.getLogger(__name__)
+_SCOPE_NAME = "respan-instrumentation-weaviate"
+try:
+    _SCOPE_VERSION = metadata.version(_SCOPE_NAME)
+except metadata.PackageNotFoundError:
+    _SCOPE_VERSION = "0.1.0"
 
 
 _VECTOR_KEY_PARTS = ("embedding", "vector")
+_SENSITIVE_KEY = re.compile(
+    r"(^|[._-])(api[_-]?key|authorization|cookie|password|secret|token)([._-]|$)",
+    re.IGNORECASE,
+)
+_ASSIGNMENT_SECRET = re.compile(
+    r"(?i)([a-z0-9_.-]*(?:api[_-]?key|authorization|cookie|password|secret|token))"
+    r"\s*[:=]\s*([^\s,;]+)"
+)
+
+
+def _safe_text(value: Any, *, max_bytes: int = 4_000) -> str:
+    if isinstance(value, str):
+        text = _ASSIGNMENT_SECRET.sub(
+            lambda match: f"{match.group(1)}=[REDACTED]",
+            value,
+        )
+    elif value is None or isinstance(value, (bool, int)):
+        text = json.dumps(value)
+    elif isinstance(value, float) and math.isfinite(value):
+        text = str(value)
+    else:
+        text = f"<{type(value).__name__[:120]}>"
+    if len(text.encode()) <= max_bytes:
+        return text
+    low, high, best = 0, len(text), ""
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = f"{text[:middle]}…[truncated]"
+        if len(candidate.encode()) <= max_bytes:
+            best = candidate
+            low = middle + 1
+        else:
+            high = middle - 1
+    return best or "[truncated]"
+
+
+def _safe_exception_message(exc: BaseException) -> str:
+    try:
+        args = exc.args
+    except BaseException:  # noqa: BLE001
+        args = ()
+    details = [
+        _safe_text(item, max_bytes=1_000)
+        for item in args[:4]
+        if item is None or isinstance(item, (str, bool, int, float))
+    ]
+    name = type(exc).__name__[:120]
+    return _safe_text(
+        f"{name}: {'; '.join(filter(None, details))}" if details else name
+    )
+
+
+def _provider_status_code(exc: BaseException) -> int:
+    candidates: list[Any] = []
+    for owner in (exc,):
+        for name in ("status_code", "status"):
+            try:
+                candidates.append(getattr(owner, name, None))
+            except BaseException:
+                logger.debug("Ignored unsafe Weaviate exception status", exc_info=True)
+                continue
+    try:
+        response = getattr(exc, "response", None)
+    except BaseException:
+        logger.debug("Ignored unsafe Weaviate exception response", exc_info=True)
+        response = None
+    if response is not None:
+        for name in ("status_code", "status"):
+            try:
+                candidates.append(getattr(response, name, None))
+            except BaseException:
+                logger.debug("Ignored unsafe Weaviate response status", exc_info=True)
+                continue
+    for value in candidates:
+        if (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and 400 <= value <= 599
+        ):
+            return value
+    return 500
 
 
 def _is_numeric_vector(value: Any) -> bool:
-    return (
-        isinstance(value, Sequence)
-        and not isinstance(value, (str, bytes, bytearray))
-        and bool(value)
-        and all(isinstance(item, Real) and not isinstance(item, bool) for item in value)
-    )
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return False
+    try:
+        return all(
+            isinstance(item, Real)
+            and not isinstance(item, bool)
+            and (not isinstance(item, float) or math.isfinite(item))
+            for item in value
+        )
+    except BaseException:
+        logger.debug("Ignored unsafe Weaviate vector iterator", exc_info=True)
+        return False
 
 
 def _is_vector_key(value: str) -> bool:
@@ -60,10 +157,14 @@ def _jsonable(
     preserved_vector: list[bool] | None = None,
 ) -> Any:
     preserved_vector = preserved_vector if preserved_vector is not None else [False]
-    if depth > 7 and not (vector_context or _is_numeric_vector(value)):
-        return repr(value)
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if value is None or isinstance(value, (int, bool)):
         return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else _safe_text(value)
+    if isinstance(value, str):
+        return _safe_text(value, max_bytes=16_000)
+    if depth > 7 and not (vector_context or _is_numeric_vector(value)):
+        return {"type": type(value).__name__[:120], "truncated": True}
     if isinstance(value, bytes):
         return {"type": "bytes", "length": len(value)}
     if isinstance(value, Enum):
@@ -85,15 +186,15 @@ def _jsonable(
         omitted = 0
         regular_items = 0
         for key, item in value.items():
-            key_text = str(key)
+            key_text = _safe_text(key, max_bytes=256)
             item_is_vector = vector_context or _is_vector_key(key_text)
             if not item_is_vector and regular_items >= MAX_PREVIEW_ITEMS:
                 omitted += 1
                 continue
             regular_items += int(not item_is_vector)
             result[key_text] = (
-                "<redacted>"
-                if any(part in key_text.lower() for part in SENSITIVE_KEY_PARTS)
+                "[REDACTED]"
+                if _SENSITIVE_KEY.search(key_text)
                 else _jsonable(
                     item,
                     depth=depth + 1,
@@ -108,7 +209,7 @@ def _jsonable(
         preserve_all = vector_context or _is_numeric_vector(value)
         if preserve_all:
             preserved_vector[0] = True
-        source = value if preserve_all else value[:MAX_PREVIEW_ITEMS]
+        source = value if preserve_all else islice(iter(value), MAX_PREVIEW_ITEMS + 1)
         items = [
             _jsonable(
                 item,
@@ -120,8 +221,11 @@ def _jsonable(
         ]
         if preserve_all:
             return items
-        if len(value) > MAX_PREVIEW_ITEMS:
-            return {"count": len(value), "items": items, "truncated": True}
+        if len(items) > MAX_PREVIEW_ITEMS:
+            return {
+                "items": items[:MAX_PREVIEW_ITEMS],
+                "truncated": True,
+            }
         return items
     for method_name in ("model_dump", "to_dict", "dict", "to_json", "tolist"):
         method = getattr(value, method_name, None)
@@ -135,6 +239,7 @@ def _jsonable(
                 preserved_vector=preserved_vector,
             )
         except Exception:
+            logger.debug("Ignored unsafe Weaviate model conversion", exc_info=True)
             continue
     public_values = getattr(value, "__dict__", None)
     if isinstance(public_values, dict):
@@ -148,22 +253,41 @@ def _jsonable(
             vector_context=vector_context,
             preserved_vector=preserved_vector,
         )
-    return repr(value)
+    return {"type": type(value).__name__[:120]}
 
 
-def _json_dumps(value: Any) -> str:
+def _json_dumps_impl(value: Any) -> str:
     preserved_vector = [False]
     text = json.dumps(
         _jsonable(value, preserved_vector=preserved_vector),
-        default=str,
+        ensure_ascii=False,
         sort_keys=True,
+        allow_nan=False,
     )
-    if preserved_vector[0] or len(text) <= MAX_ATTRIBUTE_CHARS:
+    if preserved_vector[0] or len(text.encode()) <= MAX_ATTRIBUTE_CHARS:
         return text
-    return json.dumps(
-        {"preview": text[:MAX_ATTRIBUTE_CHARS], "truncated": True},
-        sort_keys=True,
-    )
+    low, high, best = 0, len(text), ""
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = json.dumps(
+            {"preview": text[:middle], "truncated": True},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if len(candidate.encode()) <= MAX_ATTRIBUTE_CHARS:
+            best = candidate
+            low = middle + 1
+        else:
+            high = middle - 1
+    return best or '{"truncated":true}'
+
+
+def _json_dumps(value: Any) -> str:
+    try:
+        return _json_dumps_impl(value)
+    except BaseException:
+        logger.debug("Failed to serialize Weaviate telemetry", exc_info=True)
+        return json.dumps({"type": type(value).__name__[:120], "unavailable": True})
 
 
 def _instance_identity(instance: Any) -> dict[str, str]:
@@ -174,9 +298,13 @@ def _instance_identity(instance: Any) -> dict[str, str]:
         ("tenant", "tenant"),
         ("_tenant", "tenant"),
     ):
-        value = getattr(instance, source, None)
+        try:
+            value = getattr(instance, source, None)
+        except BaseException:
+            logger.debug("Ignored unsafe Weaviate identity field", exc_info=True)
+            continue
         if value is not None and target not in identity:
-            identity[target] = str(value)
+            identity[target] = _safe_text(value, max_bytes=1_000)
     return identity
 
 
@@ -193,7 +321,7 @@ def _call_input(
         arguments = {
             key: value for key, value in bound.arguments.items() if key != "self"
         }
-    except Exception:
+    except (TypeError, ValueError):
         arguments = {"args": list(args), "kwargs": kwargs}
     return {
         "operation": f"{label}.{operation}",
@@ -208,7 +336,10 @@ class WeaviateInstrumentor:
     name = WEAVIATE_INSTRUMENTATION_NAME
     _patches_applied = False
     _activation_count = 0
-    _patched_targets: list[tuple[type, str]] = []
+    _patched_targets: ClassVar[list[tuple[type, str]]] = []
+    _installed_targets: ClassVar[dict[tuple[type, str], Any]] = {}
+    _lock = RLock()
+    _capture_content_config: bool | None = None
     _active_call: ContextVar[bool] = ContextVar(
         "respan_weaviate_active_call",
         default=False,
@@ -232,12 +363,16 @@ class WeaviateInstrumentor:
         wrapped: Any,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
+        has_parent: bool,
     ) -> None:
         operation_name = f"{label}.{operation}"
         entity_name = f"weaviate.{operation_name}"
         span.set_attribute(RESPAN_LOG_TYPE, LOG_TYPE_TASK)
         span.set_attribute(SpanAttributes.TRACELOOP_ENTITY_NAME, entity_name)
-        span.set_attribute(SpanAttributes.TRACELOOP_ENTITY_PATH, entity_name)
+        span.set_attribute(
+            SpanAttributes.TRACELOOP_ENTITY_PATH,
+            entity_name if has_parent else "",
+        )
         span.set_attribute(OTelSpanAttributes.DB_SYSTEM, "weaviate")
         span.set_attribute(OTelSpanAttributes.DB_OPERATION, operation_name)
         if self._capture_content:
@@ -255,15 +390,18 @@ class WeaviateInstrumentor:
                 ),
             )
 
-    def _set_error(self, span: Any, exc: Exception) -> None:
-        span.record_exception(exc)
-        span.set_status(Status(StatusCode.ERROR, str(exc)))
-        span.set_attribute("status_code", 500)
-        span.set_attribute(ERROR_MESSAGE_ATTR, str(exc))
+    def _set_error(self, span: Any, exc: BaseException) -> None:
+        message = _safe_exception_message(exc)
+        status_code = _provider_status_code(exc)
+        span.record_exception(RuntimeError(message))
+        span.set_status(Status(StatusCode.ERROR, message))
+        span.set_attribute("status_code", status_code)
+        span.set_attribute(OTelSpanAttributes.HTTP_STATUS_CODE, status_code)
+        span.set_attribute(ERROR_MESSAGE_ATTR, message)
         if self._capture_content:
             span.set_attribute(
                 SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
-                _json_dumps({"error": type(exc).__name__, "message": str(exc)}),
+                _json_dumps({"error": type(exc).__name__, "message": message}),
             )
 
     def _trace_sync(
@@ -280,17 +418,26 @@ class WeaviateInstrumentor:
             return wrapped(*args, **kwargs)
         token = active_call.set(True)
         try:
-            tracer = trace.get_tracer(__name__)
+            parent_context = trace.get_current_span().get_span_context()
+            has_parent = bool(getattr(parent_context, "is_valid", False))
+            tracer = trace.get_tracer(_SCOPE_NAME, _SCOPE_VERSION)
             with tracer.start_as_current_span(
                 f"weaviate.{label}.{operation}",
                 kind=SpanKind.CLIENT,
             ) as span:
                 self._set_start_attributes(
-                    span, label, operation, instance, wrapped, args, kwargs
+                    span,
+                    label,
+                    operation,
+                    instance,
+                    wrapped,
+                    args,
+                    kwargs,
+                    has_parent,
                 )
                 try:
                     result = wrapped(*args, **kwargs)
-                except Exception as exc:
+                except BaseException as exc:
                     self._set_error(span, exc)
                     raise
                 span.set_status(Status(StatusCode.OK))
@@ -317,17 +464,26 @@ class WeaviateInstrumentor:
             return await wrapped(*args, **kwargs)
         token = active_call.set(True)
         try:
-            tracer = trace.get_tracer(__name__)
+            parent_context = trace.get_current_span().get_span_context()
+            has_parent = bool(getattr(parent_context, "is_valid", False))
+            tracer = trace.get_tracer(_SCOPE_NAME, _SCOPE_VERSION)
             with tracer.start_as_current_span(
                 f"weaviate.{label}.{operation}",
                 kind=SpanKind.CLIENT,
             ) as span:
                 self._set_start_attributes(
-                    span, label, operation, instance, wrapped, args, kwargs
+                    span,
+                    label,
+                    operation,
+                    instance,
+                    wrapped,
+                    args,
+                    kwargs,
+                    has_parent,
                 )
                 try:
                     result = await wrapped(*args, **kwargs)
-                except Exception as exc:
+                except BaseException as exc:
                     self._set_error(span, exc)
                     raise
                 span.set_status(Status(StatusCode.OK))
@@ -389,50 +545,81 @@ class WeaviateInstrumentor:
                 traced,
             )
             patched.append((target_class, operation))
+            type(self)._installed_targets[(target_class, operation)] = (
+                inspect.getattr_static(target_class, operation)
+            )
         return patched
 
     def activate(self) -> None:
         """Patch supported Weaviate v4 managers."""
         cls = type(self)
-        if self._is_instrumented or not self._tracing_enabled():
-            return
-        if cls._patches_applied:
-            cls._activation_count += 1
-            self._is_instrumented = True
-            return
+        with cls._lock:
+            if self._is_instrumented or not self._tracing_enabled():
+                return
+            if cls._patches_applied:
+                if cls._capture_content_config != self._capture_content:
+                    raise ValueError(
+                        "Weaviate instrumentation is already active with different capture_content"
+                    )
+                cls._activation_count += 1
+                self._is_instrumented = True
+                return
 
-        patched_targets: list[tuple[type, str]] = []
-        for spec in WEAVIATE_PATCH_SPECS:
-            patched_targets.extend(self._patch_spec(spec))
+            patched_targets: list[tuple[type, str]] = []
+            try:
+                for spec in WEAVIATE_PATCH_SPECS:
+                    patched_targets.extend(self._patch_spec(spec))
+            except BaseException:
+                for target_class, operation in reversed(patched_targets):
+                    if inspect.getattr_static(
+                        target_class,
+                        operation,
+                        None,
+                    ) is cls._installed_targets.get((target_class, operation)):
+                        unwrap(target_class, operation)
+                    cls._installed_targets.pop((target_class, operation), None)
+                raise
 
-        self._is_instrumented = bool(patched_targets)
-        cls._patches_applied = self._is_instrumented
-        cls._activation_count = int(self._is_instrumented)
-        cls._patched_targets = patched_targets
-        if not self._is_instrumented:
-            logger.warning("Weaviate instrumentation found no supported v4 methods")
+            self._is_instrumented = bool(patched_targets)
+            cls._patches_applied = self._is_instrumented
+            cls._activation_count = int(self._is_instrumented)
+            cls._patched_targets = patched_targets
+            cls._capture_content_config = (
+                self._capture_content if self._is_instrumented else None
+            )
+            if not self._is_instrumented:
+                logger.warning("Weaviate instrumentation found no supported v4 methods")
 
     def deactivate(self) -> None:
         """Remove Weaviate patches after the final active instance stops."""
-        if not self._is_instrumented:
-            return
-        self._is_instrumented = False
         cls = type(self)
-        cls._activation_count = max(cls._activation_count - 1, 0)
-        if cls._activation_count:
-            return
-        for target_class, operation in reversed(cls._patched_targets):
-            try:
-                unwrap(target_class, operation)
-            except Exception:
-                logger.debug(
-                    "Failed to unwrap Weaviate %s.%s",
-                    target_class.__name__,
-                    operation,
-                    exc_info=True,
-                )
-        cls._patched_targets = []
-        cls._patches_applied = False
+        with cls._lock:
+            if not self._is_instrumented:
+                return
+            self._is_instrumented = False
+            cls._activation_count = max(cls._activation_count - 1, 0)
+            if cls._activation_count:
+                return
+            for target_class, operation in reversed(cls._patched_targets):
+                try:
+                    if inspect.getattr_static(
+                        target_class,
+                        operation,
+                        None,
+                    ) is cls._installed_targets.get((target_class, operation)):
+                        unwrap(target_class, operation)
+                except Exception:
+                    logger.debug(
+                        "Failed to unwrap Weaviate %s.%s",
+                        target_class.__name__,
+                        operation,
+                        exc_info=True,
+                    )
+                finally:
+                    cls._installed_targets.pop((target_class, operation), None)
+            cls._patched_targets = []
+            cls._patches_applied = False
+            cls._capture_content_config = None
 
     def instrument(self) -> None:
         """OpenTelemetry-style alias for :meth:`activate`."""

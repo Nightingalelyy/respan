@@ -8,7 +8,7 @@ operations.
 ## Install
 
 ```bash
-pip install respan-ai respan-instrumentation-weaviate "weaviate-client>=4.22.0,<5"
+pip install respan-ai respan-instrumentation-weaviate "weaviate-client>=4.23.0,<5"
 ```
 
 ## Quickstart
@@ -49,7 +49,7 @@ Pass `capture_content=False` to omit operation arguments and results while
 retaining names, status, and database attributes. Activation/deactivation and
 the `instrument()` / `uninstrument()` aliases are idempotent.
 
-The adapter targets `weaviate-client>=4.22.0,<5` and its v4 collection API.
+The adapter targets `weaviate-client>=4.23.0,<5` and its v4 collection API.
 Generative search calls are left to an LLM-specific integration because they require chat
 semantics rather than vector-store task semantics.
 

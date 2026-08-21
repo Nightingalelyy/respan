@@ -40,5 +40,10 @@ The instrumentor traces:
 
 Chat and text-generation spans use canonical GenAI fields such as
 `gen_ai.prompt.*`, `gen_ai.completion.*`, `llm.request.functions`, and token
-usage attributes. Embedding spans record the input and usage metadata but do not
-export embedding vectors.
+usage attributes. Stream calls are finalized on normal completion, early close,
+or failure and carry the canonical streaming flag. Embedding spans retain the
+complete numeric vector payload, as required by the Respan span contract.
+
+Create the model/client inside application code and close it according to the
+IBM SDK lifecycle. Always call `respan.shutdown()` in an outer `finally` block
+so buffered spans are exported even when the provider call fails.

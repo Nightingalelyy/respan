@@ -2,6 +2,7 @@
 
 WATSONX_INSTRUMENTATION_NAME = "watsonx"
 WATSONX_SYSTEM_NAME = "watsonx"
+WATSONX_PROVIDER_NAME = "ibm"
 
 MODEL_INFERENCE_MODULE = "ibm_watsonx_ai.foundation_models.inference"
 EMBEDDINGS_MODULE = "ibm_watsonx_ai.foundation_models.embeddings"

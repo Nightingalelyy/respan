@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import inspect
-import json
 from collections.abc import Iterable, Mapping
 from typing import Any
 
 from respan_instrumentation_watsonx._constants import (
-    ASSISTANT_ROLE,
     CHOICES_KEY,
     COMPLETION_TOKENS_KEY,
     CONTENT_KEY,
@@ -32,7 +30,11 @@ from respan_instrumentation_watsonx._constants import (
     USAGE_KEY,
     USER_ROLE,
 )
-from respan_sdk.utils.serialization import serialize_value
+from respan_instrumentation_watsonx._serialization import (
+    json_dumps,
+    safe_text,
+    to_jsonable,
+)
 
 
 def _field(value: Any, name: str, default: Any = None) -> Any:
@@ -40,46 +42,21 @@ def _field(value: Any, name: str, default: Any = None) -> Any:
         return value.get(name, default)
     try:
         return getattr(value, name)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return default
 
 
 def _dump_value(value: Any) -> Any:
-    if value is None or isinstance(value, str | int | float | bool):
-        return value
-    if isinstance(value, Mapping):
-        return {
-            str(key): _dump_value(nested_value)
-            for key, nested_value in value.items()
-            if nested_value is not None
-        }
-    if isinstance(value, list | tuple | set):
-        return [_dump_value(item) for item in value if item is not None]
-    model_dump = getattr(value, "model_dump", None)
-    if callable(model_dump):
-        try:
-            return model_dump(exclude_none=True, by_alias=False)
-        except TypeError:
-            return model_dump()
-    to_dict = getattr(value, "to_dict", None)
-    if callable(to_dict):
-        try:
-            return to_dict()
-        except Exception:
-            pass
-    return serialize_value(value=value)
+    return to_jsonable(value)
 
 
 def safe_json(value: Any) -> str:
-    try:
-        return json.dumps(_dump_value(value), default=str)
-    except Exception:
-        return str(value)
+    return json_dumps(value)
 
 
 def to_attr_value(value: Any) -> str:
     if isinstance(value, str):
-        return value
+        return safe_text(value)
     return safe_json(value)
 
 
@@ -87,7 +64,7 @@ def _coerce_text(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
-        return value
+        return safe_text(value)
     return safe_json(value)
 
 
@@ -95,7 +72,9 @@ def normalize_text_prompts(prompt: Any) -> list[dict[str, Any]]:
     if prompt is None:
         return []
     if isinstance(prompt, list | tuple):
-        return [{ROLE_KEY: USER_ROLE, CONTENT_KEY: _coerce_text(item)} for item in prompt]
+        return [
+            {ROLE_KEY: USER_ROLE, CONTENT_KEY: _coerce_text(item)} for item in prompt
+        ]
     return [{ROLE_KEY: USER_ROLE, CONTENT_KEY: _coerce_text(prompt)}]
 
 
@@ -112,7 +91,9 @@ def normalize_chat_messages(messages: Any) -> list[dict[str, Any]]:
             if isinstance(message, Mapping):
                 normalized.append(_normalize_message(message))
             else:
-                normalized.append({ROLE_KEY: USER_ROLE, CONTENT_KEY: _coerce_text(message)})
+                normalized.append(
+                    {ROLE_KEY: USER_ROLE, CONTENT_KEY: _coerce_text(message)}
+                )
         return normalized
     return [{ROLE_KEY: USER_ROLE, CONTENT_KEY: _coerce_text(messages)}]
 
@@ -180,7 +161,9 @@ def _text_from_generation_response(response: Any) -> str:
 
 def format_text_output(response_or_chunks: Any) -> str:
     if isinstance(response_or_chunks, list):
-        return "".join(_text_from_generation_response(chunk) for chunk in response_or_chunks)
+        return "".join(
+            _text_from_generation_response(chunk) for chunk in response_or_chunks
+        )
     return _text_from_generation_response(response_or_chunks)
 
 
@@ -196,20 +179,25 @@ def _chat_content_from_response(response: Any) -> str:
 
 def format_chat_output(response_or_chunks: Any) -> str:
     if isinstance(response_or_chunks, list):
-        return "".join(_chat_content_from_response(chunk) for chunk in response_or_chunks)
+        return "".join(
+            _chat_content_from_response(chunk) for chunk in response_or_chunks
+        )
     return _chat_content_from_response(response_or_chunks)
 
 
 def _usage_sources(response_or_chunks: Any) -> Iterable[Any]:
-    responses = response_or_chunks if isinstance(response_or_chunks, list) else [response_or_chunks]
+    responses = (
+        response_or_chunks
+        if isinstance(response_or_chunks, list)
+        else [response_or_chunks]
+    )
     for response in reversed(responses):
         if response is None:
             continue
         usage = _field(response, USAGE_KEY)
         if usage is not None:
             yield usage
-        for result in _iter_results(response):
-            yield result
+        yield from _iter_results(response)
         yield response
 
 
@@ -239,7 +227,11 @@ def extract_usage(response_or_chunks: Any) -> dict[str, int]:
             completion_tokens = _coerce_int(_field(source, GENERATED_TOKEN_COUNT_KEY))
 
         total_tokens = _coerce_int(_field(source, TOTAL_TOKENS_KEY))
-        if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
+        if (
+            total_tokens is None
+            and prompt_tokens is not None
+            and completion_tokens is not None
+        ):
             total_tokens = prompt_tokens + completion_tokens
 
         result: dict[str, int] = {}
@@ -269,7 +261,9 @@ def _annotation_to_json_schema(annotation: Any) -> dict[str, Any]:
 
 
 def _callable_tool_definition(tool: Any) -> dict[str, Any]:
-    function: dict[str, Any] = {NAME_KEY: getattr(tool, "__name__", tool.__class__.__name__)}
+    function: dict[str, Any] = {
+        NAME_KEY: getattr(tool, "__name__", tool.__class__.__name__)
+    }
     doc = inspect.getdoc(tool)
     if doc:
         function["description"] = doc
@@ -313,16 +307,22 @@ def normalize_tools(tools: Any) -> list[dict[str, Any]]:
             continue
         function = dumped.get(FUNCTION_KEY)
         if isinstance(function, Mapping):
-            normalized.append({TYPE_KEY: FUNCTION_TOOL_TYPE, FUNCTION_KEY: dict(function)})
+            normalized.append(
+                {TYPE_KEY: FUNCTION_TOOL_TYPE, FUNCTION_KEY: dict(function)}
+            )
             continue
         name = dumped.get(NAME_KEY)
         if name:
             function_payload = {NAME_KEY: name}
             for key in ("description", "parameters", "schema", "input_schema"):
                 if dumped.get(key) is not None:
-                    target_key = "parameters" if key in {"schema", "input_schema"} else key
+                    target_key = (
+                        "parameters" if key in {"schema", "input_schema"} else key
+                    )
                     function_payload[target_key] = dumped[key]
-            normalized.append({TYPE_KEY: FUNCTION_TOOL_TYPE, FUNCTION_KEY: function_payload})
+            normalized.append(
+                {TYPE_KEY: FUNCTION_TOOL_TYPE, FUNCTION_KEY: function_payload}
+            )
     return normalized
 
 
@@ -342,7 +342,9 @@ def _normalize_single_tool_call(tool_call: Any) -> dict[str, Any] | None:
         return None
     normalized_function = dict(function)
     if "arguments" in normalized_function:
-        normalized_function["arguments"] = to_attr_value(normalized_function["arguments"])
+        normalized_function["arguments"] = to_attr_value(
+            normalized_function["arguments"]
+        )
     result = {
         TYPE_KEY: dumped.get(TYPE_KEY) or FUNCTION_TOOL_TYPE,
         FUNCTION_KEY: normalized_function,
@@ -366,11 +368,18 @@ def normalize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
 
 
 def extract_chat_tool_calls(response_or_chunks: Any) -> list[dict[str, Any]]:
-    responses = response_or_chunks if isinstance(response_or_chunks, list) else [response_or_chunks]
+    responses = (
+        response_or_chunks
+        if isinstance(response_or_chunks, list)
+        else [response_or_chunks]
+    )
     tool_calls: list[dict[str, Any]] = []
     seen: set[str] = set()
     for response in responses:
-        for source in (_extract_choice_message(response), _extract_choice_delta(response)):
+        for source in (
+            _extract_choice_message(response),
+            _extract_choice_delta(response),
+        ):
             for tool_call in normalize_tool_calls(_field(source, TOOL_CALLS_KEY)):
                 signature = safe_json(tool_call)
                 if signature in seen:
@@ -429,9 +438,14 @@ def embedding_dimension(response: Any) -> int | None:
     return None
 
 
+def embedding_output(response: Any) -> Any:
+    """Return the provider's full vector payload in JSON-safe form."""
+    return response
+
+
 def model_id_from_instance(instance: Any) -> str | None:
     for key in (MODEL_ID_KEY, "_model_id", "deployment_id", "_deployment_id"):
         value = _field(instance, key)
         if value:
-            return str(value)
+            return safe_text(value)
     return None

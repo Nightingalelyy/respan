@@ -13,8 +13,8 @@ packages = [
 python = ">=3.11,<3.14"
 respan-tracing = "^2.17.0"
 respan-sdk = ">=2.6.1"
-writerai = ">=4.0.1"
-opentelemetry-semantic-conventions-ai = ">=0.4.1"
+writerai = ">=4.0.1,<5"
+opentelemetry-semantic-conventions-ai = ">=0.5.1,<0.6.0"
 
 [tool.poetry.plugins."respan.instrumentations"]
 writer = "respan_instrumentation_writer:WriterInstrumentor"

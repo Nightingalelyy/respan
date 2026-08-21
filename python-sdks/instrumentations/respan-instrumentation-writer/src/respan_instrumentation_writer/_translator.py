@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
+from itertools import islice
 from typing import Any
 
 from opentelemetry import context as context_api
+from opentelemetry import trace
 from opentelemetry.semconv._incubating.attributes import (
     gen_ai_attributes as GenAIAttributes,
 )
 from opentelemetry.semconv_ai import LLMRequestTypeValues
 from opentelemetry.semconv_ai import SpanAttributes as TLSpanAttributes
+from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT, LOG_TYPE_TEXT, LOG_TYPE_TOOL
+from respan_sdk.constants.span_attributes import (
+    RESPAN_INTERNAL_SPAN_NAME_DETAIL,
+    RESPAN_INTERNAL_SPAN_NAME_KIND,
+    RESPAN_LOG_TYPE,
+)
 
 from respan_instrumentation_writer._constants import (
     ANSWER_KEY,
@@ -35,6 +42,7 @@ from respan_instrumentation_writer._constants import (
     PROMPT_KEY,
     QUESTION_KEY,
     ROLE_KEY,
+    STREAM_KEY,
     SUGGESTION_KEY,
     TEXT_KEY,
     TOOL_CALLS_KEY,
@@ -53,11 +61,9 @@ from respan_instrumentation_writer._constants import (
     WRITER_TRANSLATION_SPAN_NAME,
     WRITER_VISION_SPAN_NAME,
 )
-from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT, LOG_TYPE_TEXT, LOG_TYPE_TOOL
-from respan_sdk.constants.span_attributes import (
-    RESPAN_INTERNAL_SPAN_NAME_DETAIL,
-    RESPAN_INTERNAL_SPAN_NAME_KIND,
-    RESPAN_LOG_TYPE,
+from respan_instrumentation_writer._serialization import (
+    json_dumps,
+    safe_text,
 )
 
 _WRITER_SENTINEL_CLASS_NAMES = {"Omit", "NotGiven"}
@@ -117,7 +123,7 @@ def _drop_empty(value: Any) -> Any:
 
 
 def safe_json(value: Any) -> str:
-    return json.dumps(_to_plain(value), default=str)
+    return json_dumps(value)
 
 
 def _json_content_attr(value: Any) -> str:
@@ -125,7 +131,7 @@ def _json_content_attr(value: Any) -> str:
     if plain_value is None:
         return ""
     if isinstance(plain_value, str):
-        return plain_value
+        return safe_text(plain_value)
     return safe_json(plain_value)
 
 
@@ -141,22 +147,24 @@ def _as_list(value: Any) -> list[Any]:
     if value is None or _is_omitted(value):
         return []
     if isinstance(value, list):
-        return value
+        return value[:50]
     if isinstance(value, tuple):
-        return list(value)
+        return list(value[:50])
     if isinstance(value, (str, bytes, Mapping)):
         return [value]
     try:
-        return list(value)
-    except TypeError:
+        return list(islice(iter(value), 50))
+    except (TypeError, RuntimeError):
         return [value]
 
 
 def _get_value(value: Any, key: str, default: Any = None) -> Any:
     if isinstance(value, Mapping):
         return value.get(key, default)
-    return getattr(value, key, default)
-
+    try:
+        return getattr(value, key, default)
+    except BaseException:  # noqa: BLE001
+        return default
 
 
 def _normalize_messages(messages: Any) -> list[dict[str, Any]]:
@@ -223,11 +231,14 @@ def _base_llm_attrs(
     log_type: str,
     request_type: str,
 ) -> dict[str, Any]:
+    current = trace.get_current_span().get_span_context()
+    has_parent = bool(getattr(current, "span_id", 0))
     attrs = {
         TLSpanAttributes.LLM_SYSTEM: WRITER_SYSTEM_NAME,
+        GenAIAttributes.GEN_AI_PROVIDER_NAME: WRITER_SYSTEM_NAME,
         TLSpanAttributes.LLM_REQUEST_TYPE: request_type,
         TLSpanAttributes.TRACELOOP_ENTITY_NAME: span_name,
-        TLSpanAttributes.TRACELOOP_ENTITY_PATH: span_name,
+        TLSpanAttributes.TRACELOOP_ENTITY_PATH: span_name if has_parent else "",
         RESPAN_LOG_TYPE: log_type,
     }
     workflow_name = context_api.get_value(TLSpanAttributes.TRACELOOP_ENTITY_NAME)
@@ -262,7 +273,7 @@ def _set_single_prompt_attrs(
     role: str = USER_ROLE,
 ) -> None:
     prompt_content = _json_content_attr(content)
-    attrs[TLSpanAttributes.TRACELOOP_ENTITY_INPUT] = prompt_content
+    attrs[TLSpanAttributes.TRACELOOP_ENTITY_INPUT] = safe_json(content)
     attrs[f"{TLSpanAttributes.LLM_PROMPTS}.0.role"] = role
     attrs[f"{TLSpanAttributes.LLM_PROMPTS}.0.content"] = prompt_content
 
@@ -312,17 +323,15 @@ def _set_completion_attrs(
             _json_content_attr(content)
         )
         if tool_calls:
-            attrs[f"{TLSpanAttributes.LLM_COMPLETIONS}.{index}.tool_calls"] = (
-                safe_json(tool_calls)
+            attrs[f"{TLSpanAttributes.LLM_COMPLETIONS}.{index}.tool_calls"] = safe_json(
+                tool_calls
             )
         output_values.append(content)
 
     if not output_values:
         return
     if len(output_values) == 1:
-        attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _json_content_attr(
-            output_values[0]
-        )
+        attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safe_json(output_values[0])
     else:
         attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safe_json(output_values)
 
@@ -373,9 +382,9 @@ def _merge_streaming_tool_call(
             merged_function[NAME_KEY] = function[NAME_KEY]
         arguments = function.get(ARGUMENTS_KEY)
         if arguments:
-            merged_function[ARGUMENTS_KEY] = (
-                str(merged_function.get(ARGUMENTS_KEY, "")) + str(arguments)
-            )
+            merged_function[ARGUMENTS_KEY] = str(
+                merged_function.get(ARGUMENTS_KEY, "")
+            ) + str(arguments)
 
 
 def _chat_completions_from_chunks(chunks: list[Any]) -> list[dict[str, Any]]:
@@ -409,7 +418,9 @@ def _chat_completions_from_chunks(chunks: list[Any]) -> list[dict[str, Any]]:
                 )
 
     completions: list[dict[str, Any]] = []
-    for index in sorted(set(content_by_index) | set(role_by_index) | set(tool_calls_by_choice)):
+    for index in sorted(
+        set(content_by_index) | set(role_by_index) | set(tool_calls_by_choice)
+    ):
         tool_calls = [
             _drop_empty(tool_call)
             for _, tool_call in sorted(tool_calls_by_choice.get(index, {}).items())
@@ -419,7 +430,9 @@ def _chat_completions_from_chunks(chunks: list[Any]) -> list[dict[str, Any]]:
                 {
                     ROLE_KEY: role_by_index.get(index, ASSISTANT_ROLE),
                     CONTENT_KEY: "".join(content_by_index.get(index, [])),
-                    TOOL_CALLS_KEY: [tool_call for tool_call in tool_calls if tool_call],
+                    TOOL_CALLS_KEY: [
+                        tool_call for tool_call in tool_calls if tool_call
+                    ],
                 }
             )
         )
@@ -452,6 +465,8 @@ def build_chat_attrs(
         log_type=LOG_TYPE_CHAT,
         request_type=LLMRequestTypeValues.CHAT.value,
     )
+    if request_kwargs.get(STREAM_KEY) is True:
+        attrs[TLSpanAttributes.LLM_IS_STREAMING] = True
 
     model = _get_value(response_or_chunks, MODEL_KEY) or request_kwargs.get(MODEL_KEY)
     chunks = response_or_chunks if isinstance(response_or_chunks, list) else None
@@ -492,8 +507,10 @@ def build_completion_attrs(
     attrs = _base_llm_attrs(
         span_name=WRITER_COMPLETION_SPAN_NAME,
         log_type=LOG_TYPE_TEXT,
-        request_type=LLMRequestTypeValues.COMPLETION.value,
+        request_type=LLMRequestTypeValues.CHAT.value,
     )
+    if request_kwargs.get(STREAM_KEY) is True:
+        attrs[TLSpanAttributes.LLM_IS_STREAMING] = True
     model = _get_value(response_or_chunks, MODEL_KEY) or request_kwargs.get(MODEL_KEY)
     if model:
         attrs[TLSpanAttributes.LLM_REQUEST_MODEL] = str(model)
@@ -531,8 +548,10 @@ def _simple_text_operation_attrs(
     attrs = _base_llm_attrs(
         span_name=span_name,
         log_type=LOG_TYPE_TEXT,
-        request_type=LLMRequestTypeValues.COMPLETION.value,
+        request_type=LLMRequestTypeValues.CHAT.value,
     )
+    if request_kwargs.get(STREAM_KEY) is True:
+        attrs[TLSpanAttributes.LLM_IS_STREAMING] = True
     if model:
         attrs[TLSpanAttributes.LLM_REQUEST_MODEL] = model
 
@@ -661,7 +680,9 @@ def build_tool_attrs(
             attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _json_content_attr(
                 output[CONTENT_KEY]
             )
-        elif isinstance(output, Mapping) and ANSWER_KEY in output and output[ANSWER_KEY]:
+        elif (
+            isinstance(output, Mapping) and ANSWER_KEY in output and output[ANSWER_KEY]
+        ):
             attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _json_content_attr(
                 output[ANSWER_KEY]
             )

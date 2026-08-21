@@ -5,10 +5,18 @@ from __future__ import annotations
 import importlib
 import logging
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from itertools import islice
+from threading import Condition, RLock
+from types import TracebackType
+from typing import Any, Self
+
+from opentelemetry import context as context_api
+from respan_tracing.core.tracer import RespanTracer
 
 from respan_instrumentation_writer._constants import (
     ANALYZE_METHOD_NAME,
+    APPLICATION_ID_KEY,
     ASYNC_APPLICATIONS_CLASS_NAME,
     ASYNC_CHAT_CLASS_NAME,
     ASYNC_COMPLETIONS_CLASS_NAME,
@@ -20,7 +28,6 @@ from respan_instrumentation_writer._constants import (
     CREATE_METHOD_NAME,
     FILE_ID_KEY,
     GENERATE_CONTENT_METHOD_NAME,
-    APPLICATION_ID_KEY,
     PARSE_PDF_METHOD_NAME,
     QUESTION_METHOD_NAME,
     STREAM_KEY,
@@ -33,10 +40,10 @@ from respan_instrumentation_writer._constants import (
     SYNC_VISION_CLASS_NAME,
     TRANSLATE_METHOD_NAME,
     WEB_SEARCH_METHOD_NAME,
-    WRITER_APPLICATIONS_MODULE,
     WRITER_APPLICATION_GENERATE_SPAN_NAME,
-    WRITER_CHAT_SPAN_NAME,
+    WRITER_APPLICATIONS_MODULE,
     WRITER_CHAT_MODULE,
+    WRITER_CHAT_SPAN_NAME,
     WRITER_COMPLETION_SPAN_NAME,
     WRITER_COMPLETIONS_MODULE,
     WRITER_GRAPH_QUESTION_SPAN_NAME,
@@ -51,6 +58,10 @@ from respan_instrumentation_writer._constants import (
     WRITER_WEB_SEARCH_TOOL_NAME,
 )
 from respan_instrumentation_writer._otel_emitter import emit_writer_span
+from respan_instrumentation_writer._serialization import (
+    provider_status_code,
+    safe_exception_message,
+)
 from respan_instrumentation_writer._translator import (
     build_application_generate_attrs,
     build_chat_attrs,
@@ -61,7 +72,6 @@ from respan_instrumentation_writer._translator import (
     build_vision_attrs,
     request_kwargs_with_positionals,
 )
-from respan_tracing.core.tracer import RespanTracer
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +91,12 @@ _original_sync_tool_web_search = None
 _original_async_tool_web_search = None
 _original_sync_tool_parse_pdf = None
 _original_async_tool_parse_pdf = None
+_activation_lock = RLock()
+_activation_condition = Condition(_activation_lock)
+_activation_count = 0
+_activation_installing = False
+_installed_methods: dict[tuple[type[Any], str], Any] = {}
+_MAX_STREAM_CHUNKS = 256
 
 _ITERABLE_REQUEST_FIELDS = {
     "graph_ids",
@@ -89,6 +105,46 @@ _ITERABLE_REQUEST_FIELDS = {
     "tools",
     "variables",
 }
+
+_RESTORE_TARGETS = (
+    ("sync_chat", CHAT_METHOD_NAME, "_original_sync_chat"),
+    ("async_chat", CHAT_METHOD_NAME, "_original_async_chat"),
+    ("sync_completions", CREATE_METHOD_NAME, "_original_sync_completion_create"),
+    ("async_completions", CREATE_METHOD_NAME, "_original_async_completion_create"),
+    ("sync_graphs", QUESTION_METHOD_NAME, "_original_sync_graph_question"),
+    ("async_graphs", QUESTION_METHOD_NAME, "_original_async_graph_question"),
+    (
+        "sync_applications",
+        GENERATE_CONTENT_METHOD_NAME,
+        "_original_sync_application_generate",
+    ),
+    (
+        "async_applications",
+        GENERATE_CONTENT_METHOD_NAME,
+        "_original_async_application_generate",
+    ),
+    ("sync_vision", ANALYZE_METHOD_NAME, "_original_sync_vision_analyze"),
+    ("async_vision", ANALYZE_METHOD_NAME, "_original_async_vision_analyze"),
+    ("sync_translation", TRANSLATE_METHOD_NAME, "_original_sync_translation_translate"),
+    (
+        "async_translation",
+        TRANSLATE_METHOD_NAME,
+        "_original_async_translation_translate",
+    ),
+    ("sync_tools", WEB_SEARCH_METHOD_NAME, "_original_sync_tool_web_search"),
+    ("async_tools", WEB_SEARCH_METHOD_NAME, "_original_async_tool_web_search"),
+    ("sync_tools", PARSE_PDF_METHOD_NAME, "_original_sync_tool_parse_pdf"),
+    ("async_tools", PARSE_PDF_METHOD_NAME, "_original_async_tool_parse_pdf"),
+)
+
+
+def _complete_installation(*, success: bool) -> None:
+    global _activation_count, _activation_installing
+    with _activation_condition:
+        if success:
+            _activation_count = 1
+        _activation_installing = False
+        _activation_condition.notify_all()
 
 
 def _get_module_attr(module_path: str, attr_name: str) -> Any:
@@ -146,8 +202,8 @@ def _materialize_iterable(value: Any) -> Any:
     if isinstance(value, (str, bytes, dict, list, tuple)):
         return value
     try:
-        return list(value)
-    except TypeError:
+        return list(islice(iter(value), 50))
+    except (TypeError, RuntimeError):
         return value
 
 
@@ -157,6 +213,13 @@ def _snapshot_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         if field_name in snapshot:
             snapshot[field_name] = _materialize_iterable(snapshot[field_name])
     return snapshot
+
+
+def _append_stream_chunk(chunks: list[Any], chunk: Any) -> None:
+    if len(chunks) < _MAX_STREAM_CHUNKS:
+        chunks.append(chunk)
+    else:
+        chunks[-1] = chunk
 
 
 def _is_stream_request(request_kwargs: dict[str, Any]) -> bool:
@@ -172,8 +235,12 @@ def _emit_safely(
     response_or_chunks: Any = None,
     error_message: str | None = None,
     status_code: int = 200,
+    otel_context: Any = None,
 ) -> None:
+    token = None
     try:
+        if otel_context is not None:
+            token = context_api.attach(otel_context)
         attrs = attrs_builder(
             request_kwargs=request_kwargs,
             response_or_chunks=response_or_chunks,
@@ -185,8 +252,11 @@ def _emit_safely(
             error_message=error_message,
             status_code=status_code,
         )
-    except Exception:
+    except BaseException:
         logger.debug("Failed to build Writer span attrs", exc_info=True)
+    finally:
+        if token is not None:
+            context_api.detach(token)
 
 
 def _emit_unary_safely(
@@ -198,8 +268,12 @@ def _emit_unary_safely(
     response: Any = None,
     error_message: str | None = None,
     status_code: int = 200,
+    otel_context: Any = None,
 ) -> None:
+    token = None
     try:
+        if otel_context is not None:
+            token = context_api.attach(otel_context)
         attrs = attrs_builder(request_kwargs=request_kwargs, response=response)
         emit_writer_span(
             name=span_name,
@@ -208,8 +282,11 @@ def _emit_unary_safely(
             error_message=error_message,
             status_code=status_code,
         )
-    except Exception:
+    except BaseException:
         logger.debug("Failed to build Writer span attrs", exc_info=True)
+    finally:
+        if token is not None:
+            context_api.detach(token)
 
 
 class _SyncStreamCapture:
@@ -221,6 +298,7 @@ class _SyncStreamCapture:
         attrs_builder: Callable[..., dict[str, Any]],
         request_kwargs: dict[str, Any],
         start_ns: int,
+        otel_context: Any,
     ) -> None:
         self._stream = stream
         self._iterator = iter(stream)
@@ -228,11 +306,12 @@ class _SyncStreamCapture:
         self._attrs_builder = attrs_builder
         self._request_kwargs = request_kwargs
         self._start_ns = start_ns
+        self._otel_context = otel_context
         self._chunks: list[Any] = []
         self._emitted = False
         self.response = getattr(stream, "response", None)
 
-    def __iter__(self) -> "_SyncStreamCapture":
+    def __iter__(self) -> _SyncStreamCapture:
         return self
 
     def __next__(self) -> Any:
@@ -241,13 +320,13 @@ class _SyncStreamCapture:
         except StopIteration:
             self._emit_success()
             raise
-        except Exception as exc:
+        except BaseException as exc:
             self._emit_error(exc)
             raise
-        self._chunks.append(chunk)
+        _append_stream_chunk(self._chunks, chunk)
         return chunk
 
-    def __enter__(self) -> "_SyncStreamCapture":
+    def __enter__(self) -> Self:
         enter = getattr(self._stream, "__enter__", None)
         if callable(enter):
             entered = enter()
@@ -257,7 +336,12 @@ class _SyncStreamCapture:
                 self.response = getattr(entered, "response", self.response)
         return self
 
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> Any:
         exit_method = getattr(self._stream, "__exit__", None)
         result = None
         if callable(exit_method):
@@ -285,6 +369,7 @@ class _SyncStreamCapture:
             request_kwargs=self._request_kwargs,
             start_ns=self._start_ns,
             response_or_chunks=self._chunks,
+            otel_context=self._otel_context,
         )
 
     def _emit_error(self, exc: BaseException) -> None:
@@ -297,8 +382,9 @@ class _SyncStreamCapture:
             request_kwargs=self._request_kwargs,
             start_ns=self._start_ns,
             response_or_chunks=self._chunks,
-            error_message=str(exc),
-            status_code=500,
+            error_message=safe_exception_message(exc),
+            status_code=provider_status_code(exc),
+            otel_context=self._otel_context,
         )
 
     def __getattr__(self, name: str) -> Any:
@@ -314,6 +400,7 @@ class _AsyncStreamCapture:
         attrs_builder: Callable[..., dict[str, Any]],
         request_kwargs: dict[str, Any],
         start_ns: int,
+        otel_context: Any,
     ) -> None:
         self._stream = stream
         self._iterator = None
@@ -321,11 +408,12 @@ class _AsyncStreamCapture:
         self._attrs_builder = attrs_builder
         self._request_kwargs = request_kwargs
         self._start_ns = start_ns
+        self._otel_context = otel_context
         self._chunks: list[Any] = []
         self._emitted = False
         self.response = getattr(stream, "response", None)
 
-    def __aiter__(self) -> "_AsyncStreamCapture":
+    def __aiter__(self) -> _AsyncStreamCapture:
         self._iterator = self._stream.__aiter__()
         return self
 
@@ -337,13 +425,13 @@ class _AsyncStreamCapture:
         except StopAsyncIteration:
             self._emit_success()
             raise
-        except Exception as exc:
+        except BaseException as exc:
             self._emit_error(exc)
             raise
-        self._chunks.append(chunk)
+        _append_stream_chunk(self._chunks, chunk)
         return chunk
 
-    async def __aenter__(self) -> "_AsyncStreamCapture":
+    async def __aenter__(self) -> Self:
         enter = getattr(self._stream, "__aenter__", None)
         if callable(enter):
             entered = await enter()
@@ -353,7 +441,12 @@ class _AsyncStreamCapture:
                 self.response = getattr(entered, "response", self.response)
         return self
 
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> Any:
         exit_method = getattr(self._stream, "__aexit__", None)
         result = None
         if callable(exit_method):
@@ -365,13 +458,18 @@ class _AsyncStreamCapture:
         return result
 
     async def close(self) -> None:
-        close = getattr(self._stream, "close", None)
+        close = getattr(self._stream, "aclose", None) or getattr(
+            self._stream, "close", None
+        )
         if callable(close):
             result = close()
             if hasattr(result, "__await__"):
                 await result
         if not self._emitted:
             self._emit_success()
+
+    async def aclose(self) -> None:
+        await self.close()
 
     def _emit_success(self) -> None:
         if self._emitted:
@@ -383,6 +481,7 @@ class _AsyncStreamCapture:
             request_kwargs=self._request_kwargs,
             start_ns=self._start_ns,
             response_or_chunks=self._chunks,
+            otel_context=self._otel_context,
         )
 
     def _emit_error(self, exc: BaseException) -> None:
@@ -395,8 +494,9 @@ class _AsyncStreamCapture:
             request_kwargs=self._request_kwargs,
             start_ns=self._start_ns,
             response_or_chunks=self._chunks,
-            error_message=str(exc),
-            status_code=500,
+            error_message=safe_exception_message(exc),
+            status_code=provider_status_code(exc),
+            otel_context=self._otel_context,
         )
 
     def __getattr__(self, name: str) -> Any:
@@ -418,16 +518,18 @@ def _wrap_sync_streamable(
             positional_names=positional_names,
         )
         start_ns = time.time_ns()
+        otel_context = context_api.get_current()
         try:
             response = original(self, *args, **kwargs)
-        except Exception as exc:
+        except BaseException as exc:
             _emit_safely(
                 span_name=span_name,
                 attrs_builder=attrs_builder,
                 request_kwargs=request_kwargs,
                 start_ns=start_ns,
-                error_message=str(exc),
-                status_code=500,
+                error_message=safe_exception_message(exc),
+                status_code=provider_status_code(exc),
+                otel_context=otel_context,
             )
             raise
 
@@ -438,6 +540,7 @@ def _wrap_sync_streamable(
                 attrs_builder=attrs_builder,
                 request_kwargs=request_kwargs,
                 start_ns=start_ns,
+                otel_context=otel_context,
             )
 
         _emit_safely(
@@ -446,6 +549,7 @@ def _wrap_sync_streamable(
             request_kwargs=request_kwargs,
             start_ns=start_ns,
             response_or_chunks=response,
+            otel_context=otel_context,
         )
         return response
 
@@ -467,16 +571,18 @@ def _wrap_async_streamable(
             positional_names=positional_names,
         )
         start_ns = time.time_ns()
+        otel_context = context_api.get_current()
         try:
             response = await original(self, *args, **kwargs)
-        except Exception as exc:
+        except BaseException as exc:
             _emit_safely(
                 span_name=span_name,
                 attrs_builder=attrs_builder,
                 request_kwargs=request_kwargs,
                 start_ns=start_ns,
-                error_message=str(exc),
-                status_code=500,
+                error_message=safe_exception_message(exc),
+                status_code=provider_status_code(exc),
+                otel_context=otel_context,
             )
             raise
 
@@ -487,6 +593,7 @@ def _wrap_async_streamable(
                 attrs_builder=attrs_builder,
                 request_kwargs=request_kwargs,
                 start_ns=start_ns,
+                otel_context=otel_context,
             )
 
         _emit_safely(
@@ -495,6 +602,7 @@ def _wrap_async_streamable(
             request_kwargs=request_kwargs,
             start_ns=start_ns,
             response_or_chunks=response,
+            otel_context=otel_context,
         )
         return response
 
@@ -516,16 +624,18 @@ def _wrap_sync_unary(
             positional_names=positional_names,
         )
         start_ns = time.time_ns()
+        otel_context = context_api.get_current()
         try:
             response = original(self, *args, **kwargs)
-        except Exception as exc:
+        except BaseException as exc:
             _emit_unary_safely(
                 span_name=span_name,
                 attrs_builder=attrs_builder,
                 request_kwargs=request_kwargs,
                 start_ns=start_ns,
-                error_message=str(exc),
-                status_code=500,
+                error_message=safe_exception_message(exc),
+                status_code=provider_status_code(exc),
+                otel_context=otel_context,
             )
             raise
 
@@ -535,6 +645,7 @@ def _wrap_sync_unary(
             request_kwargs=request_kwargs,
             start_ns=start_ns,
             response=response,
+            otel_context=otel_context,
         )
         return response
 
@@ -556,16 +667,18 @@ def _wrap_async_unary(
             positional_names=positional_names,
         )
         start_ns = time.time_ns()
+        otel_context = context_api.get_current()
         try:
             response = await original(self, *args, **kwargs)
-        except Exception as exc:
+        except BaseException as exc:
             _emit_unary_safely(
                 span_name=span_name,
                 attrs_builder=attrs_builder,
                 request_kwargs=request_kwargs,
                 start_ns=start_ns,
-                error_message=str(exc),
-                status_code=500,
+                error_message=safe_exception_message(exc),
+                status_code=provider_status_code(exc),
+                otel_context=otel_context,
             )
             raise
 
@@ -575,6 +688,7 @@ def _wrap_async_unary(
             request_kwargs=request_kwargs,
             start_ns=start_ns,
             response=response,
+            otel_context=otel_context,
         )
         return response
 
@@ -582,7 +696,9 @@ def _wrap_async_unary(
 
 
 def _make_tool_attrs_builder(tool_name: str) -> Callable[..., dict[str, Any]]:
-    def builder(*, request_kwargs: dict[str, Any], response: Any = None) -> dict[str, Any]:
+    def builder(
+        *, request_kwargs: dict[str, Any], response: Any = None
+    ) -> dict[str, Any]:
         return build_tool_attrs(
             tool_name=tool_name,
             request_kwargs=request_kwargs,
@@ -614,17 +730,31 @@ class WriterInstrumentor:
         global _original_sync_graph_question, _original_async_graph_question
         global _original_sync_application_generate, _original_async_application_generate
         global _original_sync_vision_analyze, _original_async_vision_analyze
-        global _original_sync_translation_translate, _original_async_translation_translate
+        global \
+            _original_sync_translation_translate, \
+            _original_async_translation_translate
         global _original_sync_tool_web_search, _original_async_tool_web_search
         global _original_sync_tool_parse_pdf, _original_async_tool_parse_pdf
+        global _activation_count, _activation_installing
 
-        if self._is_instrumented:
-            return
+        with _activation_condition:
+            if self._is_instrumented:
+                return
+            while _activation_installing:
+                _activation_condition.wait()
+            if _activation_count:
+                _activation_count += 1
+                self._is_instrumented = True
+                return
+            _activation_installing = True
+            self._is_instrumented = True
 
         if not self._is_respan_tracing_enabled():
             logger.info(
                 "Writer instrumentation skipped because Respan tracing is disabled"
             )
+            self.deactivate()
+            _complete_installation(success=False)
             return
 
         try:
@@ -634,6 +764,13 @@ class WriterInstrumentor:
                 "Failed to activate Writer instrumentation - missing dependency: %s",
                 exc,
             )
+            self.deactivate()
+            _complete_installation(success=False)
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to activate Writer instrumentation: %s", exc)
+            self.deactivate()
+            _complete_installation(success=False)
             return
 
         try:
@@ -707,7 +844,9 @@ class WriterInstrumentor:
             )
 
             if _original_sync_graph_question is None:
-                _original_sync_graph_question = getattr(sync_graphs, QUESTION_METHOD_NAME)
+                _original_sync_graph_question = getattr(
+                    sync_graphs, QUESTION_METHOD_NAME
+                )
             setattr(
                 sync_graphs,
                 QUESTION_METHOD_NAME,
@@ -766,7 +905,9 @@ class WriterInstrumentor:
             )
 
             if _original_sync_vision_analyze is None:
-                _original_sync_vision_analyze = getattr(sync_vision, ANALYZE_METHOD_NAME)
+                _original_sync_vision_analyze = getattr(
+                    sync_vision, ANALYZE_METHOD_NAME
+                )
             setattr(
                 sync_vision,
                 ANALYZE_METHOD_NAME,
@@ -823,7 +964,9 @@ class WriterInstrumentor:
             )
 
             if _original_sync_tool_web_search is None:
-                _original_sync_tool_web_search = getattr(sync_tools, WEB_SEARCH_METHOD_NAME)
+                _original_sync_tool_web_search = getattr(
+                    sync_tools, WEB_SEARCH_METHOD_NAME
+                )
             setattr(
                 sync_tools,
                 WEB_SEARCH_METHOD_NAME,
@@ -850,7 +993,9 @@ class WriterInstrumentor:
             )
 
             if _original_sync_tool_parse_pdf is None:
-                _original_sync_tool_parse_pdf = getattr(sync_tools, PARSE_PDF_METHOD_NAME)
+                _original_sync_tool_parse_pdf = getattr(
+                    sync_tools, PARSE_PDF_METHOD_NAME
+                )
             setattr(
                 sync_tools,
                 PARSE_PDF_METHOD_NAME,
@@ -877,79 +1022,70 @@ class WriterInstrumentor:
                     positional_names=(FILE_ID_KEY,),
                 ),
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to activate Writer instrumentation: %s", exc)
+            for class_key, method_name, _ in _RESTORE_TARGETS:
+                resource_class = classes.get(class_key)
+                if resource_class is not None:
+                    _installed_methods[(resource_class, method_name)] = getattr(
+                        resource_class,
+                        method_name,
+                        None,
+                    )
             self.deactivate()
+            _complete_installation(success=False)
             return
 
-        self._is_instrumented = True
+        for class_key, method_name, _ in _RESTORE_TARGETS:
+            resource_class = classes.get(class_key)
+            if resource_class is not None:
+                _installed_methods[(resource_class, method_name)] = getattr(
+                    resource_class,
+                    method_name,
+                )
+        _complete_installation(success=True)
         logger.info("Writer instrumentation activated")
 
     def deactivate(self) -> None:
         """Deactivate the instrumentation."""
-        global _original_sync_chat, _original_async_chat
-        global _original_sync_completion_create, _original_async_completion_create
-        global _original_sync_graph_question, _original_async_graph_question
-        global _original_sync_application_generate, _original_async_application_generate
-        global _original_sync_vision_analyze, _original_async_vision_analyze
-        global _original_sync_translation_translate, _original_async_translation_translate
-        global _original_sync_tool_web_search, _original_async_tool_web_search
-        global _original_sync_tool_parse_pdf, _original_async_tool_parse_pdf
+        global _activation_count, _activation_installing
+
+        with _activation_condition:
+            if not self._is_instrumented:
+                return
+            self._is_instrumented = False
+            _activation_count = max(_activation_count - 1, 0)
+            if _activation_count:
+                return
+            _activation_installing = True
 
         try:
             classes = _load_resource_classes()
-        except Exception:
+        except BaseException:
+            logger.debug(
+                "Failed to load Writer resources during teardown", exc_info=True
+            )
             classes = {}
 
-        restore_targets = (
-            ("sync_chat", CHAT_METHOD_NAME, "_original_sync_chat"),
-            ("async_chat", CHAT_METHOD_NAME, "_original_async_chat"),
-            (
-                "sync_completions",
-                CREATE_METHOD_NAME,
-                "_original_sync_completion_create",
-            ),
-            (
-                "async_completions",
-                CREATE_METHOD_NAME,
-                "_original_async_completion_create",
-            ),
-            ("sync_graphs", QUESTION_METHOD_NAME, "_original_sync_graph_question"),
-            ("async_graphs", QUESTION_METHOD_NAME, "_original_async_graph_question"),
-            (
-                "sync_applications",
-                GENERATE_CONTENT_METHOD_NAME,
-                "_original_sync_application_generate",
-            ),
-            (
-                "async_applications",
-                GENERATE_CONTENT_METHOD_NAME,
-                "_original_async_application_generate",
-            ),
-            ("sync_vision", ANALYZE_METHOD_NAME, "_original_sync_vision_analyze"),
-            ("async_vision", ANALYZE_METHOD_NAME, "_original_async_vision_analyze"),
-            (
-                "sync_translation",
-                TRANSLATE_METHOD_NAME,
-                "_original_sync_translation_translate",
-            ),
-            (
-                "async_translation",
-                TRANSLATE_METHOD_NAME,
-                "_original_async_translation_translate",
-            ),
-            ("sync_tools", WEB_SEARCH_METHOD_NAME, "_original_sync_tool_web_search"),
-            ("async_tools", WEB_SEARCH_METHOD_NAME, "_original_async_tool_web_search"),
-            ("sync_tools", PARSE_PDF_METHOD_NAME, "_original_sync_tool_parse_pdf"),
-            ("async_tools", PARSE_PDF_METHOD_NAME, "_original_async_tool_parse_pdf"),
-        )
-
-        for class_key, method_name, original_name in restore_targets:
+        for class_key, method_name, original_name in _RESTORE_TARGETS:
             original = globals().get(original_name)
             resource_class = classes.get(class_key)
-            if original is not None and resource_class is not None:
-                setattr(resource_class, method_name, original)
-            globals()[original_name] = None
+            try:
+                if original is not None and resource_class is not None:
+                    current = getattr(resource_class, method_name, None)
+                    if current is _installed_methods.get((resource_class, method_name)):
+                        setattr(resource_class, method_name, original)
+            except BaseException:
+                logger.debug(
+                    "Failed to restore Writer resource %s.%s",
+                    class_key,
+                    method_name,
+                    exc_info=True,
+                )
+            finally:
+                if resource_class is not None:
+                    _installed_methods.pop((resource_class, method_name), None)
+                globals()[original_name] = None
 
-        self._is_instrumented = False
+        _complete_installation(success=False)
         logger.info("Writer instrumentation deactivated")
