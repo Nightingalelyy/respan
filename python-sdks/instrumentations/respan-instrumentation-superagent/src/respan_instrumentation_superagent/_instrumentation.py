@@ -6,8 +6,11 @@ import importlib
 import inspect
 import logging
 import time
-from threading import Lock
-from typing import Any, Callable
+from collections.abc import Callable
+from threading import RLock
+from typing import Any
+
+from respan_tracing.core.tracer import RespanTracer
 
 from respan_instrumentation_superagent._constants import (
     SAFETY_AGENT_CLIENT_MODULE,
@@ -16,14 +19,16 @@ from respan_instrumentation_superagent._constants import (
     SUPPORTED_METHODS,
 )
 from respan_instrumentation_superagent._span_emitter import emit_superagent_span
-from respan_tracing.core.tracer import RespanTracer
 
 logger = logging.getLogger(__name__)
 
-_PATCH_LOCK = Lock()
+_PATCH_LOCK = RLock()
 _PATCHED_CLASS: type[Any] | None = None
 _ORIGINAL_METHODS: dict[str, Callable[..., Any]] = {}
+_INSTALLED_METHODS: dict[str, Callable[..., Any]] = {}
 _ACTIVE_INSTANCES = 0
+_ACTIVE_METHODS: tuple[str, ...] | None = None
+_PATCH_GENERATION = 0
 
 
 def _load_safety_client_class() -> type[Any]:
@@ -34,10 +39,16 @@ def _load_safety_client_class() -> type[Any]:
     return safety_client_class
 
 
-def _wrap_method(method_name: str, original: Callable[..., Any]) -> Callable[..., Any]:
+def _wrap_method(
+    method_name: str,
+    original: Callable[..., Any],
+    generation: int,
+) -> Callable[..., Any]:
     if inspect.iscoroutinefunction(original):
 
         async def async_wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+            if _ACTIVE_INSTANCES == 0 or _PATCH_GENERATION != generation:
+                return await original(self, *args, **kwargs)
             start_time_ns = time.time_ns()
             try:
                 result = await original(self, *args, **kwargs)
@@ -66,6 +77,8 @@ def _wrap_method(method_name: str, original: Callable[..., Any]) -> Callable[...
         return async_wrapper
 
     def sync_wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if _ACTIVE_INSTANCES == 0 or _PATCH_GENERATION != generation:
+            return original(self, *args, **kwargs)
         start_time_ns = time.time_ns()
         try:
             result = original(self, *args, **kwargs)
@@ -98,8 +111,10 @@ def _patch_safety_client(
     safety_client_class: type[Any],
     method_names: tuple[str, ...],
 ) -> bool:
-    global _PATCHED_CLASS
+    global _PATCHED_CLASS, _PATCH_GENERATION
 
+    _PATCH_GENERATION += 1
+    generation = _PATCH_GENERATION
     patched_any = False
     for method_name in method_names:
         original = getattr(safety_client_class, method_name, None)
@@ -113,10 +128,16 @@ def _patch_safety_client(
 
         if method_name not in _ORIGINAL_METHODS:
             _ORIGINAL_METHODS[method_name] = original
+            wrapper = _wrap_method(
+                method_name=method_name,
+                original=original,
+                generation=generation,
+            )
+            _INSTALLED_METHODS[method_name] = wrapper
             setattr(
                 safety_client_class,
                 method_name,
-                _wrap_method(method_name=method_name, original=original),
+                wrapper,
             )
 
         patched_any = True
@@ -128,17 +149,24 @@ def _patch_safety_client(
 
 
 def _restore_safety_client() -> None:
-    global _PATCHED_CLASS
+    global _PATCHED_CLASS, _ACTIVE_METHODS
 
     if _PATCHED_CLASS is None:
         _ORIGINAL_METHODS.clear()
+        _INSTALLED_METHODS.clear()
+        _ACTIVE_METHODS = None
         return
 
     for method_name, original in _ORIGINAL_METHODS.items():
-        setattr(_PATCHED_CLASS, method_name, original)
+        if getattr(_PATCHED_CLASS, method_name, None) is _INSTALLED_METHODS.get(
+            method_name
+        ):
+            setattr(_PATCHED_CLASS, method_name, original)
 
     _ORIGINAL_METHODS.clear()
+    _INSTALLED_METHODS.clear()
     _PATCHED_CLASS = None
+    _ACTIVE_METHODS = None
 
 
 class SuperagentInstrumentor:
@@ -159,7 +187,7 @@ class SuperagentInstrumentor:
 
     def activate(self) -> None:
         """Monkey-patch ``safety_agent.client.SafetyClient`` methods."""
-        global _ACTIVE_INSTANCES
+        global _ACTIVE_INSTANCES, _ACTIVE_METHODS
 
         if self._is_instrumented:
             return
@@ -180,7 +208,18 @@ class SuperagentInstrumentor:
             return
 
         with _PATCH_LOCK:
-            if _patch_safety_client(safety_client_class, self._methods):
+            normalized_methods = tuple(dict.fromkeys(self._methods))
+            if _ACTIVE_INSTANCES:
+                if _ACTIVE_METHODS != normalized_methods:
+                    raise ValueError(
+                        "Superagent instrumentation is already active with "
+                        "different methods"
+                    )
+                _ACTIVE_INSTANCES += 1
+                self._is_instrumented = True
+                return
+            if _patch_safety_client(safety_client_class, normalized_methods):
+                _ACTIVE_METHODS = normalized_methods
                 _ACTIVE_INSTANCES += 1
                 self._is_instrumented = True
                 logger.info("Superagent instrumentation activated")

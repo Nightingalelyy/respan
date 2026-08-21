@@ -1,0 +1,8 @@
+{
+  "summary": "Repair Strands Agents, Superagent, and Temporal OTel 2.x span translation and lifecycle behavior",
+  "packages": {
+    "respan-instrumentation-strands-agents": "patch",
+    "respan-instrumentation-superagent": "patch",
+    "respan-instrumentation-temporal": "patch"
+  }
+}

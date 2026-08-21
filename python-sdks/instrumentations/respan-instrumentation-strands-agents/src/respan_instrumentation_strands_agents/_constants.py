@@ -1,7 +1,6 @@
 """Strands Agents native telemetry constants."""
 
 from opentelemetry.semconv_ai import SpanAttributes
-
 from respan_sdk.constants.span_attributes import (
     GEN_AI_AGENT_NAME,
     GEN_AI_OPERATION_NAME,
@@ -40,7 +39,9 @@ STRANDS_EVENT_SYSTEM_MESSAGE = "gen_ai.system.message"
 STRANDS_EVENT_TOOL_MESSAGE = "gen_ai.tool.message"
 STRANDS_EVENT_MESSAGE_PREFIX = "gen_ai."
 STRANDS_EVENT_MESSAGE_SUFFIX = ".message"
-STRANDS_EVENT_USER_MESSAGE = f"{STRANDS_EVENT_MESSAGE_PREFIX}user{STRANDS_EVENT_MESSAGE_SUFFIX}"
+STRANDS_EVENT_USER_MESSAGE = (
+    f"{STRANDS_EVENT_MESSAGE_PREFIX}user{STRANDS_EVENT_MESSAGE_SUFFIX}"
+)
 
 STRANDS_SEMCONV_TOOL_DEFINITIONS_OPT_IN = "gen_ai_tool_definitions"
 
@@ -78,6 +79,7 @@ STRANDS_RAW_ATTRS_TO_STRIP = frozenset(
         STRANDS_SYSTEM_INSTRUCTIONS_ATTR,
         STRANDS_EVENT_START_TIME_ATTR,
         STRANDS_EVENT_END_TIME_ATTR,
+        "system_prompt",
     }
 )
 

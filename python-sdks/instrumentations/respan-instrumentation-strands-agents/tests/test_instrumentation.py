@@ -4,11 +4,19 @@ import os
 import sys
 from types import ModuleType, SimpleNamespace
 
+import pytest
 from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+    InMemorySpanExporter,
+)
 from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
-
-from respan_instrumentation_strands_agents import StrandsAgentsInstrumentor
-from respan_instrumentation_strands_agents import _instrumentation
+from opentelemetry.trace import Status, StatusCode
+from respan_instrumentation_strands_agents import (
+    StrandsAgentsInstrumentor,
+    _instrumentation,
+)
 from respan_instrumentation_strands_agents._constants import (
     STRANDS_EVENT_CHOICE,
     STRANDS_EVENT_TOOL_MESSAGE,
@@ -18,11 +26,11 @@ from respan_instrumentation_strands_agents._constants import (
     STRANDS_OPERATION_INVOKE_AGENT,
     STRANDS_SEMCONV_TOOL_DEFINITIONS_OPT_IN,
     STRANDS_SYSTEM_NAME,
-    STRANDS_TOP_LEVEL_ALIAS_ATTRS_TO_STRIP,
     STRANDS_TOOL_CALL_ID_ATTR,
     STRANDS_TOOL_DEFINITIONS_ATTR,
     STRANDS_TOOL_DESCRIPTION_ATTR,
     STRANDS_TOOL_JSON_SCHEMA_ATTR,
+    STRANDS_TOP_LEVEL_ALIAS_ATTRS_TO_STRIP,
     STRANDS_USAGE_INPUT_TOKENS_ATTR,
     STRANDS_USAGE_OUTPUT_TOKENS_ATTR,
 )
@@ -30,6 +38,7 @@ from respan_instrumentation_strands_agents._processor import (
     StrandsAgentsSpanProcessor,
     enrich_strands_agents_span,
 )
+from respan_instrumentation_strands_agents._serialization import json_dumps, safe_text
 from respan_sdk.constants.llm_logging import (
     LOG_TYPE_AGENT,
     LOG_TYPE_CHAT,
@@ -148,7 +157,122 @@ def test_activate_registers_processor_first_and_refreshes_existing_tracer(
     assert tracer_provider._active_span_processor._span_processors == (
         existing_processor,
     )
+    assert tracer_instance.tracer_provider is None
+    assert tracer_instance.tracer is None
+    assert tracer_instance._include_tool_definitions is False
     assert "OTEL_SEMCONV_STABILITY_OPT_IN" not in os.environ
+
+
+def test_activation_rejects_config_mismatch_and_preserves_later_env_owner(
+    monkeypatch,
+):
+    tracer_provider = _make_fake_tracer_provider()
+    _install_fake_strands_modules(monkeypatch)
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: tracer_provider)
+    monkeypatch.delenv("OTEL_SEMCONV_STABILITY_OPT_IN", raising=False)
+
+    owner = StrandsAgentsInstrumentor(include_tool_definitions=True)
+    owner.activate()
+    with pytest.raises(ValueError, match="different include_tool_definitions"):
+        StrandsAgentsInstrumentor(include_tool_definitions=False).activate()
+
+    os.environ["OTEL_SEMCONV_STABILITY_OPT_IN"] = "foreign-owner"
+    owner.deactivate()
+    assert os.environ["OTEL_SEMCONV_STABILITY_OPT_IN"] == "foreign-owner"
+
+
+def test_real_strands_tracer_moves_agent_tools_to_child_chat(monkeypatch):
+    from strands.telemetry import tracer as tracer_module
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
+    monkeypatch.delenv("OTEL_SEMCONV_STABILITY_OPT_IN", raising=False)
+
+    monkeypatch.setattr(tracer_module, "_tracer_instance", None)
+    instrumentor = StrandsAgentsInstrumentor()
+    try:
+        instrumentor.activate()
+        tracer_instance = tracer_module.get_tracer()
+        agent_span = tracer_instance.start_agent_span(
+            messages=[{"role": "user", "content": [{"text": "weather?"}]}],
+            agent_name="WeatherAgent",
+            tools_config={
+                "get_weather": {
+                    "description": "Get the weather.",
+                    "inputSchema": {
+                        "json": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        }
+                    },
+                }
+            },
+        )
+        chat_span = tracer_instance.start_model_invoke_span(
+            messages=[{"role": "user", "content": [{"text": "weather?"}]}],
+            parent_span=agent_span,
+            model_id="gpt-4o-mini",
+        )
+        chat_span.end()
+        tracer_instance.end_agent_span(agent_span)
+
+        spans = exporter.get_finished_spans()
+        assert [span.name for span in spans] == ["chat", "invoke_agent WeatherAgent"]
+        chat_attrs = dict(spans[0].attributes)
+        agent_attrs = dict(spans[1].attributes)
+        tools = json.loads(chat_attrs[SpanAttributes.LLM_REQUEST_FUNCTIONS])
+        assert tools == [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                },
+            }
+        ]
+        assert SpanAttributes.LLM_REQUEST_FUNCTIONS not in agent_attrs
+        assert spans[0].parent.span_id == spans[1].context.span_id
+    finally:
+        instrumentor.deactivate()
+        assert tracer_instance._include_tool_definitions is False
+
+
+def test_real_export_drops_raw_events_and_preserves_private_bounded_error():
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(StrandsAgentsSpanProcessor())
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    span = provider.get_tracer("strands-error-test").start_span(
+        STRANDS_OPERATION_CHAT,
+        attributes={
+            GEN_AI_SYSTEM: STRANDS_SYSTEM_NAME,
+            GEN_AI_OPERATION_NAME: STRANDS_OPERATION_CHAT,
+            "http.response.status_code": 429,
+        },
+    )
+    span.record_exception(RuntimeError('{"api_key":"plain-secret"}'))
+    span.set_status(
+        Status(StatusCode.ERROR, '{"api_key":"plain-secret"}' + "😀" * 10_000)
+    )
+    span.end()
+
+    exported = exporter.get_finished_spans()
+    assert len(exported) == 1
+    result = exported[0]
+    attrs = dict(result.attributes)
+    assert result.events == ()
+    assert result.status.status_code is StatusCode.ERROR
+    assert len((result.status.description or "").encode("utf-8")) <= 4_000
+    assert "plain-secret" not in (result.status.description or "")
+    assert attrs["status_code"] == 429
+    assert "plain-secret" not in attrs["error.message"]
+    assert "plain-secret" not in attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]
 
 
 def test_activate_logs_warning_when_dependency_missing(monkeypatch, caplog):
@@ -213,16 +337,7 @@ def test_enrich_agent_span_maps_common_fields_and_tool_definitions():
     assert json.loads(attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == [
         {"role": "assistant", "content": "It is sunny."}
     ]
-    assert json.loads(attrs[SpanAttributes.LLM_REQUEST_FUNCTIONS]) == [
-        {
-            "type": "function",
-            "function": {
-                "name": "get_weather",
-                "description": "Get weather.",
-                "parameters": {"type": "object"},
-            },
-        }
-    ]
+    assert SpanAttributes.LLM_REQUEST_FUNCTIONS not in attrs
     assert SpanAttributes.LLM_REQUEST_MODEL not in attrs
     assert GEN_AI_SYSTEM not in attrs
     assert SpanAttributes.LLM_REQUEST_TYPE not in attrs
@@ -279,13 +394,14 @@ def test_enrich_chat_span_maps_messages_usage_and_tool_calls():
     assert attrs[f"{SpanAttributes.LLM_PROMPTS}.0.role"] == "user"
     assert attrs[f"{SpanAttributes.LLM_PROMPTS}.0.content"] == "use the tool"
     assert attrs[f"{SpanAttributes.LLM_COMPLETIONS}.0.role"] == "assistant"
-    assert json.loads(attrs[f"{SpanAttributes.LLM_COMPLETIONS}.0.tool_calls"]) == [
+    tool_calls = json.loads(attrs[f"{SpanAttributes.LLM_COMPLETIONS}.0.tool_calls"])
+    assert tool_calls == [
         {
             "id": "tool_1",
             "type": "function",
             "function": {
                 "name": "lookup",
-                "arguments": '{"query": "tracing"}',
+                "arguments": '{"query":"tracing"}',
             },
         }
     ]
@@ -325,7 +441,7 @@ def test_enrich_tool_span_maps_input_and_output():
         "id": "tool_1",
         "arguments": {"city": "Seattle"},
     }
-    assert attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] == "Sunny and 72F."
+    assert json.loads(attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == "Sunny and 72F."
     assert GEN_AI_TOOL_NAME not in attrs
     assert GEN_AI_SYSTEM not in attrs
     assert SpanAttributes.LLM_REQUEST_TYPE not in attrs
@@ -334,6 +450,83 @@ def test_enrich_tool_span_maps_input_and_output():
     assert STRANDS_TOOL_JSON_SCHEMA_ATTR not in attrs
     assert SpanAttributes.TRACELOOP_SPAN_KIND not in attrs
     _assert_no_off_contract_aliases(attrs)
+
+
+def test_chat_inherits_normalized_agent_tool_definitions():
+    span = _make_span(
+        name=STRANDS_OPERATION_CHAT,
+        attributes={
+            GEN_AI_SYSTEM: STRANDS_SYSTEM_NAME,
+            GEN_AI_OPERATION_NAME: STRANDS_OPERATION_CHAT,
+        },
+    )
+    inherited = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                },
+            },
+        }
+    ]
+    enrich_strands_agents_span(span, inherited_tool_definitions=inherited)
+    assert (
+        json.loads(span._attributes[SpanAttributes.LLM_REQUEST_FUNCTIONS]) == inherited
+    )
+
+
+def test_tool_schema_json_envelope_is_unwrapped():
+    span = _make_span(
+        name=STRANDS_OPERATION_CHAT,
+        attributes={
+            GEN_AI_SYSTEM: STRANDS_SYSTEM_NAME,
+            GEN_AI_OPERATION_NAME: STRANDS_OPERATION_CHAT,
+            STRANDS_TOOL_DEFINITIONS_ATTR: json.dumps(
+                [{"name": "lookup", "inputSchema": {"json": {"type": "object"}}}]
+            ),
+        },
+    )
+    enrich_strands_agents_span(span)
+    tools = json.loads(span._attributes[SpanAttributes.LLM_REQUEST_FUNCTIONS])
+    assert tools[0]["function"]["parameters"] == {"type": "object"}
+
+
+def test_scalar_and_json_serialization_are_bounded_private_and_hostile_safe():
+    class Hostile:
+        @property
+        def model_dump(self):
+            raise AssertionError("must not inspect hostile property")
+
+        def __str__(self):
+            raise AssertionError("must not stringify")
+
+    text = safe_text('{"api_key":"plain-secret"}' + "😀" * 10_000)
+    payload = json_dumps(
+        {
+            "client_secret": "nested-secret",
+            "hostile": Hostile(),
+            "text": "😀" * 10_000,
+        }
+    )
+    assert len(text.encode("utf-8")) <= 4_000
+    assert "plain-secret" not in text
+    assert len(payload.encode("utf-8")) <= 16_000
+    assert "nested-secret" not in payload
+    assert "Hostile" in payload
+
+    span = _make_span(
+        name=STRANDS_OPERATION_CHAT,
+        attributes={
+            GEN_AI_SYSTEM: STRANDS_SYSTEM_NAME,
+            GEN_AI_OPERATION_NAME: STRANDS_OPERATION_CHAT,
+            SpanAttributes.LLM_REQUEST_MODEL: "api_key=plain-secret",
+        },
+    )
+    enrich_strands_agents_span(span)
+    assert "plain-secret" not in span._attributes[SpanAttributes.LLM_REQUEST_MODEL]
 
 
 def test_non_strands_span_is_unchanged():

@@ -4,9 +4,7 @@ import sys
 from types import ModuleType
 
 import pytest
-
-from respan_instrumentation_superagent import _instrumentation
-from respan_instrumentation_superagent import SuperagentInstrumentor
+from respan_instrumentation_superagent import SuperagentInstrumentor, _instrumentation
 from respan_tracing.core.tracer import RespanTracer
 
 
@@ -35,9 +33,11 @@ def _install_fake_safety_agent(monkeypatch):
 def reset_instrumentation_state():
     RespanTracer.reset_instance()
     _instrumentation._ACTIVE_INSTANCES = 0
+    _instrumentation._ACTIVE_METHODS = None
     _instrumentation._restore_safety_client()
     yield
     _instrumentation._ACTIVE_INSTANCES = 0
+    _instrumentation._ACTIVE_METHODS = None
     _instrumentation._restore_safety_client()
     RespanTracer.reset_instance()
 
@@ -94,6 +94,48 @@ def test_multiple_instrumentors_restore_after_last_deactivate(monkeypatch):
     assert FakeSafetyClient.guard is original_guard
 
 
+def test_active_instrumentors_reject_different_method_sets(monkeypatch):
+    _install_fake_safety_agent(monkeypatch)
+    first = SuperagentInstrumentor(methods=("guard",))
+    second = SuperagentInstrumentor(methods=("redact",))
+    first.activate()
+    with pytest.raises(ValueError, match="different methods"):
+        second.activate()
+    first.deactivate()
+
+
+def test_foreign_wrapper_survives_and_stale_wrapper_stays_inactive(monkeypatch):
+    FakeSafetyClient = _install_fake_safety_agent(monkeypatch)
+    original_guard = FakeSafetyClient.guard
+    emitted = []
+    monkeypatch.setattr(
+        _instrumentation,
+        "emit_superagent_span",
+        lambda **kwargs: emitted.append(kwargs) or True,
+    )
+
+    first = SuperagentInstrumentor(methods=("guard",))
+    first.activate()
+    owned_wrapper = FakeSafetyClient.guard
+
+    async def foreign_wrapper(self, *args, **kwargs):
+        return await owned_wrapper(self, *args, **kwargs)
+
+    FakeSafetyClient.guard = foreign_wrapper
+    first.deactivate()
+    asyncio.run(FakeSafetyClient().guard(input="inactive"))
+    assert emitted == []
+    assert FakeSafetyClient.guard is foreign_wrapper
+
+    second = SuperagentInstrumentor(methods=("guard",))
+    second.activate()
+    asyncio.run(FakeSafetyClient().guard(input="active"))
+    assert len(emitted) == 1
+    second.deactivate()
+    assert FakeSafetyClient.guard is foreign_wrapper
+    assert original_guard is not foreign_wrapper
+
+
 def test_wrapped_method_emits_error_span(monkeypatch):
     class FakeSafetyClient:
         async def guard(self, input=None, **kwargs):
@@ -134,7 +176,10 @@ def test_activate_skips_when_respan_tracing_is_disabled(monkeypatch, caplog):
 
     assert FakeSafetyClient.guard is original_guard
     assert instrumentor._is_instrumented is False
-    assert "Superagent instrumentation skipped because Respan tracing is disabled" in caplog.text
+    assert (
+        "Superagent instrumentation skipped because Respan tracing is disabled"
+        in caplog.text
+    )
 
 
 def test_activate_logs_warning_when_dependency_is_missing(monkeypatch, caplog):
