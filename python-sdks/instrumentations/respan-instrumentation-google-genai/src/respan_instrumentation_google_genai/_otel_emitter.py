@@ -8,6 +8,10 @@ from typing import Any
 
 from opentelemetry import context as context_api
 from opentelemetry import trace
+from opentelemetry.semconv._incubating.attributes.gen_ai_attributes import (
+    GEN_AI_USAGE_INPUT_TOKENS,
+    GEN_AI_USAGE_OUTPUT_TOKENS,
+)
 from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
 
 from respan_instrumentation_google_genai._constants import (
@@ -26,8 +30,6 @@ from respan_instrumentation_google_genai._constants import (
     MODEL_KEY,
     PROMPT_TOKEN_COUNT_KEY,
     ROLE_KEY,
-    TOOL_CALLS_OVERRIDE_ATTR,
-    TOOLS_OVERRIDE_ATTR,
     TOTAL_TOKEN_COUNT_KEY,
 )
 from respan_instrumentation_google_genai._translator import (
@@ -48,10 +50,11 @@ from respan_sdk.constants.span_attributes import (
     LLM_USAGE_COMPLETION_TOKENS,
     LLM_USAGE_PROMPT_TOKENS,
     RESPAN_LOG_TYPE,
-    RESPAN_SPAN_TOOL_CALLS,
-    RESPAN_SPAN_TOOLS,
 )
-from respan_sdk.utils.data_processing.id_processing import format_span_id, format_trace_id
+from respan_sdk.utils.data_processing.id_processing import (
+    format_span_id,
+    format_trace_id,
+)
 from respan_tracing.utils.span_factory import build_readable_span, inject_span
 
 logger = logging.getLogger(__name__)
@@ -71,13 +74,13 @@ def _current_trace_parent_ids() -> tuple[str | None, str | None]:
     return format_trace_id(trace_id=trace_id), format_span_id(span_id=span_id)
 
 
-def _base_attrs() -> dict[str, Any]:
+def _base_attrs(*, is_streaming: bool) -> dict[str, Any]:
     attrs = {
         GEN_AI_SYSTEM: GOOGLE_GENAI_SYSTEM_NAME,
         LLM_REQUEST_TYPE: LLMRequestTypeValues.CHAT.value,
         SpanAttributes.TRACELOOP_ENTITY_NAME: GOOGLE_GENAI_CHAT_SPAN_NAME,
         SpanAttributes.TRACELOOP_ENTITY_PATH: GOOGLE_GENAI_CHAT_SPAN_NAME,
-        SpanAttributes.TRACELOOP_SPAN_KIND: LLMRequestTypeValues.CHAT.value,
+        SpanAttributes.LLM_IS_STREAMING: is_streaming,
         RESPAN_LOG_TYPE: LOG_TYPE_CHAT,
     }
     workflow_name = context_api.get_value(SpanAttributes.TRACELOOP_ENTITY_NAME)
@@ -114,17 +117,17 @@ def _set_output_attrs(
 
     tool_calls = extract_tool_calls(response_or_chunks=response_or_chunks)
     if tool_calls:
-        attrs[RESPAN_SPAN_TOOL_CALLS] = safe_json(value=tool_calls)
-        attrs[TOOL_CALLS_OVERRIDE_ATTR] = tool_calls
-        attrs[GEN_AI_COMPLETION_TOOL_CALLS_ATTR] = tool_calls
+        attrs[GEN_AI_COMPLETION_TOOL_CALLS_ATTR] = safe_json(value=tool_calls)
 
     usage = extract_usage(response_or_chunks=response_or_chunks)
     if PROMPT_TOKEN_COUNT_KEY in usage:
         attrs[LLM_USAGE_PROMPT_TOKENS] = usage[PROMPT_TOKEN_COUNT_KEY]
+        attrs[GEN_AI_USAGE_INPUT_TOKENS] = usage[PROMPT_TOKEN_COUNT_KEY]
     if CANDIDATES_TOKEN_COUNT_KEY in usage:
         attrs[LLM_USAGE_COMPLETION_TOKENS] = usage[CANDIDATES_TOKEN_COUNT_KEY]
+        attrs[GEN_AI_USAGE_OUTPUT_TOKENS] = usage[CANDIDATES_TOKEN_COUNT_KEY]
     if TOTAL_TOKEN_COUNT_KEY in usage:
-        attrs["gen_ai.usage.total_tokens"] = usage[TOTAL_TOKEN_COUNT_KEY]
+        attrs[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] = usage[TOTAL_TOKEN_COUNT_KEY]
 
 
 def _set_request_attrs(attrs: dict[str, Any], request_kwargs: dict[str, Any]) -> None:
@@ -136,8 +139,6 @@ def _set_request_attrs(attrs: dict[str, Any], request_kwargs: dict[str, Any]) ->
     tools = extract_tools(config=config)
     if tools:
         tools_json = safe_json(value=tools)
-        attrs[RESPAN_SPAN_TOOLS] = tools_json
-        attrs[TOOLS_OVERRIDE_ATTR] = tools
         attrs[LLM_REQUEST_FUNCTIONS_ATTR] = tools_json
 
     _set_input_attrs(
@@ -151,8 +152,9 @@ def build_generate_content_attrs(
     *,
     request_kwargs: dict[str, Any],
     response_or_chunks: Any = None,
+    is_streaming: bool = False,
 ) -> dict[str, Any]:
-    attrs = _base_attrs()
+    attrs = _base_attrs(is_streaming=is_streaming)
     _set_request_attrs(attrs=attrs, request_kwargs=request_kwargs)
     if response_or_chunks is not None:
         _set_output_attrs(attrs=attrs, response_or_chunks=response_or_chunks)
@@ -166,16 +168,27 @@ def emit_generate_content_span(
     response_or_chunks: Any = None,
     error_message: str | None = None,
     status_code: int = 200,
+    is_streaming: bool = False,
 ) -> None:
     """Build a ReadableSpan for a Google Gen AI generation and inject it."""
     try:
         attrs = build_generate_content_attrs(
             request_kwargs=request_kwargs,
             response_or_chunks=response_or_chunks,
+            is_streaming=is_streaming,
         )
         if error_message:
             attrs["error.message"] = error_message
             attrs.setdefault("status_code", status_code if status_code >= 400 else 500)
+            attrs.setdefault(
+                SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
+                safe_json(
+                    value={
+                        "error": error_message,
+                        "status_code": status_code if status_code >= 400 else 500,
+                    }
+                ),
+            )
 
         trace_id, parent_id = _current_trace_parent_ids()
         span = build_readable_span(

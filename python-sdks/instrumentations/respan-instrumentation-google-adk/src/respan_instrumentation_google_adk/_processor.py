@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from collections import defaultdict
 from typing import Any
 
@@ -25,9 +26,15 @@ from opentelemetry.semconv._incubating.attributes.gen_ai_attributes import (
 )
 from opentelemetry.semconv_ai import SpanAttributes as TLSpanAttributes
 from respan_instrumentation_openinference._translator import OpenInferenceTranslator
-from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT, LOG_TYPE_TOOL
+from respan_sdk.constants.llm_logging import (
+    LOG_TYPE_AGENT,
+    LOG_TYPE_CHAT,
+    LOG_TYPE_TOOL,
+    LOG_TYPE_WORKFLOW,
+)
 from respan_sdk.constants.span_attributes import (
     RESPAN_LOG_TYPE,
+    RESPAN_SESSION_ID,
     RESPAN_SPAN_HANDOFFS,
     RESPAN_SPAN_TOOL_CALLS,
     RESPAN_SPAN_TOOLS,
@@ -60,6 +67,10 @@ _GOOGLE_ADK_LLM_REQUEST = "gcp.vertex.agent.llm_request"
 _GOOGLE_ADK_LLM_RESPONSE = "gcp.vertex.agent.llm_response"
 _GOOGLE_ADK_TOOL_CALL_ARGS = "gcp.vertex.agent.tool_call_args"
 _GOOGLE_ADK_TOOL_RESPONSE = "gcp.vertex.agent.tool_response"
+_SESSION_ID_ATTRS = (
+    "session.id",
+    "gen_ai.conversation.id",
+)
 
 _OFF_CONTRACT_ALIASES = {
     "model",
@@ -83,6 +94,43 @@ def _safe_json_str(value: Any) -> str:
     if isinstance(value, str):
         return value
     return json.dumps(value, default=str)
+
+
+def _span_trace_id(span: ReadableSpan) -> int | None:
+    context = getattr(span, "context", None)
+    if context is None:
+        get_span_context = getattr(span, "get_span_context", None)
+        if callable(get_span_context):
+            context = get_span_context()
+    trace_id = getattr(context, "trace_id", None)
+    return trace_id if isinstance(trace_id, int) and trace_id else None
+
+
+def _first_user_prompt(attrs: dict[str, Any]) -> str | None:
+    prefix = f"{TLSpanAttributes.LLM_PROMPTS}."
+    indexes = sorted(
+        {
+            int(parts[0])
+            for key in attrs
+            if key.startswith(prefix)
+            and len((parts := key[len(prefix) :].split(".", 1))) == 2
+            and parts[0].isdigit()
+        }
+    )
+    for index in indexes:
+        role = attrs.get(f"{prefix}{index}.role")
+        content = attrs.get(f"{prefix}{index}.content")
+        if role == "user" and content not in (None, ""):
+            return str(content)
+    return None
+
+
+def _session_id(raw_attrs: dict[str, Any]) -> str | None:
+    for key in _SESSION_ID_ATTRS:
+        value = raw_attrs.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return None
 
 
 def _parse_json(value: Any) -> Any:
@@ -120,7 +168,7 @@ def _collect_message_buckets(
     for key, value in attrs.items():
         if not key.startswith(prefix):
             continue
-        rest = key[len(prefix):]
+        rest = key[len(prefix) :]
         parts = rest.split(".", 1)
         if not parts[0].isdigit() or len(parts) == 1:
             continue
@@ -170,18 +218,20 @@ def _tool_call_signature(tool_call: dict[str, Any]) -> str:
     return json.dumps(normalized, default=str, sort_keys=True, separators=(",", ":"))
 
 
-def _extract_tool_calls_from_message(raw: dict[str, Any]) -> list[dict[str, Any]] | None:
+def _extract_tool_calls_from_message(
+    raw: dict[str, Any],
+) -> list[dict[str, Any]] | None:
     tool_call_buckets: dict[int, dict[str, Any]] = defaultdict(dict)
     for field_key, field_val in raw.items():
         if not field_key.startswith(_OI_MESSAGE_TOOL_CALLS_PREFIX):
             continue
-        rest = field_key[len(_OI_MESSAGE_TOOL_CALLS_PREFIX):]
+        rest = field_key[len(_OI_MESSAGE_TOOL_CALLS_PREFIX) :]
         parts = rest.split(".", 1)
         if not parts[0].isdigit() or len(parts) == 1:
             continue
         tc_field = parts[1]
         if tc_field.startswith(_OI_TOOL_CALL_PREFIX):
-            tc_field = tc_field[len(_OI_TOOL_CALL_PREFIX):]
+            tc_field = tc_field[len(_OI_TOOL_CALL_PREFIX) :]
         tool_call_buckets[int(parts[0])][tc_field] = field_val
 
     result: list[dict[str, Any]] = []
@@ -226,19 +276,19 @@ def _extract_message_content(raw: dict[str, Any]) -> Any:
     content_blocks: dict[int, dict[str, Any]] = defaultdict(dict)
     for field_key, field_val in raw.items():
         if field_key.startswith(_OI_MESSAGE_CONTENT_PREFIX):
-            idx_str = field_key[len(_OI_MESSAGE_CONTENT_PREFIX):]
+            idx_str = field_key[len(_OI_MESSAGE_CONTENT_PREFIX) :]
             if idx_str.isdigit():
                 indexed_content.append((int(idx_str), field_val))
             continue
         if not field_key.startswith(_OI_MESSAGE_CONTENTS_PREFIX):
             continue
-        rest = field_key[len(_OI_MESSAGE_CONTENTS_PREFIX):]
+        rest = field_key[len(_OI_MESSAGE_CONTENTS_PREFIX) :]
         parts = rest.split(".", 1)
         if not parts[0].isdigit() or len(parts) == 1:
             continue
         block_field = parts[1]
         if block_field.startswith(_OI_MESSAGE_CONTENT_BLOCK_PREFIX):
-            block_field = block_field[len(_OI_MESSAGE_CONTENT_BLOCK_PREFIX):]
+            block_field = block_field[len(_OI_MESSAGE_CONTENT_BLOCK_PREFIX) :]
         _set_nested_value(content_blocks[int(parts[0])], block_field, field_val)
 
     if content_blocks:
@@ -335,9 +385,13 @@ def _adk_part_text_tool_calls(
 
         function_response = part.get("function_response")
         if isinstance(function_response, dict):
-            response = function_response.get("response")
-            if response is not None:
-                tool_response = _safe_json_str(response)
+            response_payload = {
+                key: function_response[key]
+                for key in ("id", "name", "response")
+                if function_response.get(key) is not None
+            }
+            if response_payload:
+                tool_response = _safe_json_str(response_payload)
 
     text_value = "\n".join(text_parts) if text_parts else None
     return text_value, tool_calls or None, tool_response
@@ -360,11 +414,17 @@ def _set_adk_content_message(
         text = tool_response
 
     target = f"{target_prefix}.{index}"
-    attrs.setdefault(f"{target}.role", role)
+    if tool_response is not None:
+        attrs[f"{target}.role"] = role
+    else:
+        attrs.setdefault(f"{target}.role", role)
     if attrs.get(f"{target}.role") == "model":
         attrs[f"{target}.role"] = "assistant"
     if text is not None:
-        attrs.setdefault(f"{target}.content", text)
+        if tool_response is not None:
+            attrs[f"{target}.content"] = text
+        else:
+            attrs.setdefault(f"{target}.content", text)
     if tool_calls is not None:
         attrs.setdefault(f"{target}.tool_calls", _safe_json_str(tool_calls))
 
@@ -404,13 +464,17 @@ def _apply_google_adk_payload_fallbacks(
             if model:
                 attrs.setdefault(TLSpanAttributes.LLM_REQUEST_MODEL, model)
 
+            inserted_system_prompt = False
             config = request.get("config")
             if isinstance(config, dict):
                 system_instruction = config.get("system_instruction")
                 if isinstance(system_instruction, str) and system_instruction:
                     system_prompt = f"{TLSpanAttributes.LLM_PROMPTS}.0"
-                    attrs.setdefault(f"{system_prompt}.role", "system")
-                    attrs.setdefault(f"{system_prompt}.content", system_instruction)
+                    system_content_key = f"{system_prompt}.content"
+                    if system_content_key not in attrs:
+                        attrs[f"{system_prompt}.role"] = "system"
+                        attrs[system_content_key] = system_instruction
+                        inserted_system_prompt = True
 
                 tools = _extract_adk_tools(config)
                 if tools is not None:
@@ -421,9 +485,10 @@ def _apply_google_adk_payload_fallbacks(
 
             contents = request.get("contents")
             if isinstance(contents, list):
-                start_index = 1 if isinstance(
-                    attrs.get(f"{TLSpanAttributes.LLM_PROMPTS}.0.content"), str
-                ) else 0
+                first_prompt_role = attrs.get(f"{TLSpanAttributes.LLM_PROMPTS}.0.role")
+                start_index = (
+                    1 if inserted_system_prompt or first_prompt_role == "system" else 0
+                )
                 for offset, content in enumerate(contents):
                     _set_adk_content_message(
                         attrs,
@@ -459,7 +524,9 @@ def _apply_google_adk_payload_fallbacks(
 
                 total_tokens = usage.get("total_token_count")
                 if isinstance(total_tokens, int):
-                    attrs.setdefault(TLSpanAttributes.LLM_USAGE_TOTAL_TOKENS, total_tokens)
+                    attrs.setdefault(
+                        TLSpanAttributes.LLM_USAGE_TOTAL_TOKENS, total_tokens
+                    )
 
             content = response.get("content")
             if isinstance(content, dict):
@@ -490,7 +557,7 @@ def _is_indexed_structured_message_attr(key: str) -> bool:
         prefixed = f"{prefix}."
         if not key.startswith(prefixed):
             continue
-        parts = key[len(prefixed):].split(".")
+        parts = key[len(prefixed) :].split(".")
         if len(parts) < 3 or not parts[0].isdigit():
             return False
         return parts[1] in {"tool_calls", "function_call"}
@@ -511,15 +578,15 @@ def _stringify_structured_message_values(attrs: dict[str, Any]) -> None:
 def _cleanup_google_adk_attrs(attrs: dict[str, Any], *, is_chat_span: bool) -> None:
     if is_chat_span and attrs.get(GEN_AI_SYSTEM) in (None, "", "gcp.vertex.agent"):
         provider = attrs.get(GEN_AI_PROVIDER_NAME)
-        attrs[GEN_AI_SYSTEM] = (
-            str(provider).lower() if provider else "google"
-        )
+        attrs[GEN_AI_SYSTEM] = str(provider).lower() if provider else "google"
     elif not is_chat_span:
         attrs.pop(GEN_AI_SYSTEM, None)
 
     _stringify_structured_message_values(attrs)
 
     for key in (TLSpanAttributes.TRACELOOP_SPAN_KIND, *_OFF_CONTRACT_ALIASES):
+        attrs.pop(key, None)
+    for key in _SESSION_ID_ATTRS:
         attrs.pop(key, None)
 
     prefixes_to_remove = (
@@ -558,6 +625,9 @@ def _normalize_google_adk_attrs(
         target_prefix=TLSpanAttributes.LLM_COMPLETIONS,
     )
     _apply_google_adk_payload_fallbacks(raw_attrs, attrs)
+    session_id = _session_id(raw_attrs)
+    if session_id is not None:
+        attrs.setdefault(RESPAN_SESSION_ID, session_id)
     _cleanup_google_adk_attrs(attrs, is_chat_span=is_chat_span)
 
 
@@ -566,6 +636,8 @@ class GoogleADKSpanProcessor(SpanProcessor):
 
     def __init__(self) -> None:
         self._translator = OpenInferenceTranslator()
+        self._trace_context: dict[int, dict[str, str]] = {}
+        self._context_lock = threading.Lock()
 
     def on_start(
         self,
@@ -582,9 +654,38 @@ class GoogleADKSpanProcessor(SpanProcessor):
         self._translator.on_end(span)
         translated_attrs = dict(getattr(span, "_attributes", None) or {})
         _normalize_google_adk_attrs(raw_attrs, translated_attrs)
+
+        trace_id = _span_trace_id(span)
+        log_type = translated_attrs.get(RESPAN_LOG_TYPE)
+        if trace_id is not None and log_type == LOG_TYPE_CHAT:
+            prompt = _first_user_prompt(translated_attrs)
+            session_id = translated_attrs.get(RESPAN_SESSION_ID)
+            if prompt is not None or session_id not in (None, ""):
+                with self._context_lock:
+                    context = self._trace_context.setdefault(trace_id, {})
+                    if prompt is not None:
+                        context.setdefault("prompt", prompt)
+                    if session_id not in (None, ""):
+                        context.setdefault("session_id", str(session_id))
+        elif trace_id is not None and log_type in (LOG_TYPE_AGENT, LOG_TYPE_WORKFLOW):
+            with self._context_lock:
+                context = self._trace_context.pop(trace_id, {})
+            if translated_attrs.get(TLSpanAttributes.TRACELOOP_ENTITY_INPUT) in (
+                None,
+                "",
+            ) and context.get("prompt"):
+                translated_attrs[TLSpanAttributes.TRACELOOP_ENTITY_INPUT] = (
+                    _safe_json_str({"prompt": context["prompt"]})
+                )
+            if translated_attrs.get(RESPAN_SESSION_ID) in (None, "") and context.get(
+                "session_id"
+            ):
+                translated_attrs[RESPAN_SESSION_ID] = context["session_id"]
         span._attributes = translated_attrs
 
     def shutdown(self) -> None:
+        with self._context_lock:
+            self._trace_context.clear()
         return None
 
     def force_flush(self, timeout_millis: int = 30000) -> bool:

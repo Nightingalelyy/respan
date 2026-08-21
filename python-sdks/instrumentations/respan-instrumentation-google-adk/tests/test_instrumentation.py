@@ -37,11 +37,12 @@ class FakeTracerProvider:
 
 
 class FakeSpan:
-    def __init__(self, attrs, name="call_llm"):
+    def __init__(self, attrs, name="call_llm", trace_id=None):
         self.name = name
         self._attributes = dict(attrs)
         self.attributes = self._attributes
         self.instrumentation_scope = SimpleNamespace(name=GOOGLE_ADK_SCOPE_NAME)
+        self.context = SimpleNamespace(trace_id=trace_id)
 
 
 def _install_fake_modules(monkeypatch):
@@ -234,45 +235,51 @@ def test_activate_logs_warning_when_dependencies_are_missing(
 
 
 def test_processor_promotes_google_adk_payloads_and_strips_local_noise():
-    span = FakeSpan({
-        "openinference.span.kind": "LLM",
-        "gen_ai.system": "gcp.vertex.agent",
-        "llm.provider": "google",
-        "gcp.vertex.agent.llm_request": json.dumps({
-            "model": "openai/gpt-4o",
-            "config": {
-                "system_instruction": "You are concise.",
-                "tools": [
-                    {
-                        "function_declarations": [
-                            {
-                                "name": "get_weather",
-                                "description": "Get weather.",
-                                "parameters": {"type": "OBJECT"},
-                            }
-                        ]
-                    }
-                ],
-            },
-            "contents": [
+    span = FakeSpan(
+        {
+            "openinference.span.kind": "LLM",
+            "gen_ai.system": "gcp.vertex.agent",
+            "llm.provider": "google",
+            "gcp.vertex.agent.llm_request": json.dumps(
                 {
-                    "role": "user",
-                    "parts": [{"text": "Weather in Tokyo?"}],
+                    "model": "openai/gpt-4o",
+                    "config": {
+                        "system_instruction": "You are concise.",
+                        "tools": [
+                            {
+                                "function_declarations": [
+                                    {
+                                        "name": "get_weather",
+                                        "description": "Get weather.",
+                                        "parameters": {"type": "OBJECT"},
+                                    }
+                                ]
+                            }
+                        ],
+                    },
+                    "contents": [
+                        {
+                            "role": "user",
+                            "parts": [{"text": "Weather in Tokyo?"}],
+                        }
+                    ],
                 }
-            ],
-        }),
-        "gcp.vertex.agent.llm_response": json.dumps({
-            "content": {
-                "role": "model",
-                "parts": [{"text": "It is sunny."}],
-            },
-            "usage_metadata": {
-                "prompt_token_count": 12,
-                "candidates_token_count": 5,
-                "total_token_count": 17,
-            },
-        }),
-    })
+            ),
+            "gcp.vertex.agent.llm_response": json.dumps(
+                {
+                    "content": {
+                        "role": "model",
+                        "parts": [{"text": "It is sunny."}],
+                    },
+                    "usage_metadata": {
+                        "prompt_token_count": 12,
+                        "candidates_token_count": 5,
+                        "total_token_count": 17,
+                    },
+                }
+            ),
+        }
+    )
 
     GoogleADKSpanProcessor().on_end(span)
 
@@ -303,19 +310,21 @@ def test_processor_promotes_google_adk_payloads_and_strips_local_noise():
 
 
 def test_processor_promotes_openinference_message_content_blocks():
-    span = FakeSpan({
-        "openinference.span.kind": "LLM",
-        "llm.input_messages.0.message.role": "user",
-        "llm.input_messages.0.message.contents.0.message_content.type": "text",
-        "llm.input_messages.0.message.contents.0.message_content.text": "Hello",
-        "llm.output_messages.0.message.role": "model",
-        "llm.output_messages.0.message.contents.0.message_content.type": "text",
-        "llm.output_messages.0.message.contents.0.message_content.text": "Hi there",
-        "llm.output_messages.0.message.tool_calls.0.tool_call.function.name": "lookup",
-        "llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments": (
-            '{"query":"weather"}'
-        ),
-    })
+    span = FakeSpan(
+        {
+            "openinference.span.kind": "LLM",
+            "llm.input_messages.0.message.role": "user",
+            "llm.input_messages.0.message.contents.0.message_content.type": "text",
+            "llm.input_messages.0.message.contents.0.message_content.text": "Hello",
+            "llm.output_messages.0.message.role": "model",
+            "llm.output_messages.0.message.contents.0.message_content.type": "text",
+            "llm.output_messages.0.message.contents.0.message_content.text": "Hi there",
+            "llm.output_messages.0.message.tool_calls.0.tool_call.function.name": "lookup",
+            "llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments": (
+                '{"query":"weather"}'
+            ),
+        }
+    )
 
     GoogleADKSpanProcessor().on_end(span)
 
@@ -339,13 +348,16 @@ def test_processor_promotes_openinference_message_content_blocks():
 
 
 def test_processor_cleans_google_adk_tool_attrs():
-    span = FakeSpan({
-        "openinference.span.kind": "TOOL",
-        "tool.name": "get_weather",
-        "gen_ai.tool.name": "get_weather",
-        "gcp.vertex.agent.tool_call_args": '{"city":"Paris"}',
-        "gcp.vertex.agent.tool_response": '{"result":"sunny"}',
-    }, name="execute_tool get_weather")
+    span = FakeSpan(
+        {
+            "openinference.span.kind": "TOOL",
+            "tool.name": "get_weather",
+            "gen_ai.tool.name": "get_weather",
+            "gcp.vertex.agent.tool_call_args": '{"city":"Paris"}',
+            "gcp.vertex.agent.tool_response": '{"result":"sunny"}',
+        },
+        name="execute_tool get_weather",
+    )
 
     GoogleADKSpanProcessor().on_end(span)
 
@@ -358,3 +370,146 @@ def test_processor_cleans_google_adk_tool_attrs():
     assert "gen_ai.tool.name" not in span._attributes
     assert "gcp.vertex.agent.tool_call_args" not in span._attributes
     assert "gcp.vertex.agent.tool_response" not in span._attributes
+
+
+def test_processor_preserves_tool_result_identity_in_chat_history():
+    span = FakeSpan(
+        {
+            "openinference.span.kind": "LLM",
+            "llm.input_messages.0.message.role": "tool",
+            "llm.input_messages.0.message.content": '{"result":"sunny"}',
+            "gcp.vertex.agent.llm_request": json.dumps(
+                {
+                    "model": "test-model",
+                    "contents": [
+                        {
+                            "role": "user",
+                            "parts": [
+                                {
+                                    "function_response": {
+                                        "id": "call-weather-1",
+                                        "name": "get_weather",
+                                        "response": {"result": "sunny"},
+                                    }
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ),
+        }
+    )
+
+    GoogleADKSpanProcessor().on_end(span)
+
+    assert span._attributes["gen_ai.prompt.0.role"] == "tool"
+    assert json.loads(span._attributes["gen_ai.prompt.0.content"]) == {
+        "id": "call-weather-1",
+        "name": "get_weather",
+        "response": {"result": "sunny"},
+    }
+
+
+def test_processor_aligns_adk_history_after_existing_system_prompt():
+    span = FakeSpan(
+        {
+            "openinference.span.kind": "LLM",
+            "llm.input_messages.0.message.role": "system",
+            "llm.input_messages.0.message.content": "Use the weather tool.",
+            "llm.input_messages.1.message.role": "user",
+            "llm.input_messages.1.message.content": "Weather in Paris?",
+            "llm.input_messages.2.message.role": "assistant",
+            "llm.input_messages.2.message.tool_calls.0.tool_call.id": (
+                "call-weather-1"
+            ),
+            "llm.input_messages.2.message.tool_calls.0.tool_call.function.name": (
+                "get_weather"
+            ),
+            "llm.input_messages.2.message.tool_calls.0.tool_call.function.arguments": (
+                '{"city":"Paris"}'
+            ),
+            "llm.input_messages.3.message.role": "tool",
+            "llm.input_messages.3.message.content": '{"result":"sunny"}',
+            "gcp.vertex.agent.llm_request": json.dumps(
+                {
+                    "model": "test-model",
+                    "contents": [
+                        {"role": "user", "parts": [{"text": "Weather in Paris?"}]},
+                        {
+                            "role": "model",
+                            "parts": [
+                                {
+                                    "function_call": {
+                                        "id": "call-weather-1",
+                                        "name": "get_weather",
+                                        "args": {"city": "Paris"},
+                                    }
+                                }
+                            ],
+                        },
+                        {
+                            "role": "user",
+                            "parts": [
+                                {
+                                    "function_response": {
+                                        "id": "call-weather-1",
+                                        "name": "get_weather",
+                                        "response": {"result": "sunny"},
+                                    }
+                                }
+                            ],
+                        },
+                    ],
+                }
+            ),
+        }
+    )
+
+    GoogleADKSpanProcessor().on_end(span)
+
+    assert span._attributes["gen_ai.prompt.0.role"] == "system"
+    assert span._attributes["gen_ai.prompt.1.role"] == "user"
+    assert span._attributes["gen_ai.prompt.2.role"] == "assistant"
+    assert span._attributes["gen_ai.prompt.3.role"] == "tool"
+    assert json.loads(span._attributes["gen_ai.prompt.3.content"]) == {
+        "id": "call-weather-1",
+        "name": "get_weather",
+        "response": {"result": "sunny"},
+    }
+    assert "gen_ai.prompt.4.role" not in span._attributes
+
+
+def test_processor_promotes_session_and_carries_prompt_to_agent():
+    processor = GoogleADKSpanProcessor()
+    llm_span = FakeSpan(
+        {
+            "openinference.span.kind": "LLM",
+            "session.id": "session-123",
+            "llm.input_messages.0.message.role": "user",
+            "llm.input_messages.0.message.content": "Plan a Tokyo day trip.",
+            "llm.output_messages.0.message.role": "model",
+            "llm.output_messages.0.message.content": "Here is a plan.",
+        },
+        trace_id=1234,
+    )
+    agent_span = FakeSpan(
+        {
+            "openinference.span.kind": "AGENT",
+            "input.value": "",
+            "output.value": '{"answer":"Here is a plan."}',
+        },
+        name="travel_agent",
+        trace_id=1234,
+    )
+
+    processor.on_end(llm_span)
+    processor.on_end(agent_span)
+
+    assert llm_span._attributes["respan.sessions.session_identifier"] == "session-123"
+    assert agent_span._attributes["respan.sessions.session_identifier"] == "session-123"
+    assert json.loads(agent_span._attributes["traceloop.entity.input"]) == {
+        "prompt": "Plan a Tokyo day trip."
+    }
+    assert "session.id" not in llm_span._attributes
+    assert "gen_ai.request.model" not in agent_span._attributes
+    assert processor._trace_context == {}

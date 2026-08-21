@@ -47,37 +47,60 @@ def _load_models_classes() -> tuple[type[Any], type[Any]]:
 
 def _emit_span_safely(
     *,
-    kwargs: dict[str, Any],
+    request_kwargs: dict[str, Any],
     start_ns: int,
     response_or_chunks: Any = None,
     error_message: str | None = None,
     status_code: int = 200,
+    is_streaming: bool = False,
 ) -> None:
     emit_generate_content_span(
-        request_kwargs=request_kwargs_from_call(kwargs=kwargs),
+        request_kwargs=request_kwargs,
         start_ns=start_ns,
         response_or_chunks=response_or_chunks,
         error_message=error_message,
         status_code=status_code,
+        is_streaming=is_streaming,
     )
+
+
+def _status_code_from_exception(exc: BaseException) -> int:
+    candidates = [
+        getattr(exc, "status_code", None),
+        getattr(exc, "code", None),
+        getattr(getattr(exc, "response", None), "status_code", None),
+        getattr(getattr(exc, "response", None), "status", None),
+    ]
+    for arg in getattr(exc, "args", ()):
+        if isinstance(arg, dict):
+            candidates.extend((arg.get("status_code"), arg.get("code")))
+    for candidate in candidates:
+        try:
+            status_code = int(candidate)
+        except (TypeError, ValueError):
+            continue
+        if 400 <= status_code <= 599:
+            return status_code
+    return 500
 
 
 def _wrap_sync_generate_content(original: Any) -> Any:
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
         start_ns = time.time_ns()
+        request_kwargs = request_kwargs_from_call(args=args, kwargs=kwargs)
         try:
             response = original(self, *args, **kwargs)
         except Exception as exc:
             _emit_span_safely(
-                kwargs=kwargs,
+                request_kwargs=request_kwargs,
                 start_ns=start_ns,
                 error_message=str(exc),
-                status_code=500,
+                status_code=_status_code_from_exception(exc),
             )
             raise
 
         _emit_span_safely(
-            kwargs=kwargs,
+            request_kwargs=request_kwargs,
             start_ns=start_ns,
             response_or_chunks=response,
         )
@@ -89,7 +112,7 @@ def _wrap_sync_generate_content(original: Any) -> Any:
 def _instrument_sync_stream(
     *,
     iterator: Iterator[Any],
-    kwargs: dict[str, Any],
+    request_kwargs: dict[str, Any],
     start_ns: int,
 ) -> Iterator[Any]:
     chunks: list[Any] = []
@@ -99,37 +122,41 @@ def _instrument_sync_stream(
             yield chunk
     except Exception as exc:
         _emit_span_safely(
-            kwargs=kwargs,
+            request_kwargs=request_kwargs,
             start_ns=start_ns,
             response_or_chunks=chunks,
             error_message=str(exc),
-            status_code=500,
+            status_code=_status_code_from_exception(exc),
+            is_streaming=True,
         )
         raise
     else:
         _emit_span_safely(
-            kwargs=kwargs,
+            request_kwargs=request_kwargs,
             start_ns=start_ns,
             response_or_chunks=chunks,
+            is_streaming=True,
         )
 
 
 def _wrap_sync_generate_content_stream(original: Any) -> Any:
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Iterator[Any]:
         start_ns = time.time_ns()
+        request_kwargs = request_kwargs_from_call(args=args, kwargs=kwargs)
         try:
             iterator = original(self, *args, **kwargs)
         except Exception as exc:
             _emit_span_safely(
-                kwargs=kwargs,
+                request_kwargs=request_kwargs,
                 start_ns=start_ns,
                 error_message=str(exc),
-                status_code=500,
+                status_code=_status_code_from_exception(exc),
+                is_streaming=True,
             )
             raise
         return _instrument_sync_stream(
             iterator=iterator,
-            kwargs=kwargs,
+            request_kwargs=request_kwargs,
             start_ns=start_ns,
         )
 
@@ -139,19 +166,20 @@ def _wrap_sync_generate_content_stream(original: Any) -> Any:
 def _wrap_async_generate_content(original: Any) -> Any:
     async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
         start_ns = time.time_ns()
+        request_kwargs = request_kwargs_from_call(args=args, kwargs=kwargs)
         try:
             response = await original(self, *args, **kwargs)
         except Exception as exc:
             _emit_span_safely(
-                kwargs=kwargs,
+                request_kwargs=request_kwargs,
                 start_ns=start_ns,
                 error_message=str(exc),
-                status_code=500,
+                status_code=_status_code_from_exception(exc),
             )
             raise
 
         _emit_span_safely(
-            kwargs=kwargs,
+            request_kwargs=request_kwargs,
             start_ns=start_ns,
             response_or_chunks=response,
         )
@@ -163,7 +191,7 @@ def _wrap_async_generate_content(original: Any) -> Any:
 async def _instrument_async_stream(
     *,
     async_iterator: AsyncIterator[Any],
-    kwargs: dict[str, Any],
+    request_kwargs: dict[str, Any],
     start_ns: int,
 ) -> AsyncIterator[Any]:
     chunks: list[Any] = []
@@ -173,37 +201,41 @@ async def _instrument_async_stream(
             yield chunk
     except Exception as exc:
         _emit_span_safely(
-            kwargs=kwargs,
+            request_kwargs=request_kwargs,
             start_ns=start_ns,
             response_or_chunks=chunks,
             error_message=str(exc),
-            status_code=500,
+            status_code=_status_code_from_exception(exc),
+            is_streaming=True,
         )
         raise
     else:
         _emit_span_safely(
-            kwargs=kwargs,
+            request_kwargs=request_kwargs,
             start_ns=start_ns,
             response_or_chunks=chunks,
+            is_streaming=True,
         )
 
 
 def _wrap_async_generate_content_stream(original: Any) -> Any:
     async def wrapper(self: Any, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
         start_ns = time.time_ns()
+        request_kwargs = request_kwargs_from_call(args=args, kwargs=kwargs)
         try:
             async_iterator = await original(self, *args, **kwargs)
         except Exception as exc:
             _emit_span_safely(
-                kwargs=kwargs,
+                request_kwargs=request_kwargs,
                 start_ns=start_ns,
                 error_message=str(exc),
-                status_code=500,
+                status_code=_status_code_from_exception(exc),
+                is_streaming=True,
             )
             raise
         return _instrument_async_stream(
             async_iterator=async_iterator,
-            kwargs=kwargs,
+            request_kwargs=request_kwargs,
             start_ns=start_ns,
         )
 
