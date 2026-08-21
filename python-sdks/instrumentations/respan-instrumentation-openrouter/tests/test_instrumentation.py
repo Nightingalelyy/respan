@@ -3,9 +3,13 @@ from __future__ import annotations
 import json
 import logging
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 from opentelemetry.semconv_ai import SpanAttributes
+from respan_instrumentation_openrouter import OpenRouterInstrumentor, _instrumentation
+from respan_instrumentation_openrouter._constants import OPENROUTER_SYSTEM_NAME
+from respan_instrumentation_openrouter._processor import OpenRouterSpanProcessor
 from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT
 from respan_sdk.constants.span_attributes import (
     RESPAN_LOG_TYPE,
@@ -14,14 +18,9 @@ from respan_sdk.constants.span_attributes import (
 )
 from respan_tracing.core.tracer import RespanTracer
 
-from respan_instrumentation_openrouter import OpenRouterInstrumentor
-from respan_instrumentation_openrouter import _instrumentation
-from respan_instrumentation_openrouter._constants import OPENROUTER_SYSTEM_NAME
-from respan_instrumentation_openrouter._processor import OpenRouterSpanProcessor
-
 
 class FakeOpenAIInstrumentor:
-    created: list["FakeOpenAIInstrumentor"] = []
+    created: ClassVar[list[FakeOpenAIInstrumentor]] = []
 
     def __init__(self) -> None:
         self.activated = False
@@ -49,6 +48,8 @@ class FakeTracerProvider:
 
 @pytest.fixture(autouse=True)
 def reset_fakes(monkeypatch):
+    while (owner := _instrumentation._ACTIVE_BRIDGE_OWNER) is not None:
+        owner.deactivate()
     FakeOpenAIInstrumentor.created.clear()
     RespanTracer.reset_instance()
     monkeypatch.setattr(
@@ -57,6 +58,8 @@ def reset_fakes(monkeypatch):
         FakeOpenAIInstrumentor,
     )
     yield
+    while (owner := _instrumentation._ACTIVE_BRIDGE_OWNER) is not None:
+        owner.deactivate()
     RespanTracer.reset_instance()
 
 
@@ -94,6 +97,30 @@ def test_activate_delegates_to_openai_and_inserts_processor_before_exporter(
     assert provider._active_span_processor._span_processors == ("exporter",)
 
 
+def test_foreign_same_class_processor_and_exact_order_are_preserved(
+    monkeypatch,
+) -> None:
+    foreign = OpenRouterSpanProcessor(capture_content=False)
+    provider = FakeTracerProvider(processors=(foreign, "exporter"))
+    monkeypatch.setattr(
+        _instrumentation.trace,
+        "get_tracer_provider",
+        lambda: provider,
+    )
+
+    instrumentor = OpenRouterInstrumentor()
+    instrumentor.activate()
+
+    assert provider._active_span_processor._span_processors == (
+        instrumentor._processor,
+        foreign,
+        "exporter",
+    )
+
+    instrumentor.deactivate()
+    assert provider._active_span_processor._span_processors == (foreign, "exporter")
+
+
 def test_activate_is_idempotent(monkeypatch) -> None:
     provider = FakeTracerProvider(processors=("exporter",))
     monkeypatch.setattr(
@@ -107,10 +134,154 @@ def test_activate_is_idempotent(monkeypatch) -> None:
     instrumentor.activate()
 
     assert len(FakeOpenAIInstrumentor.created) == 1
-    assert sum(
-        isinstance(processor, OpenRouterSpanProcessor)
-        for processor in provider._active_span_processor._span_processors
-    ) == 1
+    assert (
+        sum(
+            isinstance(processor, OpenRouterSpanProcessor)
+            for processor in provider._active_span_processor._span_processors
+        )
+        == 1
+    )
+
+
+def test_second_instance_with_different_capture_policy_is_rejected(monkeypatch) -> None:
+    provider = FakeTracerProvider(processors=("foreign", "exporter"))
+    monkeypatch.setattr(
+        _instrumentation.trace,
+        "get_tracer_provider",
+        lambda: provider,
+    )
+
+    first = OpenRouterInstrumentor(capture_content=True)
+    second = OpenRouterInstrumentor(capture_content=False)
+    first.activate()
+    second.activate()
+
+    assert first._is_instrumented is True
+    assert first._processor is not None
+    assert first._processor._capture_content is True
+    assert second._is_instrumented is False
+    assert second._processor is None
+    assert len(FakeOpenAIInstrumentor.created) == 1
+    assert (
+        sum(
+            isinstance(processor, OpenRouterSpanProcessor)
+            for processor in provider._active_span_processor._span_processors
+        )
+        == 1
+    )
+
+    first.deactivate()
+    assert provider._active_span_processor._span_processors == (
+        "foreign",
+        "exporter",
+    )
+
+
+def test_same_config_instances_share_runtime_until_last_release(monkeypatch) -> None:
+    provider = FakeTracerProvider(processors=("foreign", "exporter"))
+    monkeypatch.setattr(
+        _instrumentation.trace,
+        "get_tracer_provider",
+        lambda: provider,
+    )
+
+    first = OpenRouterInstrumentor(capture_content=False)
+    second = OpenRouterInstrumentor(capture_content=False)
+    first.activate()
+    second.activate()
+
+    assert first._is_instrumented is True
+    assert second._is_instrumented is True
+    assert first._runtime is second._runtime
+    assert first._processor is second._processor
+    assert len(FakeOpenAIInstrumentor.created) == 1
+
+    first.deactivate()
+    assert second._is_instrumented is True
+    assert isinstance(
+        provider._active_span_processor._span_processors[0],
+        OpenRouterSpanProcessor,
+    )
+    assert FakeOpenAIInstrumentor.created[0].deactivated is False
+
+    second.deactivate()
+    assert provider._active_span_processor._span_processors == (
+        "foreign",
+        "exporter",
+    )
+    assert FakeOpenAIInstrumentor.created[0].deactivated is True
+
+
+def test_deactivate_does_not_overwrite_foreign_delegate_change(monkeypatch) -> None:
+    provider = FakeTracerProvider(processors=("exporter",))
+    monkeypatch.setattr(
+        _instrumentation.trace,
+        "get_tracer_provider",
+        lambda: provider,
+    )
+    instrumentor = OpenRouterInstrumentor()
+    instrumentor.activate()
+
+    assert instrumentor._runtime is not None
+    original = instrumentor._runtime.delegate_kind_entries["chat"]
+    aggregate = _instrumentation.openai_instrumentation._KINDS["chat"][1]
+
+    def foreign_emit(**_kwargs):
+        return None
+
+    _instrumentation.openai_instrumentation._KINDS["chat"] = (
+        foreign_emit,
+        aggregate,
+    )
+    try:
+        instrumentor.deactivate()
+        assert _instrumentation.openai_instrumentation._KINDS["chat"][0] is foreign_emit
+        assert provider._active_span_processor._span_processors == ("exporter",)
+    finally:
+        _instrumentation.openai_instrumentation._KINDS["chat"] = original
+
+
+def test_adopts_preinstalled_openai_delegate_without_owning_teardown(
+    monkeypatch,
+) -> None:
+    class ExistingOpenAIInstrumentor(FakeOpenAIInstrumentor):
+        created: ClassVar[list[ExistingOpenAIInstrumentor]] = []
+
+        def activate(self) -> None:
+            self.activated = True
+            self._is_instrumented = False
+
+    provider = FakeTracerProvider(processors=("exporter",))
+    monkeypatch.setattr(
+        _instrumentation,
+        "OpenAIInstrumentor",
+        ExistingOpenAIInstrumentor,
+    )
+    monkeypatch.setattr(
+        _instrumentation.openai_instrumentation,
+        "_original_methods",
+        {("foreign", "create"): object()},
+    )
+    monkeypatch.setattr(
+        _instrumentation.trace,
+        "get_tracer_provider",
+        lambda: provider,
+    )
+
+    instrumentor = OpenRouterInstrumentor()
+    instrumentor.activate()
+
+    assert instrumentor._is_instrumented is True
+    assert instrumentor._runtime is not None
+    assert instrumentor._runtime.owns_delegate_patches is False
+    assert isinstance(
+        provider._active_span_processor._span_processors[0],
+        OpenRouterSpanProcessor,
+    )
+
+    instrumentor.deactivate()
+    assert ExistingOpenAIInstrumentor.created[0].deactivated is False
+    assert provider._active_span_processor._span_processors == ("exporter",)
 
 
 def test_activate_skips_when_respan_tracing_is_disabled(monkeypatch, caplog) -> None:
@@ -136,7 +307,7 @@ def test_activate_skips_when_respan_tracing_is_disabled(monkeypatch, caplog) -> 
 
 def test_activate_skips_when_openai_delegate_does_not_instrument(monkeypatch) -> None:
     class MissingOpenAIInstrumentor(FakeOpenAIInstrumentor):
-        created: list["MissingOpenAIInstrumentor"] = []
+        created: ClassVar[list[MissingOpenAIInstrumentor]] = []
 
         def activate(self) -> None:
             self.activated = True
@@ -314,12 +485,12 @@ def test_processor_promotes_new_gen_ai_output_messages_to_canonical_fields() -> 
     assert attrs[f"{SpanAttributes.LLM_COMPLETIONS}.0.role"] == "assistant"
     assert (
         attrs[f"{SpanAttributes.LLM_COMPLETIONS}.0.content"]
-        == 'Tool call: lookup({"city": "Tokyo"})'
+        == 'Tool call: lookup({"city":"Tokyo"})'
     )
     assert json.loads(attrs[f"{SpanAttributes.LLM_COMPLETIONS}.0.tool_calls"]) == [
         {
             "type": "function",
-            "function": {"name": "lookup", "arguments": '{"city": "Tokyo"}'},
+            "function": {"name": "lookup", "arguments": '{"city":"Tokyo"}'},
             "id": "call_123",
         }
     ]

@@ -113,3 +113,21 @@ def test_embedding_hooks_restore_only_functions_the_adapter_owns(
 
     assert sync_module.process_embedding_response is sync_original
     assert async_module.process_embedding_response is external_replacement
+
+
+def test_embedding_hook_fails_open_for_hostile_provider_response(monkeypatch) -> None:
+    class HostileResponse:
+        @property
+        def data(self):
+            raise RuntimeError("hostile response descriptor")
+
+    module, _ = _module("sync_openai")
+    monkeypatch.setattr(embeddings, "_OPENAI_EMBEDDING_MODULES", ("sync_openai",))
+    monkeypatch.setattr(embeddings.importlib, "import_module", lambda name: module)
+    hooks = embeddings.install_openai_embedding_hooks(capture_content=True)
+    span = RecordingSpan()
+    response = HostileResponse()
+
+    assert module.process_embedding_response(response=response, span=span) is response
+    assert span.attributes == {}
+    embeddings.remove_openai_embedding_hooks(hooks)

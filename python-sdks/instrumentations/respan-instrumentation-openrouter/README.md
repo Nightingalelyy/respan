@@ -6,11 +6,22 @@ OpenRouter's Python usage is OpenAI-compatible, so this package delegates SDK
 patching to `respan-instrumentation-openai` and adds a package-local processor
 that normalizes those spans as OpenRouter spans before export.
 
+The processor emits `gen_ai.system=openrouter` and
+`gen_ai.provider.name=openrouter`, canonical request tool definitions and
+current-turn completion tool calls, modern and legacy usage fields, precise
+OTEL error status, and both current and Traceloop streaming flags. It removes
+legacy tool aliases rather than duplicating the canonical fields.
+
 ## Install
 
 ```bash
 pip install respan-ai respan-instrumentation-openrouter openai
 ```
+
+Version `0.1.0` is validated with OpenAI Python `>=3.0.0,<4.0.0` and the
+`respan-instrumentation-openai` `>=1.2.1,<2.0.0` delegate surface. These bounds
+are intentional because OpenRouter's stream bridge integrates with that
+delegate's current lifecycle hooks.
 
 ## Environment
 
@@ -74,3 +85,8 @@ finally:
 the package is intended for OpenRouter-specific OpenAI-compatible clients. Set
 `normalize_all_openai_spans=False` if the same process also emits regular OpenAI
 spans and only spans with OpenRouter URL markers should be rewritten.
+
+Set `capture_content=False` to retain provider, model, usage, stream, lifecycle,
+and error data while removing prompt, completion, tool-definition, and tool-call
+content. Captured chat content is secret-redacted and bounded by UTF-8 bytes;
+embedding vectors remain intact under the shared span contract.
