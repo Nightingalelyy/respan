@@ -2,20 +2,39 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from collections.abc import Mapping, Sequence
+from itertools import islice
 from typing import Any
 
 from opentelemetry import context as context_api
 from opentelemetry import trace
 from opentelemetry.semconv._incubating.attributes.gen_ai_attributes import (
+    GEN_AI_PROVIDER_NAME,
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
 )
 from opentelemetry.semconv_ai import LLMRequestTypeValues
 from opentelemetry.semconv_ai import SpanAttributes as TLSpanAttributes
+from respan_sdk.constants.llm_logging import (
+    LOG_TYPE_AGENT,
+    LOG_TYPE_CHAT,
+    LOG_TYPE_TOOL,
+    LogMethodChoices,
+)
+from respan_sdk.constants.span_attributes import (
+    RESPAN_LOG_ID,
+    RESPAN_LOG_METHOD,
+    RESPAN_LOG_TYPE,
+    RESPAN_THREADS_ID,
+)
+from respan_sdk.utils.data_processing.id_processing import (
+    format_span_id,
+    format_trace_id,
+)
+from respan_tracing.utils.span_factory import build_readable_span, inject_span
+
 from respan_instrumentation_watson_orchestrate_adk._constants import (
     AGENT_ID_KEY,
     ARGUMENTS_KEY,
@@ -41,7 +60,6 @@ from respan_instrumentation_watson_orchestrate_adk._constants import (
     PROMPT_TOKENS_KEY,
     ROLE_KEY,
     RUN_ID_KEY,
-    STATUS_KEY,
     TEXT_KEY,
     THREAD_ID_KEY,
     TOKEN_USAGE_KEY,
@@ -56,21 +74,11 @@ from respan_instrumentation_watson_orchestrate_adk._constants import (
     WATSON_ORCHESTRATE_RUN_SPAN_NAME,
     WATSON_ORCHESTRATE_TOOL_SPAN_NAME,
 )
-from respan_sdk.constants.llm_logging import (
-    LOG_TYPE_AGENT,
-    LOG_TYPE_CHAT,
-    LOG_TYPE_TOOL,
-    LogMethodChoices,
+from respan_instrumentation_watson_orchestrate_adk._serialization import (
+    json_dumps,
+    safe_text,
+    to_jsonable,
 )
-from respan_sdk.constants.span_attributes import (
-    RESPAN_LOG_ID,
-    RESPAN_LOG_METHOD,
-    RESPAN_LOG_TYPE,
-    RESPAN_THREADS_ID,
-)
-from respan_sdk.utils.data_processing.id_processing import format_span_id, format_trace_id
-from respan_sdk.utils.serialization import serialize_value
-from respan_tracing.utils.span_factory import build_readable_span, inject_span
 
 logger = logging.getLogger(__name__)
 
@@ -88,31 +96,23 @@ def _field(value: Any, key: str, default: Any = None) -> Any:
         return value.get(key, default)
     try:
         return getattr(value, key)
-    except Exception:
+    except BaseException:  # noqa: BLE001
         return default
 
 
 def _dump_value(value: Any) -> Any:
-    if value is None or isinstance(value, str | int | float | bool):
-        return value
-    try:
-        return serialize_value(value=value)
-    except Exception:
-        return str(value)
+    return to_jsonable(value)
 
 
 def safe_json(value: Any) -> str:
-    try:
-        return json.dumps(_dump_value(value), default=str, separators=(",", ":"))
-    except Exception:
-        return json.dumps(str(value), separators=(",", ":"))
+    return json_dumps(value)
 
 
 def _to_string(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
-        return value
+        return safe_text(value)
     return safe_json(value)
 
 
@@ -120,7 +120,10 @@ def _as_sequence(value: Any) -> list[Any]:
     if value is None:
         return []
     if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-        return list(value)
+        try:
+            return list(islice(iter(value), 50))
+        except BaseException:  # noqa: BLE001
+            return [{"type": type(value).__name__[:120], "unavailable": True}]
     return [value]
 
 
@@ -136,7 +139,7 @@ def _normalize_messages(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, Mapping):
         return [
             {
-                ROLE_KEY: str(value.get(ROLE_KEY) or USER_ROLE),
+                ROLE_KEY: safe_text(value.get(ROLE_KEY) or USER_ROLE, max_bytes=128),
                 CONTENT_KEY: _dump_value(value.get(CONTENT_KEY, value)),
             }
         ]
@@ -146,7 +149,7 @@ def _normalize_messages(value: Any) -> list[dict[str, Any]]:
         if isinstance(item, Mapping):
             messages.append(
                 {
-                    ROLE_KEY: str(item.get(ROLE_KEY) or USER_ROLE),
+                    ROLE_KEY: safe_text(item.get(ROLE_KEY) or USER_ROLE, max_bytes=128),
                     CONTENT_KEY: _dump_value(item.get(CONTENT_KEY, item)),
                 }
             )
@@ -180,7 +183,7 @@ def _set_prompt_attrs(attrs: dict[str, Any], messages: list[dict[str, Any]]) -> 
         role = message.get(ROLE_KEY)
         content = message.get(CONTENT_KEY)
         if role is not None:
-            attrs[f"{_PROMPT_PREFIX}{index}.role"] = str(role)
+            attrs[f"{_PROMPT_PREFIX}{index}.role"] = safe_text(role, max_bytes=128)
         if content is not None:
             attrs[f"{_PROMPT_PREFIX}{index}.content"] = _to_string(content)
 
@@ -190,7 +193,9 @@ def _set_completion_attrs(attrs: dict[str, Any], text: str) -> None:
     attrs[f"{_COMPLETION_PREFIX}0.content"] = text
 
 
-def _model_from_call(call_kwargs: Mapping[str, Any], instance: Any = None) -> str | None:
+def _model_from_call(
+    call_kwargs: Mapping[str, Any], instance: Any = None
+) -> str | None:
     for key in (
         MODEL_KEY,
         MODEL_ID_KEY,
@@ -201,17 +206,19 @@ def _model_from_call(call_kwargs: Mapping[str, Any], instance: Any = None) -> st
     ):
         value = call_kwargs.get(key)
         if value:
-            return str(value)
+            return safe_text(value, max_bytes=512)
     for key in (MODEL_KEY, MODEL_ID_KEY, "_model", "_model_id"):
         value = _field(instance, key)
         if value:
-            return str(value)
+            return safe_text(value, max_bytes=512)
     return None
 
 
 def _first_choice(response: Any) -> Any:
     choices = _field(response, CHOICES_KEY, []) or []
-    if isinstance(choices, Sequence) and not isinstance(choices, str | bytes | bytearray):
+    if isinstance(choices, Sequence) and not isinstance(
+        choices, str | bytes | bytearray
+    ):
         return choices[0] if choices else None
     return None
 
@@ -259,7 +266,9 @@ def _response_text(response: Any) -> str:
             if value is not None:
                 return _to_string(value)
 
-    if isinstance(response, Sequence) and not isinstance(response, str | bytes | bytearray):
+    if isinstance(response, Sequence) and not isinstance(
+        response, str | bytes | bytearray
+    ):
         for item in reversed(response):
             text = _response_text(item)
             if text:
@@ -304,7 +313,11 @@ def _set_usage_attrs(attrs: dict[str, Any], response: Any) -> None:
         completion_tokens = _coerce_int(_field(source, OUTPUT_TOKENS_KEY))
 
     total_tokens = _coerce_int(_field(source, TOTAL_TOKENS_KEY))
-    if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
+    if (
+        total_tokens is None
+        and prompt_tokens is not None
+        and completion_tokens is not None
+    ):
         total_tokens = prompt_tokens + completion_tokens
 
     if prompt_tokens is not None:
@@ -327,14 +340,18 @@ def _tool_definitions(value: Any) -> list[dict[str, Any]]:
                 tools.append(dict(item))
                 continue
             if item.get(FUNCTION_KEY):
-                tools.append({TYPE_KEY: FUNCTION_TOOL_TYPE, FUNCTION_KEY: item[FUNCTION_KEY]})
+                tools.append(
+                    {TYPE_KEY: FUNCTION_TOOL_TYPE, FUNCTION_KEY: item[FUNCTION_KEY]}
+                )
                 continue
             name = item.get(NAME_KEY)
             if name:
                 function = {NAME_KEY: name}
                 for key in ("description", "parameters", "input_schema", "schema"):
                     if item.get(key) is not None:
-                        function["parameters" if key in {"input_schema", "schema"} else key] = item[key]
+                        function[
+                            "parameters" if key in {"input_schema", "schema"} else key
+                        ] = item[key]
                 tools.append({TYPE_KEY: FUNCTION_TOOL_TYPE, FUNCTION_KEY: function})
                 continue
 
@@ -376,7 +393,7 @@ def _current_trace_parent_ids() -> tuple[str | None, str | None]:
     try:
         current_span = trace.get_current_span()
         span_context = current_span.get_span_context()
-    except Exception:
+    except BaseException:  # noqa: BLE001
         return None, None
     trace_id = getattr(span_context, "trace_id", 0) or 0
     span_id = getattr(span_context, "span_id", 0) or 0
@@ -402,7 +419,9 @@ def build_tool_attrs(
     )
 
     if error_message is not None:
-        attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = error_message
+        attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safe_json(
+            {"error": {"message": error_message}}
+        )
     elif response is not None:
         content = _field(response, CONTENT_KEY, response)
         context_updates = _field(response, "context_updates")
@@ -420,7 +439,7 @@ def build_agent_run_attrs(
     response: Any = None,
     error_message: str | None = None,
 ) -> dict[str, Any]:
-    agent_name = str(call_kwargs.get(AGENT_ID_KEY) or method_name)
+    agent_name = safe_text(call_kwargs.get(AGENT_ID_KEY) or method_name, max_bytes=256)
     attrs = _base_attrs(span_name=agent_name, log_type=LOG_TYPE_AGENT)
     attrs[TLSpanAttributes.TRACELOOP_ENTITY_INPUT] = safe_json(
         {"method": method_name, "request": dict(call_kwargs)}
@@ -428,13 +447,15 @@ def build_agent_run_attrs(
 
     thread_id = call_kwargs.get(THREAD_ID_KEY) or _field(response, THREAD_ID_KEY)
     if thread_id:
-        attrs[RESPAN_THREADS_ID] = str(thread_id)
+        attrs[RESPAN_THREADS_ID] = safe_text(thread_id, max_bytes=512)
     run_id = _field(response, RUN_ID_KEY)
     if run_id:
-        attrs[RESPAN_LOG_ID] = str(run_id)
+        attrs[RESPAN_LOG_ID] = safe_text(run_id, max_bytes=512)
 
     if error_message is not None:
-        attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = error_message
+        attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safe_json(
+            {"error": {"message": error_message}}
+        )
     elif response is not None:
         attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safe_json(response)
     return _clean_attrs(attrs)
@@ -448,8 +469,11 @@ def build_chat_attrs(
     error_message: str | None = None,
     instance: Any = None,
 ) -> dict[str, Any]:
-    attrs = _base_attrs(span_name=WATSON_ORCHESTRATE_CHAT_SPAN_NAME, log_type=LOG_TYPE_CHAT)
+    attrs = _base_attrs(
+        span_name=WATSON_ORCHESTRATE_CHAT_SPAN_NAME, log_type=LOG_TYPE_CHAT
+    )
     attrs[TLSpanAttributes.LLM_SYSTEM] = WATSON_ORCHESTRATE_ADK_SYSTEM_NAME
+    attrs[GEN_AI_PROVIDER_NAME] = WATSON_ORCHESTRATE_ADK_SYSTEM_NAME
     attrs[TLSpanAttributes.LLM_REQUEST_TYPE] = _request_type_value("CHAT", "chat")
 
     model = _model_from_call(call_kwargs=call_kwargs, instance=instance)
@@ -469,8 +493,9 @@ def build_chat_attrs(
     )
 
     if error_message is not None:
-        attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = error_message
-        _set_completion_attrs(attrs=attrs, text=error_message)
+        attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safe_json(
+            {"error": {"message": error_message}}
+        )
     elif response is not None:
         response_text = _response_text(response)
         attrs[TLSpanAttributes.TRACELOOP_ENTITY_OUTPUT] = (
@@ -489,14 +514,21 @@ def emit_span(
     start_ns: int,
     error_message: str | None = None,
     status_code: int = 200,
+    trace_id: str | None = None,
+    parent_id: str | None = None,
 ) -> None:
     try:
         clean_attrs = _clean_attrs(attrs)
         if error_message is not None:
             clean_attrs["error.message"] = error_message
-            clean_attrs["status_code"] = status_code if status_code >= 400 else 500
+            clean_attrs["http.response.status_code"] = (
+                status_code if status_code >= 400 else 500
+            )
 
-        trace_id, parent_id = _current_trace_parent_ids()
+        if trace_id is None or parent_id is None:
+            current_trace_id, current_parent_id = _current_trace_parent_ids()
+            trace_id = trace_id or current_trace_id
+            parent_id = parent_id or current_parent_id
         span = build_readable_span(
             name=span_name,
             trace_id=trace_id,
@@ -520,6 +552,9 @@ def emit_tool_span(
     start_ns: int,
     response: Any = None,
     error_message: str | None = None,
+    status_code: int = 500,
+    trace_id: str | None = None,
+    parent_id: str | None = None,
 ) -> None:
     emit_span(
         span_name=WATSON_ORCHESTRATE_TOOL_SPAN_NAME,
@@ -532,7 +567,9 @@ def emit_tool_span(
         ),
         start_ns=start_ns,
         error_message=error_message,
-        status_code=500 if error_message else 200,
+        status_code=status_code if error_message else 200,
+        trace_id=trace_id,
+        parent_id=parent_id,
     )
 
 
@@ -543,6 +580,9 @@ def emit_agent_run_span(
     start_ns: int,
     response: Any = None,
     error_message: str | None = None,
+    status_code: int = 500,
+    trace_id: str | None = None,
+    parent_id: str | None = None,
 ) -> None:
     emit_span(
         span_name=WATSON_ORCHESTRATE_RUN_SPAN_NAME,
@@ -554,7 +594,9 @@ def emit_agent_run_span(
         ),
         start_ns=start_ns,
         error_message=error_message,
-        status_code=500 if error_message else 200,
+        status_code=status_code if error_message else 200,
+        trace_id=trace_id,
+        parent_id=parent_id,
     )
 
 
@@ -566,6 +608,9 @@ def emit_chat_span(
     response: Any = None,
     error_message: str | None = None,
     instance: Any = None,
+    status_code: int = 500,
+    trace_id: str | None = None,
+    parent_id: str | None = None,
 ) -> None:
     emit_span(
         span_name=WATSON_ORCHESTRATE_CHAT_SPAN_NAME,
@@ -578,5 +623,7 @@ def emit_chat_span(
         ),
         start_ns=start_ns,
         error_message=error_message,
-        status_code=500 if error_message else 200,
+        status_code=status_code if error_message else 200,
+        trace_id=trace_id,
+        parent_id=parent_id,
     )

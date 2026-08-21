@@ -12,12 +12,20 @@ from opentelemetry.semconv._incubating.attributes import (
     gen_ai_attributes as GenAIAttributes,
 )
 from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
+from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT
+from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
+from respan_sdk.utils.data_processing.id_processing import (
+    format_span_id,
+    format_trace_id,
+)
+from respan_tracing.utils.span_factory import build_readable_span, inject_span
 
 from respan_instrumentation_vertexai._constants import (
     ASSISTANT_ROLE,
     CANDIDATES_TOKEN_COUNT_KEY,
     PROMPT_TOKEN_COUNT_KEY,
     ROLE_KEY,
+    STREAM_KEY,
     SYSTEM_INSTRUCTION_KEY,
     TOOLS_KEY,
     TOTAL_TOKEN_COUNT_KEY,
@@ -34,13 +42,6 @@ from respan_instrumentation_vertexai._translator import (
     safe_json,
     to_json_attr,
 )
-from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT
-from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
-from respan_sdk.utils.data_processing.id_processing import (
-    format_span_id,
-    format_trace_id,
-)
-from respan_tracing.utils.span_factory import build_readable_span, inject_span
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ def _current_trace_parent_ids() -> tuple[str | None, str | None]:
     try:
         current_span = trace.get_current_span()
         span_context = current_span.get_span_context()
-    except Exception:
+    except BaseException:  # noqa: BLE001
         return None, None
 
     trace_id = getattr(span_context, "trace_id", 0) or 0
@@ -62,6 +63,7 @@ def _current_trace_parent_ids() -> tuple[str | None, str | None]:
 def _base_attrs(span_name: str) -> dict[str, Any]:
     attrs = {
         SpanAttributes.LLM_SYSTEM: VERTEXAI_SYSTEM_NAME,
+        GenAIAttributes.GEN_AI_PROVIDER_NAME: "google_vertex_ai",
         SpanAttributes.LLM_REQUEST_TYPE: LLMRequestTypeValues.CHAT.value,
         SpanAttributes.TRACELOOP_ENTITY_NAME: span_name,
         SpanAttributes.TRACELOOP_ENTITY_PATH: span_name,
@@ -88,7 +90,7 @@ def _set_input_attrs(attrs: dict[str, Any], request_payload: dict[str, Any]) -> 
         role = message.get(ROLE_KEY)
         content = message.get("content")
         if role is not None:
-            attrs[f"{SpanAttributes.LLM_PROMPTS}.{index}.role"] = str(role)
+            attrs[f"{SpanAttributes.LLM_PROMPTS}.{index}.role"] = to_json_attr(role)
         if content is not None:
             attrs[f"{SpanAttributes.LLM_PROMPTS}.{index}.content"] = to_json_attr(
                 content
@@ -141,6 +143,8 @@ def build_generate_content_attrs(
     span_name: str = VERTEXAI_GENERATE_CONTENT_SPAN_NAME,
 ) -> dict[str, Any]:
     attrs = _base_attrs(span_name=span_name)
+    if request_payload.get(STREAM_KEY) is True:
+        attrs[SpanAttributes.LLM_IS_STREAMING] = True
     _set_request_attrs(attrs=attrs, request_payload=request_payload)
     if response_or_chunks is not None:
         _set_output_attrs(attrs=attrs, response_or_chunks=response_or_chunks)
@@ -155,6 +159,8 @@ def emit_generate_content_span(
     span_name: str = VERTEXAI_GENERATE_CONTENT_SPAN_NAME,
     error_message: str | None = None,
     status_code: int = 200,
+    trace_id: str | None = None,
+    parent_id: str | None = None,
 ) -> None:
     """Build a ReadableSpan for a Vertex AI generation and inject it."""
     try:
@@ -165,9 +171,22 @@ def emit_generate_content_span(
         )
         if error_message:
             attrs["error.message"] = error_message
-            attrs.setdefault("status_code", status_code if status_code >= 400 else 500)
+            attrs["http.response.status_code"] = (
+                status_code if status_code >= 400 else 500
+            )
+            attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safe_json(
+                {
+                    "error": {
+                        "message": error_message,
+                        "status_code": status_code if status_code >= 400 else 500,
+                    }
+                }
+            )
 
-        trace_id, parent_id = _current_trace_parent_ids()
+        if trace_id is None or parent_id is None:
+            current_trace_id, current_parent_id = _current_trace_parent_ids()
+            trace_id = trace_id or current_trace_id
+            parent_id = parent_id or current_parent_id
         span = build_readable_span(
             name=span_name,
             trace_id=trace_id,

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import json
-from typing import Any, Iterable
+from collections.abc import Iterable
+from itertools import islice
+from typing import Any
 
 from respan_instrumentation_vertexai._constants import (
     ARGS_KEY,
@@ -38,55 +39,35 @@ from respan_instrumentation_vertexai._constants import (
     USAGE_METADATA_KEY,
     USER_ROLE,
 )
-from respan_sdk.utils.serialization import serialize_value
+from respan_instrumentation_vertexai._serialization import (
+    json_dumps,
+    safe_text,
+    to_jsonable,
+)
 
 
 def safe_json(value: Any) -> str:
-    """JSON-encode values after applying the SDK's serializer."""
-    try:
-        return json.dumps(serialize_value(value=value), default=str)
-    except Exception:
-        return str(value)
+    """JSON-encode values using the bounded capture policy."""
+    return json_dumps(value)
 
 
 def to_json_attr(value: Any) -> str:
     if isinstance(value, str):
-        return value
+        return safe_text(value)
     return safe_json(value=value)
 
 
 def _field(value: Any, name: str, default: Any = None) -> Any:
     if isinstance(value, dict):
         return value.get(name, default)
-    return getattr(value, name, default)
+    try:
+        return getattr(value, name, default)
+    except BaseException:  # noqa: BLE001
+        return default
 
 
 def _dump_value(value: Any) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, dict):
-        return {
-            str(key): _dump_value(nested_value)
-            for key, nested_value in value.items()
-            if nested_value is not None
-        }
-    if isinstance(value, (list, tuple, set)):
-        return [_dump_value(item) for item in value if item is not None]
-    to_dict = getattr(value, "to_dict", None)
-    if callable(to_dict):
-        try:
-            return to_dict()
-        except Exception:
-            pass
-    model_dump = getattr(value, "model_dump", None)
-    if callable(model_dump):
-        try:
-            return model_dump(exclude_none=True, by_alias=False)
-        except TypeError:
-            return model_dump()
-    return serialize_value(value=value)
+    return to_jsonable(value)
 
 
 def _role(value: Any, default: str = USER_ROLE) -> str:
@@ -95,7 +76,7 @@ def _role(value: Any, default: str = USER_ROLE) -> str:
         return ASSISTANT_ROLE
     if role == FUNCTION_KEY:
         return TOOL_ROLE
-    return str(role)
+    return safe_text(role, max_bytes=128)
 
 
 def _is_content_like(value: Any) -> bool:
@@ -257,7 +238,7 @@ def normalize_input_messages(
         messages.append({ROLE_KEY: USER_ROLE, CONTENT_KEY: _normalize_parts(contents)})
         return messages
 
-    messages.append({ROLE_KEY: USER_ROLE, CONTENT_KEY: serialize_value(value=contents)})
+    messages.append({ROLE_KEY: USER_ROLE, CONTENT_KEY: _dump_value(contents)})
     return messages
 
 
@@ -383,8 +364,21 @@ def extract_tools(tools: Any) -> list[dict[str, Any]]:
         return []
 
     normalized_tools: list[dict[str, Any]] = []
-    for tool in tools:
+    for tool in islice(iter(tools), 50):
         declarations = _field(tool, FUNCTION_DECLARATIONS_KEY) or []
+        tool_type = type(tool)
+        if (
+            not declarations
+            and tool_type.__name__ == "Tool"
+            and tool_type.__module__.startswith("vertexai.generative_models")
+        ):
+            # Vertex's public Tool wrapper keeps declarations in a private proto,
+            # but exposes a stable public conversion at this adapter boundary.
+            try:
+                converted = tool.to_dict()
+            except BaseException:  # noqa: BLE001
+                converted = None
+            declarations = _field(converted, FUNCTION_DECLARATIONS_KEY) or []
         if isinstance(tool, dict) and FUNCTION_DECLARATIONS_KEY not in tool:
             normalized = _function_declaration_tool(tool)
             if normalized is not None:
@@ -403,10 +397,16 @@ def _first_arg(args: tuple[Any, ...]) -> Any:
 
 def _model_name(instance: Any) -> str | None:
     for attr_name in ("_model_name", "model_name", "_model_id", "model_id"):
-        value = getattr(instance, attr_name, None)
+        try:
+            value = getattr(instance, attr_name, None)
+        except BaseException:  # noqa: BLE001
+            value = None
         if value:
-            return str(value)
-    nested_model = getattr(instance, "model", None)
+            return safe_text(value, max_bytes=512)
+    try:
+        nested_model = getattr(instance, "model", None)
+    except BaseException:  # noqa: BLE001
+        nested_model = None
     if nested_model is not None and nested_model is not instance:
         return _model_name(nested_model)
     return None
@@ -414,10 +414,16 @@ def _model_name(instance: Any) -> str | None:
 
 def _system_instruction(instance: Any) -> Any:
     for attr_name in (SYSTEM_INSTRUCTION_KEY, f"_{SYSTEM_INSTRUCTION_KEY}"):
-        value = getattr(instance, attr_name, None)
+        try:
+            value = getattr(instance, attr_name, None)
+        except BaseException:  # noqa: BLE001
+            value = None
         if value is not None:
             return value
-    nested_model = getattr(instance, "model", None)
+    try:
+        nested_model = getattr(instance, "model", None)
+    except BaseException:  # noqa: BLE001
+        nested_model = None
     if nested_model is not None and nested_model is not instance:
         return _system_instruction(nested_model)
     return None
@@ -427,10 +433,16 @@ def _tools(instance: Any, kwargs: dict[str, Any]) -> Any:
     if kwargs.get(TOOLS_KEY) is not None:
         return kwargs.get(TOOLS_KEY)
     for attr_name in (TOOLS_KEY, f"_{TOOLS_KEY}"):
-        value = getattr(instance, attr_name, None)
+        try:
+            value = getattr(instance, attr_name, None)
+        except BaseException:  # noqa: BLE001
+            value = None
         if value is not None:
             return value
-    nested_model = getattr(instance, "model", None)
+    try:
+        nested_model = getattr(instance, "model", None)
+    except BaseException:  # noqa: BLE001
+        nested_model = None
     if nested_model is not None and nested_model is not instance:
         return _tools(nested_model, kwargs)
     return None

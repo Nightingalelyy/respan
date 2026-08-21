@@ -7,7 +7,17 @@ import importlib
 import inspect
 import logging
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import dataclass
+from threading import RLock
+from typing import Any
+
+from opentelemetry import trace
+from respan_sdk.utils.data_processing.id_processing import (
+    format_span_id,
+    format_trace_id,
+)
+from respan_tracing.core.tracer import RespanTracer
 
 from respan_instrumentation_watson_orchestrate_adk import _otel_emitter
 from respan_instrumentation_watson_orchestrate_adk._constants import (
@@ -25,43 +35,72 @@ from respan_instrumentation_watson_orchestrate_adk._constants import (
     RUN_CLIENT_MODULE,
     RUN_METHODS,
     TOOL_CALL_METHOD,
+    WATSON_ORCHESTRATE_ADK_INSTRUMENTATION_NAME,
     WATSONX_AI_CLIENT_CLASS,
     WATSONX_AI_CLIENT_MODULE,
-    WATSON_ORCHESTRATE_ADK_INSTRUMENTATION_NAME,
 )
-from respan_tracing.core.tracer import RespanTracer
+from respan_instrumentation_watson_orchestrate_adk._serialization import (
+    provider_status_code,
+    safe_exception_message,
+    safe_text,
+)
 
 logger = logging.getLogger(__name__)
 
-_OriginalKey = tuple[type[Any], str]
-_original_methods: dict[_OriginalKey, Any] = {}
+_LOCK = RLock()
+_ACTIVATION_COUNT = 0
+
+
+@dataclass(frozen=True)
+class _Patch:
+    cls: type[Any]
+    method_name: str
+    original: Any
+    wrapper: Any
+
+
+_PATCHES: list[_Patch] = []
 
 
 def _load_class(module_name: str, class_name: str) -> type[Any]:
     module = importlib.import_module(module_name)
-    class_value = getattr(module, class_name, None)
-    if class_value is None:
+    value = getattr(module, class_name, None)
+    if value is None:
         raise AttributeError(f"{module_name}.{class_name}")
-    return class_value
+    return value
+
+
+def _current_trace_parent_ids() -> tuple[str | None, str | None]:
+    try:
+        context = trace.get_current_span().get_span_context()
+        if not context.is_valid:
+            return None, None
+        return format_trace_id(context.trace_id), format_span_id(context.span_id)
+    except BaseException:  # noqa: BLE001
+        return None, None
+
+
+def _safe_attr(instance: Any, name: str) -> Any:
+    try:
+        return getattr(instance, name, None)
+    except BaseException:  # noqa: BLE001
+        return None
 
 
 def _tool_name(instance: Any) -> str:
     for key in ("name", "display_name"):
-        value = getattr(instance, key, None)
+        value = _safe_attr(instance, key)
         if value:
-            return str(value)
-
-    spec = getattr(instance, "__tool_spec__", None)
-    value = getattr(spec, "name", None)
+            return safe_text(value, max_bytes=256)
+    spec = _safe_attr(instance, "__tool_spec__")
+    value = _safe_attr(spec, "name")
     if value:
-        return str(value)
-
-    fn = getattr(instance, "fn", None)
-    value = getattr(fn, "__name__", None)
+        return safe_text(value, max_bytes=256)
+    fn = _safe_attr(instance, "fn")
+    value = _safe_attr(fn, "__name__")
     if value:
-        return str(value)
-
-    return instance.__class__.__name__
+        return safe_text(value, max_bytes=256)
+    return safe_text(type(instance).__name__, max_bytes=256)
 
 
 def _call_kwargs(
@@ -76,48 +115,54 @@ def _call_kwargs(
     except (TypeError, ValueError):
         result = dict(kwargs)
         if args:
-            result["_args"] = list(args)
+            result["_args"] = list(args[:50])
         return result
-
-    result = {
-        key: value
-        for key, value in bound.arguments.items()
-        if key != "self"
-    }
-    if "kwargs" in result and isinstance(result["kwargs"], dict):
-        nested = dict(result.pop("kwargs"))
+    result = {key: value for key, value in bound.arguments.items() if key != "self"}
+    nested_kwargs = result.pop("kwargs", None)
+    if isinstance(nested_kwargs, dict):
+        nested = dict(nested_kwargs)
         nested.update(result)
         result = nested
-    if "args" in result and isinstance(result["args"], tuple):
-        positional = result.pop("args")
-        if positional:
-            result["_args"] = list(positional)
+    positional = result.pop("args", None)
+    if isinstance(positional, tuple) and positional:
+        result["_args"] = list(positional[:50])
     return result
+
+
+def _emit_error_kwargs(exc: BaseException) -> dict[str, Any]:
+    return {
+        "error_message": safe_exception_message(exc),
+        "status_code": provider_status_code(exc),
+    }
 
 
 def _wrap_tool_call(original: Callable[..., Any]) -> Callable[..., Any]:
     @functools.wraps(original)
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
         start_ns = time.time_ns()
+        trace_id, parent_id = _current_trace_parent_ids()
         tool_name = _tool_name(self)
         try:
             response = original(self, *args, **kwargs)
-        except Exception as exc:
+        except BaseException as exc:
             _otel_emitter.emit_tool_span(
                 tool_name=tool_name,
                 args=args,
                 kwargs=kwargs,
                 start_ns=start_ns,
-                error_message=str(exc),
+                trace_id=trace_id,
+                parent_id=parent_id,
+                **_emit_error_kwargs(exc),
             )
             raise
-
         _otel_emitter.emit_tool_span(
             tool_name=tool_name,
             args=args,
             kwargs=kwargs,
             start_ns=start_ns,
             response=response,
+            trace_id=trace_id,
+            parent_id=parent_id,
         )
         return response
 
@@ -125,35 +170,34 @@ def _wrap_tool_call(original: Callable[..., Any]) -> Callable[..., Any]:
 
 
 def _wrap_agent_run(
-    *,
-    method_name: str,
-    original: Callable[..., Any],
+    method_name: str, original: Callable[..., Any]
 ) -> Callable[..., Any]:
     @functools.wraps(original)
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
         start_ns = time.time_ns()
+        trace_id, parent_id = _current_trace_parent_ids()
         call_kwargs = _call_kwargs(
-            original=original,
-            instance=self,
-            args=args,
-            kwargs=kwargs,
+            original=original, instance=self, args=args, kwargs=kwargs
         )
         try:
             response = original(self, *args, **kwargs)
-        except Exception as exc:
+        except BaseException as exc:
             _otel_emitter.emit_agent_run_span(
                 method_name=method_name,
                 call_kwargs=call_kwargs,
                 start_ns=start_ns,
-                error_message=str(exc),
+                trace_id=trace_id,
+                parent_id=parent_id,
+                **_emit_error_kwargs(exc),
             )
             raise
-
         _otel_emitter.emit_agent_run_span(
             method_name=method_name,
             call_kwargs=call_kwargs,
             start_ns=start_ns,
             response=response,
+            trace_id=trace_id,
+            parent_id=parent_id,
         )
         return response
 
@@ -161,35 +205,34 @@ def _wrap_agent_run(
 
 
 def _wrap_async_agent_run(
-    *,
-    method_name: str,
-    original: Callable[..., Any],
+    method_name: str, original: Callable[..., Any]
 ) -> Callable[..., Any]:
     @functools.wraps(original)
     async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
         start_ns = time.time_ns()
+        trace_id, parent_id = _current_trace_parent_ids()
         call_kwargs = _call_kwargs(
-            original=original,
-            instance=self,
-            args=args,
-            kwargs=kwargs,
+            original=original, instance=self, args=args, kwargs=kwargs
         )
         try:
             response = await original(self, *args, **kwargs)
-        except Exception as exc:
+        except BaseException as exc:
             _otel_emitter.emit_agent_run_span(
                 method_name=method_name,
                 call_kwargs=call_kwargs,
                 start_ns=start_ns,
-                error_message=str(exc),
+                trace_id=trace_id,
+                parent_id=parent_id,
+                **_emit_error_kwargs(exc),
             )
             raise
-
         _otel_emitter.emit_agent_run_span(
             method_name=method_name,
             call_kwargs=call_kwargs,
             start_ns=start_ns,
             response=response,
+            trace_id=trace_id,
+            parent_id=parent_id,
         )
         return response
 
@@ -197,75 +240,71 @@ def _wrap_async_agent_run(
 
 
 def _wrap_chat_method(
-    *,
-    method_name: str,
-    original: Callable[..., Any],
+    method_name: str, original: Callable[..., Any]
 ) -> Callable[..., Any]:
     @functools.wraps(original)
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
         start_ns = time.time_ns()
+        trace_id, parent_id = _current_trace_parent_ids()
         call_kwargs = _call_kwargs(
-            original=original,
-            instance=self,
-            args=args,
-            kwargs=kwargs,
+            original=original, instance=self, args=args, kwargs=kwargs
         )
         try:
             response = original(self, *args, **kwargs)
-        except Exception as exc:
+        except BaseException as exc:
             _otel_emitter.emit_chat_span(
                 method_name=method_name,
                 call_kwargs=call_kwargs,
                 start_ns=start_ns,
-                error_message=str(exc),
                 instance=self,
+                trace_id=trace_id,
+                parent_id=parent_id,
+                **_emit_error_kwargs(exc),
             )
             raise
-
         _otel_emitter.emit_chat_span(
             method_name=method_name,
             call_kwargs=call_kwargs,
             start_ns=start_ns,
             response=response,
             instance=self,
+            trace_id=trace_id,
+            parent_id=parent_id,
         )
         return response
 
     return wrapper
 
 
-def _patch_method(
+def _install(
+    installed: list[_Patch],
     cls: type[Any],
     method_name: str,
-    wrapper_factory: Callable[[Callable[..., Any]], Callable[..., Any]],
-) -> bool:
+    factory: Callable[[Callable[..., Any]], Callable[..., Any]],
+) -> None:
     original = getattr(cls, method_name, None)
     if original is None:
-        return False
-
-    key = (cls, method_name)
-    if key in _original_methods:
-        return False
-
-    _original_methods[key] = original
-    setattr(cls, method_name, wrapper_factory(original))
-    return True
+        return
+    wrapper = factory(original)
+    setattr(cls, method_name, wrapper)
+    installed.append(_Patch(cls, method_name, original, wrapper))
 
 
-def _restore_methods() -> None:
-    for (cls, method_name), original in list(_original_methods.items()):
-        setattr(cls, method_name, original)
-    _original_methods.clear()
+def _optional_class(module_name: str, class_name: str) -> type[Any] | None:
+    try:
+        return _load_class(module_name, class_name)
+    except (ImportError, AttributeError):
+        return None
+
+
+def _restore_owned(patches: list[_Patch]) -> None:
+    for patch in reversed(patches):
+        if getattr(patch.cls, patch.method_name, None) is patch.wrapper:
+            setattr(patch.cls, patch.method_name, patch.original)
 
 
 class WatsonOrchestrateADKInstrumentor:
-    """Respan instrumentor for IBM watsonx Orchestrate ADK.
-
-    The IBM package exposes a mix of local Python tool objects and generated
-    REST clients. This instrumentor patches only stable public methods and
-    emits canonical Respan/OpenTelemetry spans without requiring the SDK at
-    import time.
-    """
+    """Respan instrumentor for IBM watsonx Orchestrate ADK."""
 
     name = WATSON_ORCHESTRATE_ADK_INSTRUMENTATION_NAME
 
@@ -275,157 +314,102 @@ class WatsonOrchestrateADKInstrumentor:
     @staticmethod
     def _is_respan_tracing_enabled() -> bool:
         tracer = getattr(RespanTracer, "_instance", None)
-        if tracer is None:
-            return True
-        return bool(getattr(tracer, "is_enabled", True))
-
-    def _patch_optional_class(
-        self,
-        *,
-        module_name: str,
-        class_name: str,
-        patcher: Callable[[type[Any]], int],
-    ) -> int:
-        try:
-            cls = _load_class(module_name, class_name)
-        except (ImportError, AttributeError) as exc:
-            logger.debug(
-                "Watson Orchestrate ADK instrumentation skipped %s.%s: %s",
-                module_name,
-                class_name,
-                exc,
-            )
-            return 0
-        return patcher(cls)
+        return tracer is None or bool(getattr(tracer, "is_enabled", True))
 
     def activate(self) -> None:
-        """Activate native Watson Orchestrate ADK instrumentation."""
-        if self._is_instrumented:
-            return
-
-        if not self._is_respan_tracing_enabled():
-            logger.info(
-                "Watson Orchestrate ADK instrumentation skipped because Respan tracing is disabled"
-            )
-            return
-
-        patched_count = 0
-        try:
-            patched_count += self._patch_optional_class(
-                module_name=PYTHON_TOOL_MODULE,
-                class_name=PYTHON_TOOL_CLASS,
-                patcher=lambda cls: int(
-                    _patch_method(cls, TOOL_CALL_METHOD, _wrap_tool_call)
-                ),
-            )
-            patched_count += self._patch_optional_class(
-                module_name=RUN_CLIENT_MODULE,
-                class_name=RUN_CLIENT_CLASS,
-                patcher=self._patch_run_client,
-            )
-            patched_count += self._patch_optional_class(
-                module_name=AGENT_BUILDER_CLIENT_MODULE,
-                class_name=AGENT_BUILDER_CLIENT_CLASS,
-                patcher=self._patch_chat_client,
-            )
-            patched_count += self._patch_optional_class(
-                module_name=CPE_CLIENT_MODULE,
-                class_name=CPE_CLIENT_CLASS,
-                patcher=self._patch_cpe_client,
-            )
-            patched_count += self._patch_optional_class(
-                module_name=WATSONX_AI_CLIENT_MODULE,
-                class_name=WATSONX_AI_CLIENT_CLASS,
-                patcher=self._patch_llm_client,
-            )
-        except Exception:
-            _restore_methods()
-            self._is_instrumented = False
-            logger.exception("Failed to activate Watson Orchestrate ADK instrumentation")
-            return
-
-        self._is_instrumented = patched_count > 0
-        if not self._is_instrumented:
-            logger.warning(
-                "Watson Orchestrate ADK instrumentation found no supported SDK classes to patch"
-            )
-            return
-        logger.info("Watson Orchestrate ADK instrumentation activated")
-
-    def _patch_run_client(self, cls: type[Any]) -> int:
-        patched = 0
-        for method_name in RUN_METHODS:
-            patched += int(
-                _patch_method(
-                    cls,
-                    method_name,
-                    lambda original, method_name=method_name: _wrap_agent_run(
-                        method_name=method_name,
-                        original=original,
+        global _ACTIVATION_COUNT
+        with _LOCK:
+            if self._is_instrumented:
+                return
+            if not self._is_respan_tracing_enabled():
+                return
+            if _ACTIVATION_COUNT:
+                _ACTIVATION_COUNT += 1
+                self._is_instrumented = True
+                return
+            installed: list[_Patch] = []
+            try:
+                tool = _optional_class(PYTHON_TOOL_MODULE, PYTHON_TOOL_CLASS)
+                if tool is not None:
+                    _install(installed, tool, TOOL_CALL_METHOD, _wrap_tool_call)
+                run_client = _optional_class(RUN_CLIENT_MODULE, RUN_CLIENT_CLASS)
+                if run_client is not None:
+                    for method_name in RUN_METHODS:
+                        _install(
+                            installed,
+                            run_client,
+                            method_name,
+                            lambda original, name=method_name: _wrap_agent_run(
+                                name, original
+                            ),
+                        )
+                    for method_name in ASYNC_RUN_METHODS:
+                        _install(
+                            installed,
+                            run_client,
+                            method_name,
+                            lambda original, name=method_name: _wrap_async_agent_run(
+                                name, original
+                            ),
+                        )
+                for module_name, class_name, methods in (
+                    (
+                        AGENT_BUILDER_CLIENT_MODULE,
+                        AGENT_BUILDER_CLIENT_CLASS,
+                        CHAT_METHODS,
                     ),
-                )
-            )
-        for method_name in ASYNC_RUN_METHODS:
-            patched += int(
-                _patch_method(
-                    cls,
-                    method_name,
-                    lambda original, method_name=method_name: _wrap_async_agent_run(
-                        method_name=method_name,
-                        original=original,
+                    (
+                        CPE_CLIENT_MODULE,
+                        CPE_CLIENT_CLASS,
+                        (*CHAT_METHODS, *CHAT_REFINEMENT_METHODS),
                     ),
-                )
-            )
-        return patched
-
-    def _patch_chat_client(self, cls: type[Any]) -> int:
-        patched = 0
-        for method_name in CHAT_METHODS:
-            patched += int(
-                _patch_method(
-                    cls,
-                    method_name,
-                    lambda original, method_name=method_name: _wrap_chat_method(
-                        method_name=method_name,
-                        original=original,
+                    (
+                        WATSONX_AI_CLIENT_MODULE,
+                        WATSONX_AI_CLIENT_CLASS,
+                        LLM_CHAT_METHODS,
                     ),
+                ):
+                    cls = _optional_class(module_name, class_name)
+                    if cls is None:
+                        continue
+                    for method_name in methods:
+                        _install(
+                            installed,
+                            cls,
+                            method_name,
+                            lambda original, name=method_name: _wrap_chat_method(
+                                name, original
+                            ),
+                        )
+            except BaseException:
+                _restore_owned(installed)
+                raise
+            if not installed:
+                logger.warning(
+                    "Watson Orchestrate ADK instrumentation found no supported SDK classes"
                 )
-            )
-        return patched
-
-    def _patch_cpe_client(self, cls: type[Any]) -> int:
-        patched = 0
-        for method_name in (*CHAT_METHODS, *CHAT_REFINEMENT_METHODS):
-            patched += int(
-                _patch_method(
-                    cls,
-                    method_name,
-                    lambda original, method_name=method_name: _wrap_chat_method(
-                        method_name=method_name,
-                        original=original,
-                    ),
-                )
-            )
-        return patched
-
-    def _patch_llm_client(self, cls: type[Any]) -> int:
-        patched = 0
-        for method_name in LLM_CHAT_METHODS:
-            patched += int(
-                _patch_method(
-                    cls,
-                    method_name,
-                    lambda original, method_name=method_name: _wrap_chat_method(
-                        method_name=method_name,
-                        original=original,
-                    ),
-                )
-            )
-        return patched
+                return
+            _PATCHES[:] = installed
+            _ACTIVATION_COUNT = 1
+            self._is_instrumented = True
 
     def deactivate(self) -> None:
-        """Deactivate the instrumentation and restore original SDK methods."""
-        if self._is_instrumented:
-            _restore_methods()
-        self._is_instrumented = False
-        logger.info("Watson Orchestrate ADK instrumentation deactivated")
+        global _ACTIVATION_COUNT
+        with _LOCK:
+            if not self._is_instrumented:
+                return
+            self._is_instrumented = False
+            _ACTIVATION_COUNT = max(0, _ACTIVATION_COUNT - 1)
+            if _ACTIVATION_COUNT:
+                return
+            _restore_owned(_PATCHES)
+            _PATCHES.clear()
+
+
+def _restore_methods() -> None:
+    """Compatibility test helper; restore only wrappers owned by this runtime."""
+    global _ACTIVATION_COUNT
+    with _LOCK:
+        _restore_owned(_PATCHES)
+        _PATCHES.clear()
+        _ACTIVATION_COUNT = 0

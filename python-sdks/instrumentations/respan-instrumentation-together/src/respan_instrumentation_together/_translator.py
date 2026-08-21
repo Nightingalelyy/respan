@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Iterable
+import math
+from itertools import islice
+from typing import Any
 
 from respan_instrumentation_together._constants import (
     ARGUMENTS_KEY,
-    ASSISTANT_ROLE,
     B64_JSON_KEY,
     CHOICES_KEY,
     CONTENT_KEY,
@@ -35,74 +36,51 @@ from respan_instrumentation_together._constants import (
     RESULTS_KEY,
     ROLE_KEY,
     TEXT_KEY,
-    TOOLS_KEY,
     TOOL_CALL_ID_KEY,
     TOOL_CALLS_KEY,
     TYPE_KEY,
     URL_KEY,
     USAGE_KEY,
 )
-from respan_sdk.utils.serialization import serialize_value
+from respan_instrumentation_together._serialization import (
+    json_dumps,
+    safe_text,
+    to_jsonable,
+)
 
 
 def safe_json(value: Any) -> str:
-    """JSON-encode a value after applying the SDK serializer."""
-    try:
-        return json.dumps(serialize_value(value=value), default=str)
-    except Exception:
-        return str(value)
+    """JSON-encode a value with the instrumentation capture policy."""
+    return json_dumps(value)
 
 
 def to_json_attr(value: Any) -> str:
     if isinstance(value, str):
-        return value
+        return safe_text(value)
     return safe_json(value=value)
 
 
 def field(value: Any, name: str, default: Any = None) -> Any:
     if isinstance(value, dict):
         return value.get(name, default)
-    return getattr(value, name, default)
+    try:
+        return getattr(value, name, default)
+    except BaseException:  # noqa: BLE001
+        return default
 
 
 def _is_omitted(value: Any) -> bool:
     value_type = type(value)
-    return (
-        value_type.__module__.startswith("together.")
-        and value_type.__name__ in {"Omit", "NotGiven"}
-    )
+    return value_type.__module__.startswith("together.") and value_type.__name__ in {
+        "Omit",
+        "NotGiven",
+    }
 
 
 def dump_value(value: Any) -> Any:
-    if value is None or _is_omitted(value):
+    if _is_omitted(value):
         return None
-    if isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, dict):
-        return {
-            str(key): dump_value(nested_value)
-            for key, nested_value in value.items()
-            if dump_value(nested_value) is not None
-        }
-    if isinstance(value, (list, tuple, set)):
-        return [
-            dumped_item
-            for item in value
-            if (dumped_item := dump_value(item)) is not None
-        ]
-    to_dict = getattr(value, "to_dict", None)
-    if callable(to_dict):
-        try:
-            return to_dict()
-        except Exception:
-            pass
-    model_dump = getattr(value, "model_dump", None)
-    if callable(model_dump):
-        try:
-            return model_dump(exclude_none=True)
-        except TypeError:
-            return model_dump()
-    return serialize_value(value=value)
+    return to_jsonable(value)
 
 
 def sequence_value(value: Any) -> list[Any]:
@@ -115,8 +93,8 @@ def sequence_value(value: Any) -> list[Any]:
     if isinstance(value, (str, bytes, dict)):
         return [value]
     try:
-        return list(value)
-    except TypeError:
+        return list(islice(iter(value), 50))
+    except (TypeError, RuntimeError):
         return [value]
 
 
@@ -125,7 +103,7 @@ def normalize_message(message: Any) -> dict[str, Any]:
     role = field(message, ROLE_KEY)
     content = field(message, CONTENT_KEY)
     if role is not None:
-        normalized[ROLE_KEY] = role
+        normalized[ROLE_KEY] = safe_text(role, max_bytes=256)
     if content is not None:
         normalized[CONTENT_KEY] = dump_value(content)
 
@@ -139,7 +117,7 @@ def normalize_message(message: Any) -> dict[str, Any]:
 
     tool_call_id = field(message, TOOL_CALL_ID_KEY)
     if tool_call_id:
-        normalized[TOOL_CALL_ID_KEY] = str(tool_call_id)
+        normalized[TOOL_CALL_ID_KEY] = safe_text(tool_call_id, max_bytes=256)
 
     return normalized
 
@@ -155,7 +133,7 @@ def normalize_function_call(function_call: Any) -> dict[str, Any]:
     arguments = field(function_call, ARGUMENTS_KEY)
     result: dict[str, Any] = {}
     if name:
-        result[NAME_KEY] = str(name)
+        result[NAME_KEY] = safe_text(name, max_bytes=256)
     if arguments is not None:
         result[ARGUMENTS_KEY] = (
             arguments if isinstance(arguments, str) else safe_json(arguments)
@@ -175,7 +153,7 @@ def _normalize_tool_call(tool_call: Any) -> dict[str, Any]:
     }
     call_id = field(tool_call, ID_KEY)
     if call_id:
-        normalized[ID_KEY] = str(call_id)
+        normalized[ID_KEY] = safe_text(call_id, max_bytes=256)
     return normalized
 
 
@@ -204,15 +182,20 @@ def normalize_tools(tools: Any) -> list[dict[str, Any]]:
         function_name = field(function, NAME_KEY)
         if not function_name:
             continue
-        normalized_function: dict[str, Any] = {NAME_KEY: str(function_name)}
+        normalized_function: dict[str, Any] = {
+            NAME_KEY: safe_text(function_name, max_bytes=256)
+        }
         description = field(function, DESCRIPTION_KEY)
         if description is not None:
-            normalized_function[DESCRIPTION_KEY] = str(description)
+            normalized_function[DESCRIPTION_KEY] = safe_text(description)
         parameters = field(function, PARAMETERS_KEY)
         if parameters is not None:
             normalized_function[PARAMETERS_KEY] = dump_value(parameters)
         normalized_tools.append(
-            {TYPE_KEY: str(tool_type), FUNCTION_KEY: normalized_function}
+            {
+                TYPE_KEY: safe_text(tool_type, max_bytes=64),
+                FUNCTION_KEY: normalized_function,
+            }
         )
     return normalized_tools
 
@@ -288,7 +271,11 @@ def text_completion_output(response_or_chunks: Any) -> str:
 
 def extract_tool_calls(response_or_chunks: Any) -> list[dict[str, Any]]:
     raw_calls: list[Any] = []
-    chunks = response_or_chunks if isinstance(response_or_chunks, list) else [response_or_chunks]
+    chunks = (
+        response_or_chunks
+        if isinstance(response_or_chunks, list)
+        else [response_or_chunks]
+    )
     for response in chunks:
         choice = _first_choice(response)
         message = _choice_message(choice)
@@ -316,7 +303,11 @@ def extract_tool_calls(response_or_chunks: Any) -> list[dict[str, Any]]:
 
 
 def finish_reason(response_or_chunks: Any) -> str | None:
-    chunks = response_or_chunks if isinstance(response_or_chunks, list) else [response_or_chunks]
+    chunks = (
+        response_or_chunks
+        if isinstance(response_or_chunks, list)
+        else [response_or_chunks]
+    )
     for response in reversed(chunks):
         for choice in reversed(field(response, CHOICES_KEY, []) or []):
             reason = field(choice, FINISH_REASON_KEY)
@@ -326,7 +317,11 @@ def finish_reason(response_or_chunks: Any) -> str | None:
 
 
 def extract_usage(response_or_chunks: Any) -> dict[str, int]:
-    chunks = response_or_chunks if isinstance(response_or_chunks, list) else [response_or_chunks]
+    chunks = (
+        response_or_chunks
+        if isinstance(response_or_chunks, list)
+        else [response_or_chunks]
+    )
     for response in reversed(chunks):
         usage = field(response, USAGE_KEY)
         if usage is None:
@@ -349,18 +344,42 @@ def embedding_input(request_kwargs: dict[str, Any]) -> str:
     return to_json_attr(request_kwargs.get(INPUT_KEY))
 
 
-def embedding_summary(response: Any) -> dict[str, Any]:
-    data = field(response, DATA_KEY, []) or []
-    first_embedding = None
-    for item in data:
-        embedding = field(item, EMBEDDING_KEY)
-        if isinstance(embedding, list):
-            first_embedding = embedding
-            break
-    summary: dict[str, Any] = {"embedding_count": len(data)}
-    if first_embedding is not None:
-        summary["embedding_dimensions"] = len(first_embedding)
-    return summary
+def embedding_output(response: Any) -> str:
+    """Retain complete numeric vectors as required by the span contract."""
+    entries: list[dict[str, Any]] = []
+    data = field(response, DATA_KEY, [])
+    try:
+        iterator = iter(data)
+    except TypeError:
+        iterator = iter(())
+    for item in iterator:
+        raw_embedding = field(item, EMBEDDING_KEY)
+        if not isinstance(raw_embedding, (list, tuple)):
+            continue
+        vector: list[int | float] = []
+        valid = True
+        for value in raw_embedding:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                valid = False
+                break
+            if isinstance(value, float) and not math.isfinite(value):
+                valid = False
+                break
+            vector.append(value)
+        if not valid:
+            continue
+        entry: dict[str, Any] = {EMBEDDING_KEY: vector}
+        index = field(item, INDEX_KEY)
+        if isinstance(index, int) and not isinstance(index, bool):
+            entry[INDEX_KEY] = index
+        entries.append(entry)
+    return json.dumps(
+        {DATA_KEY: entries},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
 
 
 def rerank_input(request_kwargs: dict[str, Any]) -> str:
@@ -416,7 +435,9 @@ def image_output(response: Any) -> str:
                 "present": bool(value),
                 "length": len(value) if isinstance(value, str) else 0,
             }
-        images.append({key: value for key, value in normalized.items() if value is not None})
+        images.append(
+            {key: value for key, value in normalized.items() if value is not None}
+        )
     return safe_json({"image_count": len(images), "images": images})
 
 
@@ -425,4 +446,4 @@ def request_model(request_kwargs: dict[str, Any], response: Any = None) -> str |
     if isinstance(model, str) and model:
         return model
     response_model = field(response, MODEL_KEY)
-    return response_model if isinstance(response_model, str) and response_model else None
+    return safe_text(response_model, max_bytes=512) if response_model else None
