@@ -6,13 +6,19 @@ import time
 from typing import Any
 
 from opentelemetry.semconv_ai import SpanAttributes
+from respan_sdk.constants.span_attributes import (
+    LLM_USAGE_COMPLETION_TOKENS,
+    LLM_USAGE_PROMPT_TOKENS,
+)
 
 from respan_instrumentation_anthropic._constants import (
     AGENT_MCP_TOOL_USE_EVENT,
     AGENT_MESSAGE_EVENT,
     AGENT_TOOL_USE_EVENTS,
-    ARGUMENTS_KEY,
     ANTHROPIC_MANAGED_AGENT_SPAN_NAME,
+    ARGUMENTS_KEY,
+    CACHE_CREATION_INPUT_TOKENS_KEY,
+    CACHE_READ_INPUT_TOKENS_KEY,
     CLOSE_METHOD_NAME,
     CONTENT_KEY,
     FUNCTION_KEY,
@@ -25,31 +31,23 @@ from respan_instrumentation_anthropic._constants import (
     MCP_SERVER_KEY,
     MCP_SERVER_NAME_KEY,
     MODEL_REQUEST_END_EVENT,
-    NAME_KEY,
     MODEL_USAGE_KEY,
+    NAME_KEY,
     OUTPUT_TOKENS_KEY,
     ROLE_KEY,
     SESSION_ERROR_EVENT,
     SESSION_STATUS_IDLE_EVENT,
     SESSION_STATUS_RUNNING_EVENT,
     STOP_REASON_KEY,
-    TOOL_CALLS_OVERRIDE,
     TYPE_KEY,
-    USER_ROLE,
     USER_MESSAGE_EVENT,
-    CACHE_CREATION_INPUT_TOKENS_KEY,
-    CACHE_READ_INPUT_TOKENS_KEY,
+    USER_ROLE,
 )
 from respan_instrumentation_anthropic._messages import (
     _build_base_chat_attrs,
     _emit_span,
     _normalize_content_block,
     _safe_json,
-)
-from respan_sdk.constants.span_attributes import (
-    LLM_USAGE_COMPLETION_TOKENS,
-    LLM_USAGE_PROMPT_TOKENS,
-    RESPAN_SPAN_TOOL_CALLS,
 )
 
 
@@ -162,8 +160,8 @@ class _ManagedAgentTurnTracker:
             )
 
         if self.tool_calls:
-            attrs[RESPAN_SPAN_TOOL_CALLS] = _safe_json(value=self.tool_calls)
-            attrs[TOOL_CALLS_OVERRIDE] = self.tool_calls
+            attrs["gen_ai.completion.0.tool_calls"] = _safe_json(value=self.tool_calls)
+            attrs["gen_ai.completion.0.role"] = "assistant"
 
         if stop_reason:
             attrs[MANAGED_AGENT_STOP_REASON_ATTR] = stop_reason

@@ -210,6 +210,7 @@ def _wrap_sync_method(
         input_value = _extract_input_value(args=input_args, kwargs=kwargs)
         started_at_ns = time.time_ns()
         run_context = create_agno_run_context(
+            target=target,
             target_kind=target_kind,
             started_at_ns=started_at_ns,
         )
@@ -265,6 +266,7 @@ def _wrap_async_method(
         input_value = _extract_input_value(args=input_args, kwargs=kwargs)
         started_at_ns = time.time_ns()
         run_context = create_agno_run_context(
+            target=target,
             target_kind=target_kind,
             started_at_ns=started_at_ns,
         )

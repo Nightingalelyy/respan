@@ -5,6 +5,7 @@ from types import ModuleType
 from types import SimpleNamespace
 
 import pytest
+from opentelemetry import context as context_api
 from opentelemetry.semconv_ai import SpanAttributes
 
 from respan_instrumentation_agno import AgnoInstrumentor
@@ -283,6 +284,7 @@ def test_sync_run_emits_agent_chat_and_tool_spans(captured_spans):
     assert root_attributes[RESPAN_LOG_TYPE] == "agent"
     assert root_attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "Weather Agent"
     assert root_attributes[SpanAttributes.TRACELOOP_ENTITY_PATH] == ""
+    assert root_attributes[SpanAttributes.TRACELOOP_WORKFLOW_NAME] == "Weather Agent"
     assert root_attributes[AGNO_RUN_ID_ATTR] == "run_123"
     assert root_attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT] == (
         '{"input_content":"What is the weather?"}'
@@ -294,18 +296,23 @@ def test_sync_run_emits_agent_chat_and_tool_spans(captured_spans):
     assert chat_attributes[SpanAttributes.LLM_REQUEST_TYPE] == "chat"
     assert chat_attributes[SpanAttributes.LLM_REQUEST_MODEL] == "gpt-4o-mini"
     assert chat_attributes[SpanAttributes.LLM_SYSTEM] == "openai"
+    assert chat_attributes[SpanAttributes.TRACELOOP_WORKFLOW_NAME] == "Weather Agent"
     assert chat_attributes[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] == 12
     assert chat_attributes[f"{AGNO_PROMPT_PREFIX}0.role"] == "user"
     assert chat_attributes[f"{AGNO_PROMPT_PREFIX}0.content"] == "What is the weather?"
     assert chat_attributes[f"{AGNO_COMPLETION_PREFIX}0.role"] == "assistant"
     assert chat_attributes[f"{AGNO_COMPLETION_PREFIX}0.content"] == "It is sunny."
     assert "gen_ai.completion.0.tool_calls" in chat_attributes
+    assert json.loads(chat_attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT])[
+        "tool_calls"
+    ][0]["function"]["name"] == "lookup_weather"
     assert "tool_calls" not in chat_attributes
     assert "tools" not in chat_attributes
 
     tool_attributes = captured_spans[2].attributes
     assert tool_attributes[RESPAN_LOG_TYPE] == "tool"
     assert tool_attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "lookup_weather"
+    assert tool_attributes[SpanAttributes.TRACELOOP_WORKFLOW_NAME] == "Weather Agent"
     assert tool_attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] == "sunny"
 
 
@@ -390,6 +397,40 @@ def test_team_run_emits_workflow_root(captured_spans):
     root_attributes = captured_spans[0].attributes
     assert root_attributes[RESPAN_LOG_TYPE] == "workflow"
     assert root_attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "Research Team"
+
+
+def test_active_workflow_name_is_preserved_on_all_native_spans(captured_spans):
+    token = context_api.attach(
+        context_api.set_value(
+            SpanAttributes.TRACELOOP_ENTITY_NAME,
+            "agno_parent_workflow",
+        )
+    )
+    try:
+        agent = FakeAgent()
+        run_context = _otel_emitter.create_agno_run_context(
+            target=agent,
+            target_kind=AGNO_TARGET_AGENT,
+            started_at_ns=100,
+        )
+        with _otel_emitter.use_agno_run_context(run_context=run_context):
+            _otel_emitter.emit_agno_run(
+                target=agent,
+                target_kind=AGNO_TARGET_AGENT,
+                input_value="What is the weather?",
+                output=FakeRunOutput(),
+                events=None,
+                started_at_ns=100,
+                ended_at_ns=200,
+            )
+    finally:
+        context_api.detach(token)
+
+    assert len(captured_spans) == 3
+    assert {
+        span.attributes[SpanAttributes.TRACELOOP_WORKFLOW_NAME]
+        for span in captured_spans
+    } == {"agno_parent_workflow"}
 
 
 def test_nested_agent_run_uses_team_trace_context(monkeypatch, captured_spans):

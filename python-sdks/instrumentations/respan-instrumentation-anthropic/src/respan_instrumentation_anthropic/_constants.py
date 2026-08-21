@@ -65,8 +65,6 @@ CACHE_READ_INPUT_TOKENS_KEY = "cache_read_input_tokens"
 
 GEN_AI_COMPLETION_ROLE_ATTR = "gen_ai.completion.0.role"
 GEN_AI_COMPLETION_TOOL_CALLS_ATTR = "gen_ai.completion.0.tool_calls"
-GEN_AI_TOOL_CALL_ID_ATTR = "gen_ai.tool.call.id"
-GEN_AI_TOOL_DEFINITIONS_ATTR = "gen_ai.tool.definitions"
 MANAGED_AGENT_STOP_REASON_ATTR = "respan.managed_agent.stop_reason"
 MANAGED_AGENT_SESSION_ID_ATTR = RESPAN_SESSION_ID
 TOOL_CALLS_OVERRIDE = "tool_calls"

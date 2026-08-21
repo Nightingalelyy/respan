@@ -1,8 +1,8 @@
 import json
 from types import SimpleNamespace
 
-from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
-
+from opentelemetry import context as context_api
+from opentelemetry.semconv_ai import SpanAttributes
 from respan_instrumentation_anthropic import _instrumentation as instrumentation
 from respan_instrumentation_anthropic import _managed_agents as managed_agent_helpers
 from respan_instrumentation_anthropic import _messages as message_helpers
@@ -11,7 +11,6 @@ from respan_sdk.constants.span_attributes import (
     LLM_USAGE_PROMPT_TOKENS,
     RESPAN_SESSION_ID,
 )
-
 
 TRACE_ID = "0123456789abcdef0123456789abcdef"
 SPAN_ID = "fedcba9876543210"
@@ -68,7 +67,9 @@ def test_emit_span_without_active_parent_creates_root(monkeypatch):
         def get_span_context(self):
             return SimpleNamespace(trace_id=0, span_id=0)
 
-    monkeypatch.setattr(message_helpers.trace, "get_current_span", lambda: _InvalidSpan())
+    monkeypatch.setattr(
+        message_helpers.trace, "get_current_span", lambda: _InvalidSpan()
+    )
 
     message_helpers._emit_span({"respan.entity.log_type": "chat"}, start_ns=123)
 
@@ -76,7 +77,7 @@ def test_emit_span_without_active_parent_creates_root(monkeypatch):
     assert captured[0]["parent_id"] is None
 
 
-def test_build_span_attrs_sets_chat_span_kind():
+def test_build_span_attrs_uses_chat_contract_without_auto_span_kind():
     message = SimpleNamespace(
         model="claude-sonnet-4-20250514",
         content=[SimpleNamespace(text="hello")],
@@ -94,18 +95,61 @@ def test_build_span_attrs_sets_chat_span_kind():
     )
 
     assert attrs["respan.entity.log_type"] == "chat"
-    assert attrs[SpanAttributes.TRACELOOP_SPAN_KIND] == LLMRequestTypeValues.CHAT.value
+    assert SpanAttributes.TRACELOOP_SPAN_KIND not in attrs
     assert attrs[SpanAttributes.LLM_USAGE_CACHE_READ_INPUT_TOKENS] == 3
     assert attrs[SpanAttributes.LLM_USAGE_CACHE_CREATION_INPUT_TOKENS] == 4
 
 
-def test_build_error_attrs_sets_chat_span_kind():
+def test_build_error_attrs_uses_chat_contract_without_auto_span_kind():
     attrs = message_helpers._build_error_attrs(
         kwargs={"messages": [{"role": "user", "content": "hi"}]}
     )
 
     assert attrs["respan.entity.log_type"] == "chat"
-    assert attrs[SpanAttributes.TRACELOOP_SPAN_KIND] == LLMRequestTypeValues.CHAT.value
+    assert SpanAttributes.TRACELOOP_SPAN_KIND not in attrs
+
+
+def test_build_attrs_preserves_active_workflow_name():
+    token = context_api.attach(
+        context_api.set_value(
+            SpanAttributes.TRACELOOP_ENTITY_NAME,
+            "python_anthropic_workflow",
+        )
+    )
+    try:
+        attrs = message_helpers._build_error_attrs(
+            kwargs={"messages": [{"role": "user", "content": "hi"}]}
+        )
+    finally:
+        context_api.detach(token)
+
+    assert attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] == "python_anthropic_workflow"
+
+
+def test_emit_error_span_preserves_provider_status_and_falls_back(monkeypatch):
+    captured = []
+    monkeypatch.setattr(
+        instrumentation,
+        "_emit_span",
+        lambda **kwargs: captured.append(kwargs),
+    )
+
+    provider_error = RuntimeError("not found")
+    provider_error.status_code = 404
+    instrumentation._emit_error_span(
+        kwargs={"messages": [{"role": "user", "content": "hi"}]},
+        start_ns=123,
+        exc=provider_error,
+    )
+    instrumentation._emit_error_span(
+        kwargs={"messages": [{"role": "user", "content": "hi"}]},
+        start_ns=456,
+        exc=RuntimeError("local failure"),
+    )
+
+    assert captured[0]["status_code"] == 404
+    assert captured[0]["error_message"] == "not found"
+    assert captured[1]["status_code"] == 500
 
 
 def test_format_input_messages_preserves_tool_blocks():
@@ -224,7 +268,7 @@ def test_build_span_attrs_sets_tool_metadata_overrides():
         message=message,
     )
 
-    assert attrs["tool_calls"] == [
+    expected_tool_calls = [
         {
             "id": TOOL_CALL_ID,
             "type": "function",
@@ -234,7 +278,7 @@ def test_build_span_attrs_sets_tool_metadata_overrides():
             },
         }
     ]
-    assert attrs["tools"] == [
+    expected_tools = [
         {
             "type": "function",
             "function": {
@@ -247,9 +291,10 @@ def test_build_span_attrs_sets_tool_metadata_overrides():
             },
         }
     ]
-    assert attrs["gen_ai.completion.0.tool_calls"] == attrs["tool_calls"]
-    assert json.loads(attrs["respan.span.tool_calls"]) == attrs["tool_calls"]
-    assert json.loads(attrs["respan.span.tools"]) == attrs["tools"]
+    assert json.loads(attrs["gen_ai.completion.0.tool_calls"]) == expected_tool_calls
+    assert json.loads(attrs["llm.request.functions"]) == expected_tools
+    for alias in ("tool_calls", "tools", "respan.span.tool_calls", "respan.span.tools"):
+        assert alias not in attrs
 
 
 def test_emit_message_spans_emits_resolved_child_tool_span(monkeypatch):
@@ -339,22 +384,18 @@ def test_emit_message_spans_emits_resolved_child_tool_span(monkeypatch):
     assert tool_span["trace_id"] == TRACE_ID
     assert tool_span["parent_id"] == first_chat_span["span_id"]
     assert tool_span["attributes"]["respan.entity.log_type"] == "tool"
-    assert tool_span["attributes"]["gen_ai.tool.name"] == WEATHER_TOOL_NAME
-    assert tool_span["attributes"]["traceloop.entity.input"] == WEATHER_TOOL_ARGUMENTS
+    assert json.loads(tool_span["attributes"]["traceloop.entity.input"]) == {
+        "name": WEATHER_TOOL_NAME,
+        "arguments": WEATHER_TOOL_INPUT,
+    }
     assert (
-        tool_span["attributes"]["traceloop.entity.output"]
-        == json.dumps(WEATHER_TOOL_RESULT)
+        json.loads(tool_span["attributes"]["traceloop.entity.output"])
+        == WEATHER_TOOL_RESULT
     )
     assert "gen_ai.system" not in tool_span["attributes"]
-    assert tool_span["attributes"]["tools"] == [
-        {
-            "type": "function",
-            "function": {
-                "name": WEATHER_TOOL_NAME,
-                "parameters": {"type": "object"},
-            },
-        }
-    ]
+    assert not any(key.startswith("gen_ai.tool.") for key in tool_span["attributes"])
+    assert "tools" not in tool_span["attributes"]
+    assert SpanAttributes.TRACELOOP_SPAN_KIND not in tool_span["attributes"]
     assert tool_span["end_time_ns"] == 456
 
 
@@ -411,7 +452,7 @@ def test_managed_agent_tracker_emits_stop_reason_and_tool_calls(monkeypatch):
     assert attrs["traceloop.entity.output"] == "Done."
     assert attrs[LLM_USAGE_PROMPT_TOKENS] == 3
     assert attrs[LLM_USAGE_COMPLETION_TOKENS] == 4
-    assert json.loads(attrs["respan.span.tool_calls"]) == [
+    assert json.loads(attrs["gen_ai.completion.0.tool_calls"]) == [
         {
             "id": TOOL_CALL_ID,
             "type": "function",
@@ -501,7 +542,6 @@ def test_emit_message_spans_marks_failed_tool_span(monkeypatch):
     assert tool_span["attributes"]["status_code"] == 500
 
 
-
 def test_register_pending_tool_calls_prunes_expired_entries(monkeypatch):
     with message_helpers._PENDING_TOOL_CALLS_LOCK:
         message_helpers._PENDING_TOOL_CALLS.clear()
@@ -533,8 +573,9 @@ def test_register_pending_tool_calls_prunes_expired_entries(monkeypatch):
     with message_helpers._PENDING_TOOL_CALLS_LOCK:
         assert (TRACE_ID, "expired_tool") not in message_helpers._PENDING_TOOL_CALLS
         pending_entry = message_helpers._PENDING_TOOL_CALLS[(TRACE_ID, TOOL_CALL_ID)]
-    assert pending_entry["expires_at_ns"] == 5 + message_helpers._PENDING_TOOL_CALL_TTL_NS
-
+    assert (
+        pending_entry["expires_at_ns"] == 5 + message_helpers._PENDING_TOOL_CALL_TTL_NS
+    )
 
 
 def test_activate_rolls_back_partial_patch(monkeypatch):

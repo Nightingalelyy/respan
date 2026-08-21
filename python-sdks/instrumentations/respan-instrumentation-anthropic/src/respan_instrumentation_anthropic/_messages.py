@@ -4,17 +4,32 @@ from __future__ import annotations
 
 import json
 import logging
-from threading import Lock
 import time
+from threading import Lock
 from typing import Any
 
+from opentelemetry import context as context_api
 from opentelemetry import trace
-from opentelemetry.trace.status import StatusCode
 from opentelemetry.semconv_ai import (
     LLMRequestTypeValues,
     SpanAttributes,
-    TraceloopSpanKindValues,
 )
+from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT, LOG_TYPE_TOOL
+from respan_sdk.constants.span_attributes import (
+    GEN_AI_SYSTEM,
+    LLM_REQUEST_MODEL,
+    LLM_REQUEST_TYPE,
+    LLM_USAGE_COMPLETION_TOKENS,
+    LLM_USAGE_PROMPT_TOKENS,
+    RESPAN_LOG_TYPE,
+)
+from respan_sdk.utils.data_processing.id_processing import (
+    format_span_id,
+    format_trace_id,
+    generate_unique_id,
+)
+from respan_sdk.utils.serialization import serialize_value
+from respan_tracing.utils.span_factory import build_readable_span, inject_span
 
 from respan_instrumentation_anthropic._constants import (
     ANTHROPIC_CHAT_SPAN_NAME,
@@ -29,17 +44,15 @@ from respan_instrumentation_anthropic._constants import (
     FUNCTION_TOOL_TYPE,
     GEN_AI_COMPLETION_ROLE_ATTR,
     GEN_AI_COMPLETION_TOOL_CALLS_ATTR,
-    GEN_AI_TOOL_CALL_ID_ATTR,
-    GEN_AI_TOOL_DEFINITIONS_ATTR,
     ID_KEY,
     INPUT_KEY,
     INPUT_SCHEMA_KEY,
     INPUT_TOKENS_KEY,
     IS_ERROR_KEY,
+    MESSAGES_KEY,
     MODEL_KEY,
     NAME_KEY,
     OUTPUT_TOKENS_KEY,
-    MESSAGES_KEY,
     PARAMETERS_KEY,
     PENDING_EXPIRES_AT_NS_KEY,
     PENDING_PARENT_ID_KEY,
@@ -52,38 +65,16 @@ from respan_instrumentation_anthropic._constants import (
     SYSTEM_ROLE,
     TEXT_BLOCK_TYPE,
     TEXT_KEY,
-    TOOLS_KEY,
     TOOL_CALL_ID_KEY,
     TOOL_CALLS_OVERRIDE,
     TOOL_RESULT_BLOCK_TYPE,
-    TOOLS_OVERRIDE,
     TOOL_ROLE,
     TOOL_USE_BLOCK_TYPE,
     TOOL_USE_ID_KEY,
+    TOOLS_KEY,
     TYPE_KEY,
     USAGE_KEY,
 )
-from respan_sdk.constants.llm_logging import LOG_TYPE_CHAT, LOG_TYPE_TOOL
-from respan_sdk.constants.span_attributes import (
-    GEN_AI_SYSTEM,
-    GEN_AI_TOOL_CALL_ARGUMENTS,
-    GEN_AI_TOOL_CALL_RESULT,
-    GEN_AI_TOOL_NAME,
-    LLM_REQUEST_MODEL,
-    LLM_REQUEST_TYPE,
-    LLM_USAGE_COMPLETION_TOKENS,
-    LLM_USAGE_PROMPT_TOKENS,
-    RESPAN_LOG_TYPE,
-    RESPAN_SPAN_TOOL_CALLS,
-    RESPAN_SPAN_TOOLS,
-)
-from respan_sdk.utils.data_processing.id_processing import (
-    format_span_id,
-    format_trace_id,
-    generate_unique_id,
-)
-from respan_sdk.utils.serialization import serialize_value
-from respan_tracing.utils.span_factory import build_readable_span, inject_span
 
 logger = logging.getLogger(__name__)
 
@@ -134,9 +125,7 @@ def _maybe_parse_json_string(value: Any) -> Any:
 def _serialize_content_value(value: Any) -> Any:
     """Serialize Anthropic content while preserving structured blocks."""
     if isinstance(value, list):
-        serialized_parts = [
-            _serialize_content_block(block=block) for block in value
-        ]
+        serialized_parts = [_serialize_content_block(block=block) for block in value]
         non_empty_parts = [
             part for part in serialized_parts if part not in ("", None, [], {})
         ]
@@ -177,7 +166,9 @@ def _serialize_content_block(block: Any) -> Any:
 
             field_value = _block_attr(block=block, attr=field_name, default=None)
             if field_value is not None:
-                serialized_block[field_name] = _serialize_content_value(value=field_value)
+                serialized_block[field_name] = _serialize_content_value(
+                    value=field_value
+                )
         return serialized_block
 
     text_value = _block_attr(block=block, attr=TEXT_KEY, default=None)
@@ -404,9 +395,7 @@ def _format_output(message: Any) -> str:
 
 
 def _extract_tool_calls(message: Any) -> list[dict[str, Any]]:
-    return _extract_tool_calls_from_content(
-        content=getattr(message, CONTENT_KEY, None)
-    )
+    return _extract_tool_calls_from_content(content=getattr(message, CONTENT_KEY, None))
 
 
 def _format_tools(tools: Any) -> list[dict[str, Any]]:
@@ -440,23 +429,33 @@ def _format_tools(tools: Any) -> list[dict[str, Any]]:
     return normalized_tools
 
 
+def _active_workflow_name() -> str | None:
+    workflow_name = context_api.get_value(SpanAttributes.TRACELOOP_WORKFLOW_NAME)
+    if not workflow_name:
+        workflow_name = context_api.get_value(SpanAttributes.TRACELOOP_ENTITY_NAME)
+    return str(workflow_name) if workflow_name else None
+
+
 def _build_base_chat_attrs(span_name: str) -> dict[str, Any]:
-    return {
+    attrs = {
         GEN_AI_SYSTEM: ANTHROPIC_SYSTEM_NAME,
         LLM_REQUEST_TYPE: LLMRequestTypeValues.CHAT.value,
         SpanAttributes.TRACELOOP_ENTITY_NAME: span_name,
         SpanAttributes.TRACELOOP_ENTITY_PATH: span_name,
         RESPAN_LOG_TYPE: LOG_TYPE_CHAT,
-        SpanAttributes.TRACELOOP_SPAN_KIND: LLMRequestTypeValues.CHAT.value,
     }
+    workflow_name = _active_workflow_name()
+    if workflow_name:
+        attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] = workflow_name
+    return attrs
 
 
-def _apply_tool_call_attrs(attrs: dict[str, Any], tool_calls: list[dict[str, Any]]) -> None:
+def _apply_tool_call_attrs(
+    attrs: dict[str, Any], tool_calls: list[dict[str, Any]]
+) -> None:
     if not tool_calls:
         return
-    attrs[RESPAN_SPAN_TOOL_CALLS] = _safe_json(value=tool_calls)
-    attrs[TOOL_CALLS_OVERRIDE] = tool_calls
-    attrs[GEN_AI_COMPLETION_TOOL_CALLS_ATTR] = tool_calls
+    attrs[GEN_AI_COMPLETION_TOOL_CALLS_ATTR] = _safe_json(value=tool_calls)
     attrs[GEN_AI_COMPLETION_ROLE_ATTR] = ASSISTANT_ROLE
 
 
@@ -465,9 +464,7 @@ def _apply_tool_definition_attrs(
 ) -> None:
     if not tools:
         return
-    attrs[RESPAN_SPAN_TOOLS] = _safe_json(value=tools)
-    attrs[TOOLS_OVERRIDE] = tools
-    attrs[GEN_AI_TOOL_DEFINITIONS_ATTR] = _safe_json(value=tools)
+    attrs[SpanAttributes.LLM_REQUEST_FUNCTIONS] = _safe_json(value=tools)
 
 
 def _build_span_attrs(kwargs: dict[str, Any], message: Any) -> dict[str, Any]:
@@ -491,9 +488,7 @@ def _build_span_attrs(kwargs: dict[str, Any], message: Any) -> dict[str, Any]:
         attrs[LLM_USAGE_PROMPT_TOKENS] = getattr(usage, INPUT_TOKENS_KEY, 0)
         attrs[LLM_USAGE_COMPLETION_TOKENS] = getattr(usage, OUTPUT_TOKENS_KEY, 0)
         cache_read_input_tokens = getattr(usage, CACHE_READ_INPUT_TOKENS_KEY, 0)
-        cache_creation_input_tokens = getattr(
-            usage, CACHE_CREATION_INPUT_TOKENS_KEY, 0
-        )
+        cache_creation_input_tokens = getattr(usage, CACHE_CREATION_INPUT_TOKENS_KEY, 0)
         if cache_read_input_tokens:
             attrs[SpanAttributes.LLM_USAGE_CACHE_READ_INPUT_TOKENS] = (
                 cache_read_input_tokens
@@ -560,6 +555,7 @@ def _resolve_injected_trace_parent_ids() -> tuple[str, str | None]:
     if trace_id is None:
         trace_id = _generate_trace_id()
     return trace_id, parent_id
+
 
 def _prune_expired_pending_tool_calls(*, now_ns: int | None = None) -> None:
     expiration_cutoff_ns = now_ns if now_ns is not None else time.time_ns()
@@ -683,19 +679,23 @@ def _emit_tool_span(
         return
 
     tool_input = function.get(ARGUMENTS_KEY, "")
+    canonical_input = _safe_json(
+        value={
+            NAME_KEY: tool_name,
+            ARGUMENTS_KEY: _maybe_parse_json_string(value=tool_input),
+        }
+    )
+    canonical_output = _safe_json(value=_maybe_parse_json_string(value=tool_output))
     attrs = {
-        GEN_AI_TOOL_NAME: tool_name,
-        GEN_AI_TOOL_CALL_ARGUMENTS: tool_input,
-        GEN_AI_TOOL_CALL_RESULT: tool_output,
-        GEN_AI_TOOL_CALL_ID_ATTR: tool_call.get(ID_KEY, ""),
         SpanAttributes.TRACELOOP_ENTITY_NAME: tool_name,
         SpanAttributes.TRACELOOP_ENTITY_PATH: tool_name,
-        SpanAttributes.TRACELOOP_ENTITY_INPUT: tool_input,
-        SpanAttributes.TRACELOOP_ENTITY_OUTPUT: tool_output,
+        SpanAttributes.TRACELOOP_ENTITY_INPUT: canonical_input,
+        SpanAttributes.TRACELOOP_ENTITY_OUTPUT: canonical_output,
         RESPAN_LOG_TYPE: LOG_TYPE_TOOL,
-        TOOLS_OVERRIDE: [tool_definition],
-        SpanAttributes.TRACELOOP_SPAN_KIND: TraceloopSpanKindValues.TOOL.value,
     }
+    workflow_name = _active_workflow_name()
+    if workflow_name:
+        attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] = workflow_name
 
     _emit_span(
         attrs=attrs,
@@ -760,15 +760,15 @@ def _emit_resolved_tool_spans(
             end_ns=end_ns,
             tool_call=tool_call,
             tool_definition=tool_definition,
-            tool_output=_format_tool_result_output(
-                content=tool_result[CONTENT_KEY]
-            ),
+            tool_output=_format_tool_result_output(content=tool_result[CONTENT_KEY]),
             is_error=tool_result[IS_ERROR_KEY],
         )
 
 
 def _emit_message_spans(kwargs: dict[str, Any], message: Any, start_ns: int) -> None:
     """Emit chat spans and resolve tool spans once tool_result content is available."""
+    normalized_tools = _format_tools(tools=kwargs.get(TOOLS_KEY))
+    tool_calls = _extract_tool_calls(message=message)
     attrs = _build_span_attrs(kwargs=kwargs, message=message)
     trace_id, parent_id = _resolve_injected_trace_parent_ids()
     chat_span_id = _generate_span_id()
@@ -782,8 +782,6 @@ def _emit_message_spans(kwargs: dict[str, Any], message: Any, start_ns: int) -> 
         span_id=chat_span_id,
     )
 
-    tools = attrs.get(TOOLS_OVERRIDE)
-    normalized_tools = tools if isinstance(tools, list) else []
     _emit_resolved_tool_spans(
         kwargs=kwargs,
         trace_id=trace_id,
@@ -792,8 +790,7 @@ def _emit_message_spans(kwargs: dict[str, Any], message: Any, start_ns: int) -> 
         tools=normalized_tools,
     )
 
-    tool_calls = attrs.get(TOOL_CALLS_OVERRIDE)
-    if isinstance(tool_calls, list) and tool_calls:
+    if tool_calls:
         _register_pending_tool_calls(
             trace_id=trace_id,
             parent_id=chat_span_id,
