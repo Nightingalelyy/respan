@@ -365,7 +365,9 @@ def _normalize_tool_definition(tool: Any) -> dict[str, Any] | None:
     if not isinstance(name, str) or not name:
         return None
 
-    schema = tool.get(INPUT_SCHEMA_KEY)
+    schema = tool.get("inputSchema")
+    if schema is None:
+        schema = tool.get(INPUT_SCHEMA_KEY)
     if isinstance(schema, Mapping) and "json" in schema:
         schema = schema["json"]
     if schema is None:

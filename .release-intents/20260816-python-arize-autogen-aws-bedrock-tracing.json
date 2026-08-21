@@ -1,0 +1,8 @@
+{
+  "summary": "Repair Arize failure status, AutoGen logical span and tool context, and AWS Bedrock tool schema and provider error tracing",
+  "packages": {
+    "respan-instrumentation-arize": "patch",
+    "respan-instrumentation-autogen": "patch",
+    "respan-instrumentation-aws-bedrock": "patch"
+  }
+}

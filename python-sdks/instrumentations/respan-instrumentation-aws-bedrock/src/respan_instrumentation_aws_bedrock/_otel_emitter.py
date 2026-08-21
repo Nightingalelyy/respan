@@ -168,6 +168,7 @@ def emit_bedrock_span(
         if error_message:
             attrs["error.message"] = error_message
             status_code = status_code if status_code >= 400 else 500
+        attrs["status_code"] = status_code
 
         trace_id, parent_id = _current_trace_parent_ids()
         span = build_readable_span(

@@ -1,3 +1,4 @@
+import json
 import logging
 import sys
 from types import ModuleType, SimpleNamespace
@@ -9,8 +10,11 @@ from respan_instrumentation_autogen import _instrumentation
 from respan_instrumentation_autogen._instrumentation import (
     OPENINFERENCE_AUTOGEN_AGENTCHAT_CLASS_NAMES,
     OPENINFERENCE_AUTOGEN_AGENTCHAT_MODULE,
+    OPENINFERENCE_AUTOGEN_AGENTCHAT_WRAPPERS_MODULE,
     TRACER_PROVIDER_KWARG,
+    _capture_current_agent_output,
     _load_openinference_autogen_agentchat_class,
+    _respan_get_llm_tool_attributes,
 )
 from respan_instrumentation_autogen._native_processor import AutoGenNativeSpanProcessor
 from respan_tracing.core.tracer import RespanTracer
@@ -41,6 +45,35 @@ def _install_fake_modules(monkeypatch, *, class_name: str | None = None):
     openinference_module = ModuleType("openinference")
     openinference_instrumentation_module = ModuleType("openinference.instrumentation")
     openinference_autogen_module = ModuleType(OPENINFERENCE_AUTOGEN_AGENTCHAT_MODULE)
+    openinference_autogen_wrappers_module = ModuleType(
+        OPENINFERENCE_AUTOGEN_AGENTCHAT_WRAPPERS_MODULE
+    )
+
+    def original_tool_extractor(tools):
+        return {"original": tools}
+
+    openinference_autogen_wrappers_module._get_llm_tool_attributes = (
+        original_tool_extractor
+    )
+
+    class FakeAssistantWrapper:
+        def __call__(self, wrapped, instance, args, kwargs):
+            return wrapped(*args, **kwargs)
+
+    class FakeBaseWrapper:
+        def __call__(self, wrapped, instance, args, kwargs):
+            return wrapped(*args, **kwargs)
+
+    openinference_autogen_wrappers_module._AssistantAgentOnMessagesStreamWrapper = (
+        FakeAssistantWrapper
+    )
+    openinference_autogen_wrappers_module._BaseChatAgentOnMessagesStreamWrapper = (
+        FakeBaseWrapper
+    )
+    original_agent_calls = (
+        FakeAssistantWrapper.__call__,
+        FakeBaseWrapper.__call__,
+    )
     setattr(
         openinference_autogen_module,
         selected_class_name,
@@ -59,6 +92,11 @@ def _install_fake_modules(monkeypatch, *, class_name: str | None = None):
         OPENINFERENCE_AUTOGEN_AGENTCHAT_MODULE,
         openinference_autogen_module,
     )
+    monkeypatch.setitem(
+        sys.modules,
+        OPENINFERENCE_AUTOGEN_AGENTCHAT_WRAPPERS_MODULE,
+        openinference_autogen_wrappers_module,
+    )
 
     monkeypatch.setattr(
         _instrumentation,
@@ -69,6 +107,10 @@ def _install_fake_modules(monkeypatch, *, class_name: str | None = None):
     return SimpleNamespace(
         autogen_instrumentor_class=FakeAutogenAgentChatInstrumentor,
         openinference_instrumentor_class=FakeOpenInferenceInstrumentor,
+        wrappers_module=openinference_autogen_wrappers_module,
+        original_tool_extractor=original_tool_extractor,
+        agent_wrapper_classes=(FakeAssistantWrapper, FakeBaseWrapper),
+        original_agent_calls=original_agent_calls,
     )
 
 
@@ -125,12 +167,82 @@ def test_activate_uses_openinference_autogen_defaults(
     assert delegate.kwargs == {}
     assert delegate.is_activated is True
     assert instrumentor._is_instrumented is True
+    assert (
+        fake.wrappers_module._get_llm_tool_attributes
+        is _respan_get_llm_tool_attributes
+    )
+    assert tuple(
+        wrapper_class.__call__ for wrapper_class in fake.agent_wrapper_classes
+    ) != fake.original_agent_calls
 
     instrumentor.deactivate()
 
     assert delegate.is_deactivated is True
     assert instrumentor._is_instrumented is False
+    assert (
+        fake.wrappers_module._get_llm_tool_attributes
+        is fake.original_tool_extractor
+    )
+    assert tuple(
+        wrapper_class.__call__ for wrapper_class in fake.agent_wrapper_classes
+    ) == fake.original_agent_calls
     assert fake_tracer_provider._active_span_processor._span_processors == ("exporter",)
+
+
+def test_current_autogen_tool_schema_mapping_is_preserved() -> None:
+    from openinference.semconv.trace import SpanAttributes, ToolAttributes
+
+    attributes = _respan_get_llm_tool_attributes(
+        [
+            {
+                "name": "estimate_latency",
+                "description": "Estimate API latency.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "service": {"type": "string"},
+                        "requests_per_minute": {"type": "integer"},
+                    },
+                    "required": ["service", "requests_per_minute"],
+                },
+            }
+        ]
+    )
+
+    key = f"{SpanAttributes.LLM_TOOLS}.0.{ToolAttributes.TOOL_JSON_SCHEMA}"
+    schema = json.loads(attributes[key])
+    assert schema["name"] == "estimate_latency"
+    assert schema["parameters"]["properties"]["service"] == {"type": "string"}
+    assert schema["parameters"]["required"] == [
+        "service",
+        "requests_per_minute",
+    ]
+
+
+def test_agent_response_is_captured_while_agent_span_is_current(monkeypatch) -> None:
+    from autogen_agentchat.base import Response
+    from autogen_agentchat.messages import TextMessage
+
+    class FakeSpan:
+        def __init__(self) -> None:
+            self.attributes = {}
+
+        def set_attributes(self, attributes) -> None:
+            self.attributes.update(attributes)
+
+    span = FakeSpan()
+    monkeypatch.setattr(_instrumentation.trace, "get_current_span", lambda: span)
+
+    _capture_current_agent_output(
+        Response(
+            chat_message=TextMessage(
+                content="final answer",
+                source="assistant",
+            )
+        )
+    )
+
+    assert "final answer" in span.attributes["output.value"]
 
 
 def test_activate_passes_custom_openinference_kwargs(monkeypatch, fake_tracer_provider):
