@@ -1,0 +1,6 @@
+{
+  "summary": "Fix CLI tracing onboarding so Vercel AI SDK projects install and activate the explicit Vercel instrumentation, enable AI SDK telemetry, and retain the behavior in the packaged skill.",
+  "packages": {
+    "@respan/cli": "patch"
+  }
+}
