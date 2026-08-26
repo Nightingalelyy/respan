@@ -30,20 +30,20 @@ The API key is stored in `.env` as `RESPAN_API_KEY`.
 
 **Before analyzing anything, ask the user which setup they want.** This is the first question — the two branches diverge immediately.
 
-1. **Auto** — the fastest path. Install the core SDK and add `Respan()` (one line). Every LLM call from a supported direct SDK — OpenAI, Anthropic, Azure OpenAI, Bedrock, Vertex, Cohere, Together, Gemini, LiteLLM — is automatically captured as a flat span. **No decorators and no framework instrumentor, even if a framework is detected.** Best for a quick start or a live demo: traces flowing in under two minutes.
+1. **Auto** — the fastest working path. For a supported direct SDK, install the core SDK and add `Respan()` (one line) to capture flat LLM spans. The Vercel AI SDK is an explicit-only exception: Auto must also add `@respan/instrumentation-vercel` and `VercelAIInstrumentor`, but still adds no decorators or manual workflow wrappers. Best for a quick start or a live demo: traces flowing in under two minutes.
 2. **Full** — structured setup. Adds framework-specific instrumentation and/or workflow structure on top:
    - **Explicit instrumentor** — for agent frameworks (LangChain, CrewAI, OpenAI Agents, Claude Agent SDK, LlamaIndex, Haystack, …) so the framework's agent / tool / chain structure is captured.
    - **Decorators** — wrap the user's own functions with `@workflow` / `@task` for nested spans.
 
 Follow only the branch the user picks; skip the other one.
 
-> **Frameworks under Auto:** Auto never installs a framework instrumentor. If the app uses a framework (LangChain, CrewAI, an agents SDK) and the user picks Auto, they get only the flat LLM spans the underlying direct SDK emits — no agent / tool / chain structure. Capturing framework structure requires Full.
+> **Frameworks under Auto:** Auto normally does not install a framework instrumentor. If the app uses a framework (LangChain, CrewAI, an agents SDK), Auto captures only spans from a supported underlying direct SDK. **Direct Vercel AI SDK usage is different:** the Respan facade deliberately does not auto-discover it, and AI SDK calls are not covered by core-only setup. If the project directly calls the `ai` package and no higher-level framework owns its AI SDK telemetry, follow the Vercel branch below in both Auto and Full.
 
 ---
 
 ### Auto path
 
-**A1. Detect language and package manager** — `package.json` (JS/TS) or `pyproject.toml` / `requirements.txt` (Python).
+**A1. Detect language, package manager, and integration** — inspect `package.json` and source imports for JS/TS, or `pyproject.toml` / `requirements.txt` for Python. Before choosing core-only initialization, check whether the JS/TS project directly imports and calls the `ai` package (Vercel AI SDK). Apply the priority rule first: if a higher-level integration owns AI SDK telemetry, use that integration instead of also adding Vercel instrumentation. For example, an Eve app must use `EveInstrumentor`; do not activate `VercelAIInstrumentor` or another `@ai-sdk/otel` bridge alongside it.
 
 **A2. Install the core SDK** (pin the exact current version):
 ```bash
@@ -53,6 +53,12 @@ pip install respan-ai
 # TypeScript
 npm install @respan/respan
 ```
+
+If the project uses Vercel AI SDK directly, fetch and follow its [integration doc](https://respan.ai/docs/integrations/vercel-ai-sdk.md), and pin exact compatible versions of:
+
+- `@respan/respan`
+- `@respan/instrumentation-vercel`
+- `@ai-sdk/otel` when the installed `ai` major version is 7 (AI SDK 4 through 6 do not require this adapter)
 
 **A3. Add initialization code** at the top of the entrypoint, before any LLM client is created:
 ```python
@@ -67,7 +73,33 @@ const respan = new Respan();
 await respan.initialize();
 ```
 
-Do **not** add decorators or a framework instrumentor. Go straight to **Verify**.
+For a Vercel AI SDK project, use its required explicit instrumentor instead of the core-only TypeScript initialization above:
+
+```typescript
+import { Respan } from "@respan/respan";
+import { VercelAIInstrumentor } from "@respan/instrumentation-vercel";
+
+const respan = new Respan({
+  instrumentations: [new VercelAIInstrumentor()],
+});
+await respan.initialize();
+```
+
+If the project already has a `Respan` instance, merge `VercelAIInstrumentor` into its existing `instrumentations` list instead of creating a second instance. Preserve other explicit instrumentors that cover genuinely separate direct-SDK calls; do not add a provider instrumentor solely for calls made through Vercel AI SDK.
+
+If the application already registers its own compatible `@ai-sdk/otel` integration, construct `VercelAIInstrumentor({ autoRegisterAISDKTelemetry: false })` so Respan translates the spans without claiming a second registration. For Next.js, follow the integration doc's root `instrumentation.ts` `register()` placement and `serverExternalPackages` configuration; keep tracing on the server runtime, not an Edge or browser path.
+
+Also enable Vercel telemetry on every AI SDK operation. Use the option that matches the installed AI SDK major version:
+
+```typescript
+// AI SDK 7
+telemetry: { isEnabled: true }
+
+// AI SDK 4 through 6
+experimental_telemetry: { isEnabled: true }
+```
+
+Do **not** add decorators. For non-Vercel Auto setups, do not add a framework instrumentor. For Vercel, keep the required `VercelAIInstrumentor` and go straight to **Verify**.
 
 ---
 
@@ -102,6 +134,8 @@ Check higher-priority categories first. If a match is found, use that instrument
 | Google ADK | `google-adk` | — | `respan-instrumentation-google-adk` | — | [docs](https://respan.ai/docs/integrations/google-adk.md) |
 
 If a Priority 1 framework is found, use its instrumentation. Do NOT also add Priority 2 instrumentation for the same provider.
+
+For direct Vercel AI SDK usage, the explicit `VercelAIInstrumentor` and per-operation telemetry option are required in both Auto and Full. Never replace them with core-only `new Respan()` setup, and never stack them with a higher-level integration that already owns AI SDK telemetry.
 
 **LangChain / LangGraph setup differs by language** (one package covers both frameworks: `respan-instrumentation-langchain` / `@respan/instrumentation-langchain`). In **Python**, pass `LangChainInstrumentor()` to `Respan(instrumentations=[...])` — it patches the LangChain and LangGraph callback managers globally on init, so every chain, graph, node, LLM, tool, and retriever run is traced **automatically with no per-call setup**. `add_respan_callback(config=...)` is optional and only labels a run with a name, tags, or metadata. In **TypeScript**, create a `LangChainInstrumentor`, pass it to `new Respan({ instrumentations: [...] })`, **and** attach `instrumentor.addCallback(...)` to the **outermost** chain or graph invocation (`.invoke()` / `.stream()`, not inside a node — LangChain/LangGraph propagate it to nested runs); the TypeScript instrumentor does **not** patch globally, so without the callback no spans are emitted. (The other Priority-1 frameworks use the standard `Respan(instrumentations=[XInstrumentor()])` plugin pattern.)
 
