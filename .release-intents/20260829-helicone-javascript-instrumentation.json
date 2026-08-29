@@ -1,0 +1,6 @@
+{
+  "summary": "Add JavaScript instrumentation for Helicone Manual Logger workflows",
+  "packages": {
+    "@respan/instrumentation-helicone": "new"
+  }
+}
