@@ -74,6 +74,18 @@
     },
     {
       "ecosystem": "javascript",
+      "name": "@respan/instrumentation-dify",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-dify",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
+      "name": "@respan/instrumentation-exa",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-exa",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
       "name": "@respan/instrumentation-flue",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-flue",
       "registry": "npm"
@@ -94,6 +106,12 @@
       "ecosystem": "javascript",
       "name": "@respan/instrumentation-mcp",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-mcp",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
+      "name": "@respan/instrumentation-n8n",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-n8n",
       "registry": "npm"
     },
     {
@@ -376,6 +394,12 @@
       "ecosystem": "python",
       "name": "respan-instrumentation-dify",
       "path": "python-sdks/instrumentations/respan-instrumentation-dify",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-exa",
+      "path": "python-sdks/instrumentations/respan-instrumentation-exa",
       "registry": "pypi"
     },
     {

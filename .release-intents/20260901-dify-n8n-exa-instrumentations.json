@@ -1,0 +1,14 @@
+{
+  "summary": "Refresh Dify instrumentation and add current Dify, n8n, and Exa instrumentation packages across supported languages",
+  "packages": {
+    "@respan/instrumentation-dify": "new",
+    "@respan/instrumentation-exa": "new",
+    "@respan/instrumentation-n8n": "new",
+    "@respan/respan": "patch",
+    "@respan/tracing": "minor",
+    "respan-ai": "patch",
+    "respan-instrumentation-dify": "minor",
+    "respan-instrumentation-exa": "new",
+    "respan-tracing": "minor"
+  }
+}
