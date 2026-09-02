@@ -1,6 +1,7 @@
 {
   "summary": "Refresh Dify instrumentation and add current Dify, n8n, and Exa instrumentation packages across supported languages",
   "packages": {
+    "@respan/instrumentation-anthropic": "none",
     "@respan/instrumentation-dify": "new",
     "@respan/instrumentation-exa": "new",
     "@respan/instrumentation-n8n": "new",
