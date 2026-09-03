@@ -1,0 +1,6 @@
+{
+  "summary": "Add Exa JavaScript SDK instrumentation",
+  "packages": {
+    "@respan/instrumentation-exa": "new"
+  }
+}
