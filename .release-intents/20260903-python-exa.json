@@ -1,0 +1,6 @@
+{
+  "summary": "Add Python Exa instrumentation for synchronous and asynchronous client calls",
+  "packages": {
+    "respan-instrumentation-exa": "new"
+  }
+}
