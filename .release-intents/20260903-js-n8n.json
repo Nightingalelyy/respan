@@ -1,6 +1,8 @@
 {
   "summary": "Add standard n8n native OpenTelemetry instrumentation",
   "packages": {
-    "@respan/instrumentation-n8n": "new"
+    "@respan/instrumentation-n8n": "new",
+    "@respan/tracing": "minor",
+    "@respan/respan": "patch"
   }
 }
