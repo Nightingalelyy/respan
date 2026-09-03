@@ -1,0 +1,6 @@
+{
+  "summary": "Register Dify, n8n, and Exa as explicit-only integrations in the JavaScript facade",
+  "packages": {
+    "@respan/respan": "patch"
+  }
+}
