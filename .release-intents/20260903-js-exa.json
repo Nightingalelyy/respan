@@ -1,6 +1,9 @@
 {
-  "summary": "Add Exa JavaScript SDK instrumentation",
+  "summary": "Add Exa JavaScript instrumentation with explicit registration and canonical metadata propagation",
   "packages": {
-    "@respan/instrumentation-exa": "new"
+    "@respan/instrumentation-exa": "new",
+    "@respan/respan": "patch",
+    "@respan/tracing": "minor",
+    "@respan/instrumentation-anthropic": "none"
   }
 }
