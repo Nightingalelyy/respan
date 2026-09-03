@@ -1,0 +1,6 @@
+{
+  "summary": "Add official Dify JavaScript SDK instrumentation",
+  "packages": {
+    "@respan/instrumentation-dify": "new"
+  }
+}
