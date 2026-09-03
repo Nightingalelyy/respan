@@ -1,0 +1,6 @@
+{
+  "summary": "Align Anthropic regression tests with canonical propagated metadata",
+  "packages": {
+    "@respan/instrumentation-anthropic": "none"
+  }
+}
