@@ -1,6 +1,7 @@
 {
-  "summary": "Add official Dify JavaScript SDK instrumentation",
+  "summary": "Add official Dify JavaScript SDK instrumentation and its explicit-only facade registry entry",
   "packages": {
-    "@respan/instrumentation-dify": "new"
+    "@respan/instrumentation-dify": "new",
+    "@respan/respan": "patch"
   }
 }
