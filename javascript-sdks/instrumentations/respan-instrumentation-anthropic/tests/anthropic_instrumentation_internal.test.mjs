@@ -20,6 +20,27 @@ import {
 const captureState = { spans: [] };
 const originalGetTracerProvider = trace.getTracerProvider.bind(trace);
 const contextStorage = new AsyncLocalStorage();
+
+function assertPropagatedAuditMetadata(attributes, expected) {
+  const prefix = "respan.metadata.";
+  const flatEntries = Object.entries(attributes).filter(([key]) =>
+    key.startsWith(prefix),
+  );
+  const canonical = attributes["respan.metadata"];
+  if (canonical !== undefined) {
+    assert.equal(typeof canonical, "string");
+    assert.deepEqual(flatEntries, []);
+    assert.deepEqual(JSON.parse(canonical), expected);
+  } else {
+    assert.deepEqual(
+      Object.fromEntries(
+        flatEntries.map(([key, value]) => [key.slice(prefix.length), value]),
+      ),
+      expected,
+    );
+  }
+}
+
 const contextManager = {
   active() {
     return contextStorage.getStore() ?? ROOT_CONTEXT;
@@ -432,14 +453,10 @@ test("rejecting create calls preserve status and propagated audit attributes", a
   assert.equal(span.attributes["error.message"], "Error: Anthropic model was not found");
   assert.equal(span.attributes["respan.span_params.custom_identifier"], "anthropic-error-case");
   assert.equal(span.attributes["respan.trace.trace_group_identifier"], "anthropic-error-group");
-  assert.deepEqual(JSON.parse(span.attributes["respan.metadata"]), {
+  assertPropagatedAuditMetadata(span.attributes, {
     run_id: "anthropic-error-marker",
     case_id: "failure",
   });
-  assert.equal(
-    Object.keys(span.attributes).some((key) => key.startsWith("respan.metadata.")),
-    false,
-  );
   assert.deepEqual(JSON.parse(span.attributes["gen_ai.prompt.0.tool_calls"]), [
     {
       id: "toolu_history",
@@ -455,14 +472,10 @@ test("rejecting create calls preserve status and propagated audit attributes", a
   assert.equal(span.attributes["gen_ai.prompt.1.tool_call_id"], "toolu_history");
   assert.equal(span.attributes["gen_ai.completion.0.tool_calls"], undefined);
   assert.equal(span.instrumentationScope?.version, "1.1.2");
-  assert.deepEqual(JSON.parse(toolSpan.attributes["respan.metadata"]), {
+  assertPropagatedAuditMetadata(toolSpan.attributes, {
     run_id: "anthropic-error-marker",
     case_id: "failure",
   });
-  assert.equal(
-    Object.keys(toolSpan.attributes).some((key) => key.startsWith("respan.metadata.")),
-    false,
-  );
   assert.equal(toolSpan.instrumentationScope?.version, "1.1.2");
 
   messagesPrototype.create = patchedTarget.originalCreate;
