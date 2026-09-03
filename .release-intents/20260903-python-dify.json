@@ -1,0 +1,6 @@
+{
+  "summary": "Refresh Python Dify instrumentation for current client APIs and workflow events",
+  "packages": {
+    "respan-instrumentation-dify": "minor"
+  }
+}
