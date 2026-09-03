@@ -1,0 +1,6 @@
+{
+  "summary": "Merge propagated Python tracing metadata into the canonical JSON attribute",
+  "packages": {
+    "respan-tracing": "minor"
+  }
+}
