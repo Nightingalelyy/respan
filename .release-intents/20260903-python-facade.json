@@ -1,0 +1,6 @@
+{
+  "summary": "Register explicit Dify and Exa instrumentation activation in the Python facade",
+  "packages": {
+    "respan-ai": "patch"
+  }
+}
