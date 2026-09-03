@@ -1,6 +1,8 @@
 {
-  "summary": "Add Python Exa instrumentation for synchronous and asynchronous client calls",
+  "summary": "Add Python Exa instrumentation with its explicit facade registration and canonical metadata propagation support",
   "packages": {
-    "respan-instrumentation-exa": "new"
+    "respan-ai": "patch",
+    "respan-instrumentation-exa": "new",
+    "respan-tracing": "minor"
   }
 }
