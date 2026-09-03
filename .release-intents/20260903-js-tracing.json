@@ -1,0 +1,6 @@
+{
+  "summary": "Preserve canonical propagated metadata and expose readable-span batch transformation",
+  "packages": {
+    "@respan/tracing": "minor"
+  }
+}

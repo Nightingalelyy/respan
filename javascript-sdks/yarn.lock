@@ -4234,7 +4234,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@opentelemetry/otlp-transformer@npm:0.205.0":
+"@opentelemetry/otlp-transformer@npm:0.205.0, @opentelemetry/otlp-transformer@npm:^0.205.0":
   version: 0.205.0
   resolution: "@opentelemetry/otlp-transformer@npm:0.205.0"
   dependencies:
@@ -5572,6 +5572,7 @@ __metadata:
     "@ai-sdk/openai": "npm:^4.0.30"
     "@anthropic-ai/sdk": "npm:0.41.0"
     "@opentelemetry/api": "npm:^1.9.0"
+    "@opentelemetry/context-async-hooks": "npm:^2.10.0"
     "@opentelemetry/core": "npm:^2.10.0"
     "@opentelemetry/exporter-trace-otlp-http": "npm:^0.221.0"
     "@opentelemetry/resources": "npm:^2.10.0"
