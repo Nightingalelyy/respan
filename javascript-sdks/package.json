@@ -15,6 +15,7 @@
     "instrumentations/respan-instrumentation-cohere",
     "instrumentations/respan-instrumentation-codex-sdk",
     "instrumentations/respan-instrumentation-cursor",
+    "instrumentations/respan-instrumentation-pi",
     "instrumentations/respan-instrumentation-exa",
     "instrumentations/respan-instrumentation-flue",
     "instrumentations/respan-instrumentation-langchain",

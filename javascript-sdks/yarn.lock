@@ -5373,6 +5373,27 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@respan/instrumentation-pi@workspace:instrumentations/respan-instrumentation-pi":
+  version: 0.0.0-use.local
+  resolution: "@respan/instrumentation-pi@workspace:instrumentations/respan-instrumentation-pi"
+  dependencies:
+    "@opentelemetry/api": "npm:^1.9.0"
+    "@opentelemetry/core": "npm:^2.10.0"
+    "@opentelemetry/sdk-trace-base": "npm:^2.10.0"
+    "@opentelemetry/semantic-conventions": "npm:^1.43.0"
+    "@respan/respan-sdk": "workspace:^"
+    "@respan/tracing": "workspace:^"
+    "@traceloop/ai-semantic-conventions": "npm:^0.13.0"
+    "@types/node": "npm:^22.15.29"
+    typescript: "npm:^5.7.3"
+  peerDependencies:
+    "@earendil-works/pi-coding-agent": ">=0.65.0"
+  peerDependenciesMeta:
+    "@earendil-works/pi-coding-agent":
+      optional: true
+  languageName: unknown
+  linkType: soft
+
 "@respan/instrumentation-pydantic-ai@workspace:instrumentations/respan-instrumentation-pydantic-ai":
   version: 0.0.0-use.local
   resolution: "@respan/instrumentation-pydantic-ai@workspace:instrumentations/respan-instrumentation-pydantic-ai"
