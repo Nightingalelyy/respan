@@ -1,0 +1,7 @@
+{
+  "summary": "@respan/instrumentation-pi: traceScope defaults to \"session\" (one multi-root trace per pi session, across processes and pauses); \"run\" stays available. @respan/cli: help text of `respan integrate pi` and the embedded tracing skill reference updated to match.",
+  "packages": {
+    "@respan/instrumentation-pi": "patch",
+    "@respan/cli": "patch"
+  }
+}

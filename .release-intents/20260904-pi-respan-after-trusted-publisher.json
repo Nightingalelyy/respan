@@ -1,0 +1,7 @@
+{
+  "summary": "Publish @respan/instrumentation-pi 0.1.1 and @respan/respan 2.5.0, which run 33861301643 left unpublished: npm returned E404 on the pi publish because @respan/instrumentation-pi (first published by hand) had no Trusted Publisher configured for this repository's publish.yml. Merge only after the Trusted Publisher is configured on npmjs.com. @respan/cli 0.14.0 and @respan/instrumentation-openrouter 0.1.1 were published by that run and are not repeated here.",
+  "packages": {
+    "@respan/instrumentation-pi": "patch",
+    "@respan/respan": "minor"
+  }
+}
