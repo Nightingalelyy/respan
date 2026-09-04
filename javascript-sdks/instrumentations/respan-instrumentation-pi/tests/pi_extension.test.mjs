@@ -316,13 +316,23 @@ test("Respan's console chatter is filtered while pi's own console output passes 
       received.push(span);
     },
     async () => {
-      process.stdout.write = (chunk) => {
-        stdout.push(String(chunk));
-        return true;
+      // console.* writes strings. Anything else on these streams is the node
+      // test runner's own binary IPC (a previous test's `test:complete`
+      // message can land here when files run in a child process), which
+      // must be forwarded, not recorded.
+      process.stdout.write = (chunk, ...rest) => {
+        if (typeof chunk === "string") {
+          stdout.push(chunk);
+          return true;
+        }
+        return originalStdoutWrite.call(process.stdout, chunk, ...rest);
       };
-      process.stderr.write = (chunk) => {
-        stderr.push(String(chunk));
-        return true;
+      process.stderr.write = (chunk, ...rest) => {
+        if (typeof chunk === "string") {
+          stderr.push(chunk);
+          return true;
+        }
+        return originalStderrWrite.call(process.stderr, chunk, ...rest);
       };
       try {
         const { factory, calls } = createFakeRespanFactory({ activate: true });
