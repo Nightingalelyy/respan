@@ -115,6 +115,16 @@ export class PiInstrumentor implements RespanInstrumentation {
 
   activate(): void {
     this._active = true;
+    // Emit anything a tracer buffered while emission was off (spans produced
+    // before `Respan.initialize()` resolved).
+    for (const ref of [...this._attachedRefs]) {
+      const session = ref.deref();
+      const tracer = session ? this._attached.get(session)?.tracer : undefined;
+      tracer?.drainPending();
+    }
+    for (const ref of [...this._extensionTracers]) {
+      ref.deref()?.drainPending();
+    }
   }
 
   /**

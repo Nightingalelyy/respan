@@ -1707,3 +1707,25 @@ test("turn numbering: session scope numbers the roots of the shared trace", asyn
     assertCommonContract(span);
   }
 });
+
+test("spans produced before activate() are buffered and emitted on activation", async () => {
+  captureState.spans = [];
+  const instrumentor = new PiInstrumentor();
+  // Not activated yet: Respan.initialize() has not resolved.
+  const pi = createFakePi();
+  instrumentor.extension(pi);
+  await replayRun(pi, createFakeCtx(), { shutdown: false });
+  assert.equal(captureState.spans.length, 0);
+
+  instrumentor.activate();
+  assert.equal(captureState.spans.length, 4);
+  const names = captureState.spans.map((span) => span.name).sort();
+  assert.deepEqual(names, ["bash.tool", "pi.chat", "pi.chat", "pi.turn-1.agent"]);
+  for (const span of captureState.spans) {
+    assertCommonContract(span);
+  }
+
+  // Once active, spans go straight through.
+  await replayRun(pi, createFakeCtx(), { shutdown: false });
+  assert.equal(captureState.spans.length, 8);
+});

@@ -1035,11 +1035,28 @@ export class PiSessionTracer {
     });
   }
 
+  /**
+   * Spans produced while the instrumentor is not active yet (e.g. the first
+   * LLM call of an SDK session finishing before `Respan.initialize()` resolved)
+   * are kept in a bounded buffer and emitted by `drainPending()` once emission
+   * is enabled. Oldest spans are dropped beyond the cap.
+   */
+  private readonly pendingSpans: ReadableSpan[] = [];
+  private static readonly MAX_PENDING_SPANS = 2000;
+
+  drainPending(): number {
+    if (!this.enabledFn() || this.pendingSpans.length === 0) {
+      return 0;
+    }
+    const spans = this.pendingSpans.splice(0, this.pendingSpans.length);
+    for (const span of spans) {
+      this.emitFn(span);
+    }
+    return spans.length;
+  }
+
   private emitSpan(request: SpanRequest): void {
     addStatusAttributes(request.attributes, request.statusCode ?? 200, request.errorMessage);
-    if (!this.enabledFn()) {
-      return;
-    }
     const span = buildReadableSpan({
       name: request.name,
       traceId: request.traceId,
@@ -1064,6 +1081,13 @@ export class PiSessionTracer {
     const sessionId = this.session.sessionId;
     if (merged[RespanSpanAttributes.RESPAN_THREADS_ID] === undefined && sessionId) {
       merged[RespanSpanAttributes.RESPAN_THREADS_ID] = sessionId;
+    }
+    if (!this.enabledFn()) {
+      if (this.pendingSpans.length >= PiSessionTracer.MAX_PENDING_SPANS) {
+        this.pendingSpans.shift();
+      }
+      this.pendingSpans.push(span);
+      return;
     }
     this.emitFn(span);
   }

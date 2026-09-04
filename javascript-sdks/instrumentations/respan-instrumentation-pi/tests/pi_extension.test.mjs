@@ -283,9 +283,13 @@ test("exports never block pi: run-end flushes run in the background, shutdown is
   assert.equal(deferred.pending.length, 3, "flushes were started and are still pending");
 
   // session_shutdown waits for the final export, but never longer than the bound.
+  // A real pi process always has live handles; keep the loop alive here so the
+  // extension's `beforeExit` flush hook does not fire while the fake export hangs.
+  const keepAlive = setInterval(() => {}, 10);
   const startedAt = Date.now();
   await pi.emit("session_shutdown", { reason: "quit" }, ctx);
   const elapsed = Date.now() - startedAt;
+  clearInterval(keepAlive);
   assert.ok(elapsed >= 40 && elapsed < 2000, `bounded wait, took ${elapsed}ms`);
   assert.equal(deferred.calls.flush, 4);
   assert.equal(deferred.calls.shutdown, 0, "shutdown() was not reached while the flush hung");
@@ -379,4 +383,26 @@ test("each factory invocation with an injected Respan gets its own runtime", asy
   await piB.emit("session_start", { reason: "startup" }, createFakeCtx());
   assert.equal(first.calls.initialize, 1);
   assert.equal(second.calls.initialize, 1);
+});
+
+test("initializes eagerly without session_start (SDK sessions) and flushes on beforeExit", async () => {
+  const { factory, calls } = createFakeRespanFactory({ activate: true });
+  const extension = createRespanPiExtension({
+    config: { enabled: true, apiKey: "sk-test", debug: false },
+    createRespan: factory,
+    log: () => {},
+  });
+  const pi = createFakePi();
+  extension(pi);
+  // No session_start: SDK scripts (`createAgentSession()` + `prompt()`) never emit it.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.initialize, 1);
+
+  await pi.emit("agent_end", { messages: [] }, createFakeCtx());
+  assert.equal(calls.flush, 1);
+
+  // The process-level hook flushes whatever is still batched when the loop drains.
+  process.emit("beforeExit", 0);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.flush, 2);
 });

@@ -60,6 +60,8 @@ interface SharedRuntime {
   respan: RespanLike;
   instrumentor: PiInstrumentor;
   initPromise?: Promise<boolean>;
+  /** `beforeExit` flush hook installed (once per runtime). */
+  exitHookInstalled?: boolean;
   initialized: boolean;
   failure?: string;
   shutdownPromise?: Promise<void>;
@@ -196,6 +198,22 @@ export function createRespanPiExtension(
         setStatus(ctx, undefined);
       }
     });
+
+    // Initialize eagerly instead of waiting for `session_start`: sessions
+    // created through the SDK (`createAgentSession()` in a script) load
+    // installed packages but do not necessarily emit `session_start`, and a
+    // run that starts before initialization would otherwise emit nothing.
+    void ensureInitialized();
+
+    // SDK scripts also rarely emit `session_shutdown`; they just exit after
+    // `session.dispose()`. Flush whatever is still batched when the event loop
+    // drains, so short-lived scripts do not lose their last spans.
+    if (!runtime.exitHookInstalled) {
+      runtime.exitHookInstalled = true;
+      process.once("beforeExit", () => {
+        void flush();
+      });
+    }
   };
 }
 
