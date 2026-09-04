@@ -38,7 +38,12 @@
       "@oclif/plugin-not-found",
       "@oclif/plugin-autocomplete"
     ],
-    "topicSeparator": " "
+    "topicSeparator": " ",
+    "topics": {
+      "collector": {
+        "description": "Run a local OpenTelemetry Collector that queues traces to Respan durably"
+      }
+    }
   },
   "dependencies": {
     "@inquirer/prompts": "^7",

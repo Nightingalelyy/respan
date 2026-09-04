@@ -1,0 +1,83 @@
+# Respan Collector — an OpenTelemetry Collector configuration.
+#
+# Receives OTLP/HTTP from the Respan SDKs on localhost and forwards it to the
+# Respan ingest endpoint through a bounded, persistent (write-ahead-log) queue,
+# so spans survive Respan outages and collector restarts without unbounded
+# local growth. Every value can be overridden with an environment variable.
+#
+# Validated against otelcol-contrib 0.160.0.
+
+extensions:
+  file_storage:
+    # Persistent queue. Entries are deleted as soon as Respan acknowledges them;
+    # in steady state the directory is nearly empty.
+    directory: ${env:RESPAN_COLLECTOR_DATA_DIR:-/var/lib/otelcol/respan}
+    create_directory: true
+    # Hard cap on disk (bytes). When reached, new batches are dropped and counted
+    # in otelcol_exporter_enqueue_failed_spans instead of filling the disk.
+    max_size: ${env:RESPAN_COLLECTOR_MAX_SIZE_BYTES:-536870912}
+    timeout: 1s
+    compaction:
+      on_start: true
+      on_rebound: true
+      directory: ${env:RESPAN_COLLECTOR_DATA_DIR:-/var/lib/otelcol/respan}
+  health_check:
+    endpoint: ${env:RESPAN_COLLECTOR_HEALTH_ENDPOINT:-127.0.0.1:13133}
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: ${env:RESPAN_COLLECTOR_LISTEN:-127.0.0.1:4318}
+        # The Respan SDKs post to <RESPAN_BASE_URL>/api/v2/traces.
+        traces_url_path: /api/v2/traces
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: ${env:RESPAN_COLLECTOR_MEMORY_LIMIT_MIB:-512}
+    spike_limit_mib: 128
+  batch:
+    send_batch_size: 512
+    send_batch_max_size: 1024
+    timeout: 2s
+
+exporters:
+  otlphttp/respan:
+    traces_endpoint: ${env:RESPAN_COLLECTOR_EXPORT_URL:-https://api.respan.ai/api/v2/traces}
+    encoding: json
+    # Respan's ingest does not decompress request bodies; keep this `none` unless
+    # your endpoint (e.g. a proxy in front of a self-hosted deployment) accepts gzip.
+    compression: ${env:RESPAN_COLLECTOR_COMPRESSION:-none}
+    headers:
+      Authorization: "Bearer ${env:RESPAN_API_KEY}"
+    timeout: 30s
+    sending_queue:
+      enabled: true
+      storage: file_storage
+      # Number of batches kept while Respan is unreachable (also bounded by max_size).
+      queue_size: ${env:RESPAN_COLLECTOR_QUEUE_SIZE:-10000}
+      num_consumers: 4
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 60s
+      # Never give up on a batch; the queue bounds are the only limit.
+      max_elapsed_time: 0
+
+service:
+  extensions: [file_storage, health_check]
+  telemetry:
+    metrics:
+      level: normal
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: ${env:RESPAN_COLLECTOR_METRICS_HOST:-127.0.0.1}
+                port: 8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/respan]

@@ -28,28 +28,32 @@ extensions (`pi.on(...)`) and to SDK subscribers (`session.subscribe(...)`).
 
 ## Trace shape
 
-By default one trace per **agent run** (one user prompt → `agent_end`). All
-runs of a pi session share the same thread and session identifier (the pi
-session id); with `traceScope: "session"` they also share one trace — see
+By default one trace per **agent run** (one user prompt → `agent_end`). Each
+run is one root agent span named `<agentName>.turn-<n>.agent` — n is the
+prompt's 1-based number within the pi session, like Braintrust's "Turn n" —
+and displayed as `agent.turn-<n>`. All runs of a pi session share the same
+thread, session and trace-group identifier (the pi session id); with
+`traceScope: "session"` they also share one trace — see
 [One trace per run vs one trace per session](#one-trace-per-run-vs-one-trace-per-session).
 
 ```text
-pi.workflow (workflow)                          one per agent run
-└── pi.agent (agent)
-    ├── pi.chat (chat)                          one per assistant message
-    │     prompts, completion, tool_calls, usage, TTFT, cost
-    ├── bash.tool (tool)                        one per tool execution
-    ├── read.tool (tool)                        skill usage detected from SKILL.md
-    ├── pi.chat (chat)
-    └── pi.compaction (task)                    when compaction happens mid-run
+pi.turn-1.agent (agent)                         one per agent run, shown as agent.turn-1
+├── pi.chat (chat)                              one per assistant message
+│     prompts, completion, tool_calls, usage, TTFT, cost
+├── bash.tool (tool)                            one per tool execution
+├── read.tool (tool)                            skill usage detected from SKILL.md
+├── pi.chat (chat)
+└── pi.compaction (task)                        when compaction happens mid-run
 
 pi.compaction (task)                            root of its own trace when idle
 pi.branch_summary (task)                        summarized /tree navigation
 ```
 
 Chat and tool spans are emitted the moment they complete, so an hour-long run
-streams into the dashboard while it is still running; the workflow and agent
-spans arrive when the run ends.
+streams into the dashboard while it is still running; the turn's agent span
+arrives when the run ends. The turn number is read from the session history
+(the user messages already on the session branch), so it survives a resume in
+a new process; without a session manager the tracer counts runs itself.
 
 ## Install for the pi CLI
 
@@ -110,8 +114,8 @@ no base URL is configured. Base URLs are normalized to end with `/api`.
 |---|---|---|
 | `enabled` | boolean | Turn tracing on/off (`respan integrate pi --disable` sets `false`) |
 | `base_url` | string | Respan API base URL (self-hosted / EU) |
-| `workflow_name` | string | Workflow span name and `respan.trace.trace_group_identifier` (`span_name` is accepted as an alias) |
-| `agent_name` | string | Agent span name |
+| `workflow_name` | string | `traceloop.workflow.name` on every turn span (`span_name` is accepted as an alias) |
+| `agent_name` | string | Agent name: turn spans are named `<agent_name>.turn-<n>.agent` and carry `respan.metadata.agent_name` |
 | `trace_scope` | `"run"` \| `"session"` | One trace per agent run (default) or one multi-root trace per pi session — see [below](#one-trace-per-run-vs-one-trace-per-session) |
 | `customer_id` | string | `respan.customer_params.customer_identifier` on every span |
 | `project_id` | string | Recorded as `respan.metadata.project_id` |
@@ -202,8 +206,8 @@ detach(); // unsubscribes and drops the tracer (closes an interrupted run as an 
 sessions in one process (`instrumentor.activeSessionCount` reports the live
 tracers). Sessions are held weakly, so one that is disposed without `detach()`
 is not retained — but call `detach()` to close an interrupted run promptly.
-`respan.shutdown()` closes every open run (its workflow/agent spans are
-emitted with an error status), detaches everything and flushes.
+`respan.shutdown()` closes every open run (its turn span is emitted with an
+error status), detaches everything and flushes.
 
 ### Overriding correlation per prompt
 
@@ -238,8 +242,8 @@ already-active factory):
 | `captureReasoning` | `true` | Record assistant thinking blocks in the chat span output (`reasoning`) |
 | `captureToolSpans` | `true` | Emit one tool span per tool execution |
 | `maxContentChars` | `0` (unlimited) | Optional per-string cap for every captured prompt, completion, tool argument/output and reasoning. Nothing is truncated by default; when set, truncated strings end with ` …[truncated N chars]` and the span gets `respan.metadata.truncated = true` |
-| `workflowName` | `"pi"` | Workflow span name; also `respan.trace.trace_group_identifier` |
-| `agentName` | `"pi"` | Agent span name |
+| `workflowName` | `"pi"` | `traceloop.workflow.name` on every turn span |
+| `agentName` | `"pi"` | Agent name: the turn span is `<agentName>.turn-<n>.agent` (displayed as `agent.turn-<n>`) and carries `respan.metadata.agent_name` |
 | `traceScope` | `"run"` | `"run"` = one trace per agent run; `"session"` = one multi-root trace per pi session, trace id derived from the session id (see [below](#one-trace-per-run-vs-one-trace-per-session)) |
 | `customerIdentifier` | — | `respan.customer_params.customer_identifier` on every span |
 | `metadata` | — | `respan.metadata.<key>` on every span (string/number/boolean values) |
@@ -253,9 +257,8 @@ already-active factory):
 
 | Span | Attributes |
 |---|---|
-| all | `respan.entity.log_type`, `traceloop.entity.name/path`, `respan.threads.thread_identifier`, `respan.sessions.session_identifier`, `respan.trace.trace_group_identifier`, `respan.customer_params.customer_identifier`, `respan.metadata.*`, `telemetry.sdk.name/version`, `status_code` + `error.message` on failures |
-| `pi.workflow` | `traceloop.workflow.name`, input `[{role: "user", content: prompt}]`, output = final assistant text |
-| `pi.agent` | same input/output, `respan.metadata.agent_name`, `gen_ai.request.model`, `respan.metadata.{pi_version, thinking_level, session_file, cwd, turn_count, tool_call_count, stop_reason, continuation}` |
+| all | `respan.entity.log_type`, `traceloop.entity.name/path`, `respan.threads.thread_identifier`, `respan.sessions.session_identifier`, `respan.trace.trace_group_identifier` (all three = the pi session id), `respan.customer_params.customer_identifier`, `respan.metadata.*`, `telemetry.sdk.name/version`, `status_code` + `error.message` on failures |
+| `<agent>.turn-<n>.agent` | `traceloop.workflow.name`, input `[{role: "user", content: prompt}]`, output = final assistant text, `respan.metadata.agent_name`, `respan.metadata.turn_number`, `respan.metadata.{pi_version, thinking_level, session_file, cwd, turn_count, tool_call_count, stop_reason, continuation}`. A structural span: no `gen_ai.request.model` (the model is on the chat spans) |
 | `pi.chat` | `gen_ai.system` (provider), `llm.request.type = chat`, `gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.prompt.N.role/content/tool_calls`, `gen_ai.completion.0.role/content/tool_calls`, `traceloop.entity.input/output` (output carries `reasoning`), `llm.request.functions` (tool definitions, capped at `maxContentChars`), `gen_ai.usage.input_tokens` / `gen_ai.usage.prompt_tokens` (= input + cacheRead + cacheWrite), `gen_ai.usage.output_tokens` / `gen_ai.usage.completion_tokens`, `llm.usage.total_tokens`, `gen_ai.usage.cache_read.input_tokens` / `llm.usage.cache_read_input_tokens`, `gen_ai.usage.cache_creation.input_tokens`, `respan.metadata.{reasoning_tokens, estimated_cost_usd, time_to_first_token_ms, stop_reason, response_id, turn_index, thinking_level, api, prompt_capture, prompt_message_offset}` |
 | `<tool>.tool` | `traceloop.entity.input` = `{name, arguments}`, `traceloop.entity.output` = text output (or `{content, details}` JSON), `respan.metadata.tool_call_id`, `respan.metadata.skill_name` when a `SKILL.md` is read or the `skill` tool is used |
 | `pi.compaction` | input `{reason, willRetry, tokensBefore}`, output `{summary, tokensBefore, tokensAfter, firstKeptEntryId}` |
@@ -314,7 +317,7 @@ resumed after days of silence).
   says where each delta starts), and/or `maxContentChars` to cap individual
   strings, `captureReasoning: false`, or `captureToolSpans: false`.
 - **Streaming.** Chat and tool spans are emitted as soon as they complete, so
-  long runs are visible while they run; the workflow/agent spans close the run.
+  long runs are visible while they run; the turn span closes the run.
 
 ## One trace per run vs one trace per session
 
@@ -324,7 +327,7 @@ resumed after days of silence).
 |---|---|---|
 | Trace | one per agent run (user prompt → `agent_end`) | one per pi session, shared by every run |
 | Trace id | random, or the active OTEL span's trace when there is one (the run nests under it) | derived from the pi session id — the dash-stripped UUID, or a SHA-256 prefix for non-UUID ids (`sessionTraceId(id)`); an active OTEL span is ignored |
-| Root spans | one `pi.workflow` per trace | one `pi.workflow` per run; all of them are roots of the same trace |
+| Root spans | one turn span (`pi.turn-<n>.agent`) per trace | one turn span per run; all of them are roots of the same trace (Session > turn-1, turn-2, …) |
 | Compaction / branch summary outside a run | root of its own trace | another root of the session trace |
 | `respan.threads.thread_identifier` / `respan.sessions.session_identifier` | pi session id | pi session id |
 
@@ -334,7 +337,7 @@ before the run after it; the trace's duration spans from the first wake to the
 last, and the trace list shows the latest root's name/input/output with cost
 and tokens summed over all runs. Nothing changes about *when* spans are
 emitted: every run still emits its own spans as it goes, and no span is held
-open across a pause. Workflow and agent span ids are random, so runs of one
+open across a pause. Turn span ids are random, so runs of one
 session emitted from different processes never collide inside the shared
 trace.
 
@@ -416,61 +419,36 @@ localhost (always reachable, sub-millisecond), and the Collector owns
 durability — a write-ahead log on disk that is bounded by configuration,
 retried indefinitely, and replayed after a restart.
 
-Point the SDK at the Collector (the SDK posts OTLP/JSON to
-`<base>/api/v2/traces`):
+Respan ships this as a packaged collector — see [`collector/`](../../../collector/)
+in the monorepo (Docker Compose sidecar, or `respan collector start` from the
+Respan CLI, which runs Docker or the pinned `otelcol-contrib` binary). Point the
+SDK at it and nothing else changes:
 
 ```bash
-export RESPAN_BASE_URL=http://127.0.0.1:4318
+export RESPAN_BASE_URL=http://127.0.0.1:4318   # the SDK posts to <base>/api/v2/traces
 ```
 
-`otel-collector.yaml`:
+or, for the pi extension, `respan integrate pi --with-collector`.
 
-```yaml
-extensions:
-  file_storage:
-    directory: /var/lib/otelcol/respan-queue   # persistent, bounded WAL
-    max_size: 536870912                        # 512 MiB hard cap on disk
-    compaction:
-      on_start: true
-      on_rebound: true
-      directory: /var/lib/otelcol/respan-queue-compaction
+What the packaged configuration does (all overridable by environment variables,
+see the collector README):
 
-receivers:
-  otlp:
-    protocols:
-      http:
-        endpoint: 127.0.0.1:4318
-        traces_url_path: /api/v2/traces        # the path the Respan SDK posts to
+- receives OTLP/HTTP on `127.0.0.1:4318` at `/api/v2/traces`, the path the SDK
+  posts to;
+- persists batches in a write-ahead log (`file_storage`) capped at 512 MiB
+  (`RESPAN_COLLECTOR_MAX_SIZE_BYTES`) and 10 000 batches
+  (`RESPAN_COLLECTOR_QUEUE_SIZE`); entries are deleted as soon as Respan
+  acknowledges them, so the directory is nearly empty in normal operation;
+- retries forever with backoff (`max_elapsed_time: 0`), exporter timeout 30 s,
+  uncompressed JSON (Respan's ingest does not inflate gzip);
+- exposes health on `:13133` and Prometheus metrics on `:8888`.
 
-exporters:
-  otlphttp/respan:
-    traces_endpoint: https://api.respan.ai/api/v2/traces
-    encoding: json
-    headers:
-      Authorization: "Bearer ${env:RESPAN_API_KEY}"
-    timeout: 30s
-    sending_queue:
-      enabled: true
-      storage: file_storage                    # persisted; survives restarts
-      queue_size: 10000                        # batches kept while Respan is unreachable
-    retry_on_failure:
-      enabled: true
-      initial_interval: 5s
-      max_interval: 60s
-      max_elapsed_time: 0                      # never give up on a batch
-
-service:
-  extensions: [file_storage]
-  pipelines:
-    traces:
-      receivers: [otlp]
-      exporters: [otlphttp/respan]
-```
-
-Disk usage is bounded by `max_size` and `queue_size`; when both are exhausted
-the Collector drops new batches and counts them in
-`otelcol_exporter_enqueue_failed_spans`, which is the metric to alert on.
-Watch `otelcol_exporter_send_failed_spans` as well.
+When both caps are exhausted the collector drops new batches and counts them in
+`otelcol_exporter_enqueue_failed_spans`, which is the metric to alert on; watch
+`otelcol_exporter_queue_size` and `otelcol_exporter_send_failed_spans` too.
+Verified end to end against otelcol-contrib 0.160.0: spans sent during a 503
+outage were persisted, survived `kill -9` of the collector, and were delivered
+after restart.
 
 **Re-delivery and duplicates.** Retries re-send whole batches, so a batch
 that timed out after the server stored it arrives twice. Respan's trace view

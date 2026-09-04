@@ -297,7 +297,7 @@ function assertCommonContract(span) {
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 
-test("extension replay emits canonical workflow/agent/chat/tool spans", async () => {
+test("extension replay emits canonical agent/chat/tool spans", async () => {
   captureState.spans = [];
   // Opt-in delta capture; the system prompt is recorded by default (first chat span).
   const instrumentor = new PiInstrumentor({ promptCapture: "delta" });
@@ -309,50 +309,52 @@ test("extension replay emits canonical workflow/agent/chat/tool spans", async ()
   const ctx = createFakeCtx();
   await replayRun(pi, ctx);
 
-  assert.equal(captureState.spans.length, 5);
-  const workflowSpans = spansByLogType("workflow");
+  // One root agent (turn) span per run — no workflow span.
+  assert.equal(captureState.spans.length, 4);
   const agentSpans = spansByLogType("agent");
   const chatSpans = spansByLogType("chat");
   const toolSpans = spansByLogType("tool");
-  assert.equal(workflowSpans.length, 1);
+  assert.equal(spansByLogType("workflow").length, 0);
   assert.equal(agentSpans.length, 1);
   assert.equal(chatSpans.length, 2);
   assert.equal(toolSpans.length, 1);
 
-  const [workflowSpan] = workflowSpans;
   const [agentSpan] = agentSpans;
   const [chat1, chat2] = chatSpans;
   const [toolSpan] = toolSpans;
 
-  // Hierarchy
-  assert.equal(parentSpanId(workflowSpan), undefined);
-  assert.equal(parentSpanId(agentSpan), workflowSpan.spanContext().spanId);
+  // Hierarchy: the agent span is the trace root.
+  assert.equal(parentSpanId(agentSpan), undefined);
   assert.equal(parentSpanId(chat1), agentSpan.spanContext().spanId);
   assert.equal(parentSpanId(chat2), agentSpan.spanContext().spanId);
   assert.equal(parentSpanId(toolSpan), agentSpan.spanContext().spanId);
-  const traceId = workflowSpan.spanContext().traceId;
+  const traceId = agentSpan.spanContext().traceId;
   for (const span of captureState.spans) {
     assert.equal(span.spanContext().traceId, traceId);
     assert.equal(span.attributes["respan.threads.thread_identifier"], "sess-123");
     assert.equal(span.attributes["respan.sessions.session_identifier"], "sess-123");
-    assert.equal(span.attributes["respan.trace.trace_group_identifier"], "pi");
+    // The trace group is the pi session id too, so the traces of a resumed session group together.
+    assert.equal(span.attributes["respan.trace.trace_group_identifier"], "sess-123");
     assertCommonContract(span);
   }
 
-  // Workflow / agent
-  assert.equal(workflowSpan.name, "pi.workflow");
-  assert.equal(workflowSpan.attributes["traceloop.entity.name"], "pi");
-  assert.equal(workflowSpan.attributes["traceloop.entity.path"], "");
-  assert.equal(workflowSpan.attributes["traceloop.workflow.name"], "pi");
-  assert.deepEqual(JSON.parse(workflowSpan.attributes["traceloop.entity.input"]), [
+  // Agent (turn) span
+  assert.equal(agentSpan.name, "pi.turn-1.agent");
+  assert.equal(agentSpan.attributes["traceloop.entity.name"], "pi");
+  assert.equal(agentSpan.attributes["traceloop.entity.path"], "");
+  assert.equal(agentSpan.attributes["traceloop.workflow.name"], "pi");
+  // Naming hints: the exporter displays the span as `agent.turn-1`.
+  assert.equal(agentSpan.attributes["respan.internal.span_name.kind"], "agent");
+  assert.equal(agentSpan.attributes["respan.internal.span_name.detail"], "turn-1");
+  assert.equal(agentSpan.attributes["respan.metadata.turn_number"], 1);
+  assert.deepEqual(JSON.parse(agentSpan.attributes["traceloop.entity.input"]), [
     { role: "user", content: "Inspect the repo" },
   ]);
-  assert.equal(workflowSpan.attributes["traceloop.entity.output"], "The repo has a README.");
-  assert.equal(workflowSpan.attributes.status_code, undefined);
-  assert.equal(agentSpan.name, "pi.agent");
-  assert.equal(agentSpan.attributes["respan.metadata.agent_name"], "pi");
-  assert.equal(agentSpan.attributes["gen_ai.request.model"], "claude-sonnet-4-5");
   assert.equal(agentSpan.attributes["traceloop.entity.output"], "The repo has a README.");
+  assert.equal(agentSpan.attributes.status_code, undefined);
+  assert.equal(agentSpan.attributes["respan.metadata.agent_name"], "pi");
+  // Structural span: the model lives on the chat spans only.
+  assert.equal(agentSpan.attributes["gen_ai.request.model"], undefined);
   assert.equal(agentSpan.attributes["respan.metadata.turn_count"], 2);
   assert.equal(agentSpan.attributes["respan.metadata.tool_call_count"], 1);
   assert.equal(agentSpan.attributes["respan.metadata.stop_reason"], "stop");
@@ -545,10 +547,10 @@ test("captured strings are truncated only when maxContentChars is set", async ()
   const smallPi = createFakePi();
   small.extension(smallPi);
   await replayRun(smallPi, createFakeCtx());
-  const workflowSpan = spanByLogType("workflow");
-  const input = JSON.parse(workflowSpan.attributes["traceloop.entity.input"]);
+  const agentSpan = spanByLogType("agent");
+  const input = JSON.parse(agentSpan.attributes["traceloop.entity.input"]);
   assert.equal(input[0].content, "Inspect th …[truncated 6 chars]");
-  assert.equal(workflowSpan.attributes["respan.metadata.truncated"], true);
+  assert.equal(agentSpan.attributes["respan.metadata.truncated"], true);
   const smallChat = spanByLogType("chat");
   // prompt.0 is the (10-char) system prompt; the user prompt at index 1 is truncated.
   assert.ok(smallChat.attributes["gen_ai.prompt.1.content"].endsWith("…[truncated 6 chars]"));
@@ -613,25 +615,27 @@ test("multiple attached sessions produce independent traces", () => {
   s2.emit({ type: "agent_end", messages: [user2, reply2], willRetry: false });
   s1.emit({ type: "agent_end", messages: [user1, reply1], willRetry: false });
 
-  assert.equal(captureState.spans.length, 6);
+  assert.equal(captureState.spans.length, 4);
   const bySession = (id) =>
     captureState.spans.filter((span) => span.attributes["respan.threads.thread_identifier"] === id);
   const spansA = bySession("session-a");
   const spansB = bySession("session-b");
-  assert.equal(spansA.length, 3);
-  assert.equal(spansB.length, 3);
+  assert.equal(spansA.length, 2);
+  assert.equal(spansB.length, 2);
   const traceA = spansA[0].spanContext().traceId;
   const traceB = spansB[0].spanContext().traceId;
   assert.notEqual(traceA, traceB);
   assert.ok(spansA.every((span) => span.spanContext().traceId === traceA));
   assert.ok(spansB.every((span) => span.spanContext().traceId === traceB));
-  assert.equal(spanByLogType("workflow", spansA).attributes["traceloop.entity.output"], "Done A");
-  assert.equal(spanByLogType("workflow", spansB).attributes["traceloop.entity.output"], "Done B");
+  assert.equal(parentSpanId(spanByLogType("agent", spansA)), undefined);
+  assert.equal(parentSpanId(spanByLogType("agent", spansB)), undefined);
+  assert.equal(spanByLogType("agent", spansA).attributes["traceloop.entity.output"], "Done A");
+  assert.equal(spanByLogType("agent", spansB).attributes["traceloop.entity.output"], "Done B");
   assert.equal(spanByLogType("chat", spansA).attributes["gen_ai.prompt.0.content"], "Task A");
   assert.equal(spanByLogType("chat", spansB).attributes["gen_ai.prompt.0.content"], "Task B");
   assert.equal(spanByLogType("chat", spansB).attributes["gen_ai.system"], "openai");
   assert.equal(spanByLogType("chat", spansB).attributes["gen_ai.request.model"], "gpt-5");
-  assert.equal(spanByLogType("agent", spansB).attributes["gen_ai.request.model"], "gpt-5");
+  assert.equal(spanByLogType("agent", spansB).attributes["gen_ai.request.model"], undefined);
   for (const span of captureState.spans) {
     assertCommonContract(span);
   }
@@ -686,7 +690,7 @@ test("error paths: assistant errors, tool errors, retries, and shutdown mid-run"
   assert.equal(toolSpan.attributes["error.message"], "exit status 1");
   assert.equal(spanByLogType("agent").attributes.status_code, 500);
   assert.equal(spanByLogType("agent").attributes["error.message"], "overloaded_error");
-  assert.equal(spanByLogType("workflow").attributes.status_code, 500);
+  assert.equal(parentSpanId(spanByLogType("agent")), undefined);
   for (const span of captureState.spans) {
     assertCommonContract(span);
   }
@@ -703,7 +707,7 @@ test("error paths: assistant errors, tool errors, retries, and shutdown mid-run"
   session.messages.push(prompt);
   session.emit({ type: "message_end", message: { ...failed, stopReason: "error", errorMessage: "rate limited" } });
   session.emit({ type: "agent_end", messages: [prompt], willRetry: true });
-  assert.equal(spansByLogType("workflow").length, 0);
+  assert.equal(spansByLogType("agent").length, 0);
   assert.equal(spansByLogType("chat").length, 1);
   session.emit({ type: "agent_start" });
   session.emit({ type: "turn_start" });
@@ -711,17 +715,16 @@ test("error paths: assistant errors, tool errors, retries, and shutdown mid-run"
   session.emit({ type: "message_end", message: assistantFinal });
   session.messages.push(assistantFinal);
   session.emit({ type: "agent_end", messages: [prompt, assistantFinal], willRetry: false });
-  assert.equal(spansByLogType("workflow").length, 1);
   assert.equal(spansByLogType("agent").length, 1);
   const retryChats = spansByLogType("chat");
   assert.equal(retryChats.length, 2);
   assert.equal(retryChats[0].attributes.status_code, 500);
   assert.equal(retryChats[1].attributes.status_code, undefined);
-  const retryTrace = spanByLogType("workflow").spanContext().traceId;
+  const retryTrace = spanByLogType("agent").spanContext().traceId;
   assert.ok(retryChats.every((span) => span.spanContext().traceId === retryTrace));
   assert.equal(spanByLogType("agent").attributes.status_code, undefined);
-  assert.equal(spanByLogType("workflow").attributes["traceloop.entity.output"], "The repo has a README.");
-  assert.equal(JSON.parse(spanByLogType("workflow").attributes["traceloop.entity.input"])[0].content, "Retry me");
+  assert.equal(spanByLogType("agent").attributes["traceloop.entity.output"], "The repo has a README.");
+  assert.equal(JSON.parse(spanByLogType("agent").attributes["traceloop.entity.input"])[0].content, "Retry me");
   for (const span of captureState.spans) {
     assertCommonContract(span);
   }
@@ -740,13 +743,13 @@ test("error paths: assistant errors, tool errors, retries, and shutdown mid-run"
   await pi2.emit("tool_execution_start", { toolCallId: "call-y", toolName: "bash", args: { command: "sleep 10" } }, ctx2);
   await pi2.emit("session_shutdown", { reason: "quit" }, ctx2);
 
-  const shutdownWorkflow = spanByLogType("workflow");
-  assert.equal(shutdownWorkflow.attributes.status_code, 500);
+  const shutdownAgent = spanByLogType("agent");
+  assert.equal(parentSpanId(shutdownAgent), undefined);
+  assert.equal(shutdownAgent.attributes.status_code, 500);
   assert.equal(
-    shutdownWorkflow.attributes["error.message"],
+    shutdownAgent.attributes["error.message"],
     "Session shut down before the agent run completed",
   );
-  assert.equal(spanByLogType("agent").attributes.status_code, 500);
   const interruptedChat = spanByLogType("chat");
   assert.equal(interruptedChat.attributes.status_code, 500);
   assert.equal(interruptedChat.attributes["error.message"], "Interrupted before completion");
@@ -961,18 +964,20 @@ test("attach() subscribe mode traces a session and deactivate() unsubscribes", (
   session.messages.push(assistantFinal);
   session.emit({ type: "agent_end", messages: session.messages, willRetry: false });
 
-  assert.equal(captureState.spans.length, 5);
-  const workflowSpan = spanByLogType("workflow");
+  assert.equal(captureState.spans.length, 4);
   const agentSpan = spanByLogType("agent");
   const [chat1, chat2] = spansByLogType("chat");
   const toolSpan = spanByLogType("tool");
-  assert.equal(workflowSpan.name, "mail-agent.workflow");
-  assert.equal(agentSpan.name, "triage.agent");
-  assert.equal(workflowSpan.attributes["respan.trace.trace_group_identifier"], "mail-agent");
-  assert.deepEqual(JSON.parse(workflowSpan.attributes["traceloop.entity.input"]), [
+  assert.equal(agentSpan.name, "triage.turn-1.agent");
+  assert.equal(parentSpanId(agentSpan), undefined);
+  assert.equal(agentSpan.attributes["traceloop.workflow.name"], "mail-agent");
+  assert.equal(agentSpan.attributes["respan.metadata.agent_name"], "triage");
+  // The trace group is the pi session id, not the workflow name.
+  assert.equal(agentSpan.attributes["respan.trace.trace_group_identifier"], "sdk-session");
+  assert.deepEqual(JSON.parse(agentSpan.attributes["traceloop.entity.input"]), [
     { role: "user", content: "Hello from SDK" },
   ]);
-  assert.equal(workflowSpan.attributes["traceloop.entity.output"], "The repo has a README.");
+  assert.equal(agentSpan.attributes["traceloop.entity.output"], "The repo has a README.");
   assert.equal(agentSpan.attributes["respan.metadata.continuation"], undefined);
   assert.equal(chat1.attributes["gen_ai.prompt.0.role"], "user");
   assert.equal(chat1.attributes["gen_ai.prompt.0.content"], "Hello from SDK");
@@ -988,7 +993,7 @@ test("attach() subscribe mode traces a session and deactivate() unsubscribes", (
     assert.equal(span.attributes["respan.sessions.session_identifier"], "sdk-session");
     assert.equal(span.attributes["respan.customer_params.customer_identifier"], "cust-1");
     assert.equal(span.attributes["respan.metadata.mailbox"], "inbox");
-    assert.equal(span.spanContext().traceId, workflowSpan.spanContext().traceId);
+    assert.equal(span.spanContext().traceId, agentSpan.spanContext().traceId);
     assertCommonContract(span);
   }
 
@@ -1060,15 +1065,15 @@ test("traceScope: session shares one trace across runs; run scope gives one trac
   await replayRun(pi, ctx, { shutdown: false });
   await replayRun(pi, ctx, { shutdown: false });
 
-  // Two runs → two parentless workflow roots (distinct span ids) in ONE trace.
-  const workflows = spansByLogType("workflow");
-  assert.equal(workflows.length, 2);
-  assert.notEqual(workflows[0].spanContext().spanId, workflows[1].spanContext().spanId);
-  for (const workflow of workflows) {
-    assert.equal(parentSpanId(workflow), undefined);
-    assert.equal(workflow.spanContext().traceId, expectedTraceId);
+  // Two runs → two parentless agent (turn) roots (distinct span ids) in ONE trace.
+  const agents = spansByLogType("agent");
+  assert.equal(agents.length, 2);
+  assert.notEqual(agents[0].spanContext().spanId, agents[1].spanContext().spanId);
+  for (const agent of agents) {
+    assert.equal(parentSpanId(agent), undefined);
+    assert.equal(agent.spanContext().traceId, expectedTraceId);
   }
-  assert.equal(captureState.spans.length, 10);
+  assert.equal(captureState.spans.length, 8);
   for (const span of captureState.spans) {
     assert.equal(span.spanContext().traceId, expectedTraceId);
     // Correlation identifiers are the same in both scopes.
@@ -1077,7 +1082,6 @@ test("traceScope: session shares one trace across runs; run scope gives one trac
     assertCommonContract(span);
   }
   // Children still hang off their own run's agent span.
-  const agents = spansByLogType("agent");
   const chats = spansByLogType("chat");
   assert.equal(chats.length, 4);
   assert.equal(parentSpanId(chats[0]), agents[0].spanContext().spanId);
@@ -1104,7 +1108,7 @@ test("traceScope: session shares one trace across runs; run scope gives one trac
   const hashedPi = createFakePi();
   instrumentor.extension(hashedPi);
   await replayRun(hashedPi, createFakeCtx({ sessionId: "sess-123" }), { shutdown: false });
-  assert.equal(captureState.spans.length, 5);
+  assert.equal(captureState.spans.length, 4);
   for (const span of captureState.spans) {
     assert.equal(span.spanContext().traceId, hashed);
   }
@@ -1119,10 +1123,10 @@ test("traceScope: session shares one trace across runs; run scope gives one trac
   const runCtx = createFakeCtx({ sessionId: uuid });
   await replayRun(runPi, runCtx, { shutdown: false });
   await replayRun(runPi, runCtx, { shutdown: false });
-  const runWorkflows = spansByLogType("workflow");
-  assert.equal(runWorkflows.length, 2);
-  assert.notEqual(runWorkflows[0].spanContext().traceId, runWorkflows[1].spanContext().traceId);
-  assert.notEqual(runWorkflows[0].spanContext().traceId, expectedTraceId);
+  const runAgents = spansByLogType("agent");
+  assert.equal(runAgents.length, 2);
+  assert.notEqual(runAgents[0].spanContext().traceId, runAgents[1].spanContext().traceId);
+  assert.notEqual(runAgents[0].spanContext().traceId, expectedTraceId);
 });
 
 test("run scope nests under an active OTEL span; session scope always emits a root", () => {
@@ -1152,9 +1156,9 @@ test("run scope nests under an active OTEL span; session scope always emits a ro
     const nested = createFakeSession("3f2504e0-4f89-11d3-9a0c-0305e82c3301", []);
     const detachNested = runScoped.attach(nested);
     context.with(activeContext, () => runPrompt(nested));
-    const nestedWorkflow = spanByLogType("workflow");
-    assert.equal(nestedWorkflow.spanContext().traceId, "0af7651916cd43dd8448eb211c80319c");
-    assert.equal(parentSpanId(nestedWorkflow), "b7ad6b7169203331");
+    const nestedAgent = spanByLogType("agent");
+    assert.equal(nestedAgent.spanContext().traceId, "0af7651916cd43dd8448eb211c80319c");
+    assert.equal(parentSpanId(nestedAgent), "b7ad6b7169203331");
     detachNested();
 
     captureState.spans = [];
@@ -1163,9 +1167,9 @@ test("run scope nests under an active OTEL span; session scope always emits a ro
     const root = createFakeSession("3f2504e0-4f89-11d3-9a0c-0305e82c3301", []);
     const detachRoot = sessionScoped.attach(root);
     context.with(activeContext, () => runPrompt(root));
-    const rootWorkflow = spanByLogType("workflow");
-    assert.equal(rootWorkflow.spanContext().traceId, "3f2504e04f8911d39a0c0305e82c3301");
-    assert.equal(parentSpanId(rootWorkflow), undefined);
+    const rootAgent = spanByLogType("agent");
+    assert.equal(rootAgent.spanContext().traceId, "3f2504e04f8911d39a0c0305e82c3301");
+    assert.equal(parentSpanId(rootAgent), undefined);
     detachRoot();
   } finally {
     context.disable();
@@ -1193,25 +1197,25 @@ test("deactivate() closes open runs before it stops emitting", async () => {
     args: { command: "sleep 3600" },
   });
   assert.equal(spansByLogType("chat").length, 1);
-  assert.equal(spansByLogType("workflow").length, 0);
+  assert.equal(spansByLogType("agent").length, 0);
 
   // What Respan.shutdown() does first (e.g. an SDK worker receiving SIGTERM).
   instrumentor.deactivate();
   assert.equal(instrumentor.isActive(), false);
   assert.equal(session.listenerCount(), 0);
   assert.equal(instrumentor.activeSessionCount, 0);
-  const workflowSpan = spanByLogType("workflow");
   const agentSpan = spanByLogType("agent");
   const toolSpan = spanByLogType("tool");
-  assert.ok(workflowSpan && agentSpan && toolSpan, "root, agent and interrupted tool spans were emitted");
-  assert.equal(workflowSpan.attributes.status_code, 500);
+  assert.ok(agentSpan && toolSpan, "root agent and interrupted tool spans were emitted");
+  assert.equal(agentSpan.attributes.status_code, 500);
   assert.equal(
-    workflowSpan.attributes["error.message"],
+    agentSpan.attributes["error.message"],
     "Session shut down before the agent run completed",
   );
   assert.equal(toolSpan.attributes["error.message"], "Interrupted before completion");
-  assert.equal(parentSpanId(agentSpan), workflowSpan.spanContext().spanId);
-  assert.equal(spanByLogType("chat").spanContext().traceId, workflowSpan.spanContext().traceId);
+  assert.equal(parentSpanId(agentSpan), undefined);
+  assert.equal(parentSpanId(toolSpan), agentSpan.spanContext().spanId);
+  assert.equal(spanByLogType("chat").spanContext().traceId, agentSpan.spanContext().traceId);
   assert.equal(agentSpan.attributes["respan.metadata.tool_call_count"], 1);
   for (const span of captureState.spans) {
     assertCommonContract(span);
@@ -1230,8 +1234,8 @@ test("deactivate() closes open runs before it stops emitting", async () => {
   await pi.emit("context", { messages: [{ role: "user", content: "Long task" }] }, ctx);
   await pi.emit("turn_start", { turnIndex: 0 }, ctx);
   ext.deactivate();
-  assert.equal(spansByLogType("workflow").length, 1);
-  assert.equal(spanByLogType("workflow").attributes.status_code, 500);
+  assert.equal(spansByLogType("agent").length, 1);
+  assert.equal(spanByLogType("agent").attributes.status_code, 500);
   assert.equal(spanByLogType("chat").attributes["error.message"], "Interrupted before completion");
   // Nothing is emitted afterwards.
   captureState.spans = [];
@@ -1255,18 +1259,18 @@ test("a retry that never happens closes the run on auto_retry_end / agent_settle
   session.messages.push(prompt1);
   session.emit({ type: "message_end", message: failed });
   session.emit({ type: "agent_end", messages: [prompt1, failed], willRetry: true });
-  assert.equal(spansByLogType("workflow").length, 0);
+  assert.equal(spansByLogType("agent").length, 0);
   // The caller aborts during the backoff: pi cancels the retry and settles.
   session.emit({ type: "auto_retry_end", success: false, attempt: 1, finalError: "Retry cancelled" });
   session.emit({ type: "agent_settled" });
-  assert.equal(spansByLogType("workflow").length, 1);
-  const first = spanByLogType("workflow");
+  assert.equal(spansByLogType("agent").length, 1);
+  const first = spanByLogType("agent");
+  assert.equal(first.name, "pi.turn-1.agent");
   assert.equal(first.attributes.status_code, 500);
   assert.equal(first.attributes["error.message"], "Retry cancelled");
   assert.deepEqual(JSON.parse(first.attributes["traceloop.entity.input"]), [
     { role: "user", content: "First" },
   ]);
-  assert.equal(spanByLogType("agent").attributes["error.message"], "Retry cancelled");
 
   // The next prompt is its own run and trace, with its own input.
   captureState.spans = [];
@@ -1281,8 +1285,10 @@ test("a retry that never happens closes the run on auto_retry_end / agent_settle
   session.messages.push(assistantFinal);
   session.emit({ type: "agent_end", messages: session.messages, willRetry: false });
   session.emit({ type: "agent_settled" });
-  assert.equal(spansByLogType("workflow").length, 1);
-  const second = spanByLogType("workflow");
+  assert.equal(spansByLogType("agent").length, 1);
+  const second = spanByLogType("agent");
+  // session.messages holds one earlier user message → this is the session's turn 2.
+  assert.equal(second.name, "pi.turn-2.agent");
   assert.notEqual(second.spanContext().traceId, first.spanContext().traceId);
   assert.equal(second.attributes.status_code, undefined);
   assert.deepEqual(JSON.parse(second.attributes["traceloop.entity.input"]), [
@@ -1296,11 +1302,11 @@ test("a retry that never happens closes the run on auto_retry_end / agent_settle
   captureState.spans = [];
   session.emit({ type: "agent_start" });
   session.emit({ type: "agent_end", messages: [], willRetry: true });
-  assert.equal(spansByLogType("workflow").length, 0);
+  assert.equal(spansByLogType("agent").length, 0);
   session.emit({ type: "agent_settled" });
-  assert.equal(spansByLogType("workflow").length, 1);
+  assert.equal(spansByLogType("agent").length, 1);
   session.emit({ type: "agent_settled" });
-  assert.equal(spansByLogType("workflow").length, 1);
+  assert.equal(spansByLogType("agent").length, 1);
   for (const span of captureState.spans) {
     assertCommonContract(span);
   }
@@ -1371,7 +1377,7 @@ test("respan.propagateAttributes() overrides correlation for a run", () => {
         session.emit({ type: "agent_end", messages: session.messages, willRetry: false });
       },
     );
-    assert.equal(captureState.spans.length, 3);
+    assert.equal(captureState.spans.length, 2);
     for (const span of captureState.spans) {
       assert.equal(span.attributes["respan.threads.thread_identifier"], "email-chain-7");
       assert.equal(span.attributes["respan.sessions.session_identifier"], "propagated-session");
@@ -1386,7 +1392,7 @@ test("respan.propagateAttributes() overrides correlation for a run", () => {
     captureState.spans = [];
     session.emit({ type: "agent_start" });
     session.emit({ type: "agent_end", messages: [], willRetry: false });
-    assert.equal(captureState.spans.length, 2);
+    assert.equal(captureState.spans.length, 1);
     for (const span of captureState.spans) {
       assert.equal(span.attributes["respan.threads.thread_identifier"], "propagated-session");
       assert.equal(span.attributes["respan.customer_params.customer_identifier"], undefined);
@@ -1400,7 +1406,7 @@ test("respan.propagateAttributes() overrides correlation for a run", () => {
       session.emit({ type: "agent_start" });
       session.emit({ type: "agent_end", messages: [], willRetry: false });
     });
-    assert.equal(captureState.spans.length, 2);
+    assert.equal(captureState.spans.length, 1);
     for (const span of captureState.spans) {
       assert.equal(span.attributes["respan.threads.thread_identifier"], "pinned-thread");
     }
@@ -1435,11 +1441,269 @@ test("registry contract and tracer sink", () => {
     tracer.onContext([{ role: "user", content: "hi" }]);
     tracer.onMessageEnd(assistantFinal);
     tracer.onAgentEnd({ messages: [] });
-    assert.equal(sink.length, 3);
-    assert.equal(sink[2].name, "custom.workflow");
-    assert.equal(sink[2].attributes["respan.threads.thread_identifier"], "direct");
+    assert.equal(sink.length, 2);
+    assert.equal(sink[1].name, "pi.turn-1.agent");
+    assert.equal(sink[1].attributes["traceloop.workflow.name"], "custom");
+    assert.equal(sink[1].attributes["respan.threads.thread_identifier"], "direct");
     for (const span of sink) {
       assertCommonContract(span);
     }
   });
+});
+
+// ── Turn numbering ────────────────────────────────────────────────────────
+
+/** A pi session-file entry as returned by `sessionManager.getBranch()` / `getEntries()`. */
+function sessionEntry(role, content) {
+  return { type: "message", message: { role, content, timestamp: 1 } };
+}
+
+function assertTurn(span, agentName, turnNumber) {
+  assert.equal(span.attributes["respan.entity.log_type"], "agent");
+  assert.equal(span.name, `${agentName}.turn-${turnNumber}.agent`);
+  assert.equal(span.attributes["respan.metadata.turn_number"], turnNumber);
+  assert.equal(span.attributes["respan.internal.span_name.kind"], "agent");
+  assert.equal(span.attributes["respan.internal.span_name.detail"], `turn-${turnNumber}`);
+  assert.equal(span.attributes["traceloop.entity.name"], agentName);
+  assert.equal(span.attributes["traceloop.entity.path"], "");
+}
+
+test("turn numbering: extension mode counts the user messages on the session branch", async () => {
+  captureState.spans = [];
+  const instrumentor = new PiInstrumentor();
+  instrumentor.activate();
+  const pi = createFakePi();
+  instrumentor.extension(pi);
+
+  // A resumed session: two prompts already on the branch (plus non-message entries).
+  const branch = [
+    { type: "session", id: "root", version: 3 },
+    sessionEntry("user", "First question"),
+    sessionEntry("assistant", [{ type: "text", text: "First answer" }]),
+    sessionEntry("user", [{ type: "text", text: "Second question" }]),
+    sessionEntry("assistant", [{ type: "text", text: "Second answer" }]),
+    { type: "compaction", id: "c1", summary: "…" },
+  ];
+  // getEntries() holds abandoned branches too; getBranch() must win.
+  const entries = [...branch, sessionEntry("user", "Abandoned"), sessionEntry("user", "Also abandoned")];
+  const ctx = createFakeCtx({
+    sessionManager: {
+      getSessionId: () => "sess-resumed",
+      getSessionFile: () => undefined,
+      getBranch: () => branch,
+      getEntries: () => entries,
+    },
+  });
+  await replayRun(pi, ctx, { shutdown: false });
+
+  assert.equal(captureState.spans.length, 4);
+  const turn = spanByLogType("agent");
+  assertTurn(turn, "pi", 3);
+  assert.equal(parentSpanId(turn), undefined);
+  for (const span of captureState.spans) {
+    if (span !== turn) {
+      assert.equal(parentSpanId(span), turn.spanContext().spanId);
+    }
+    assertCommonContract(span);
+  }
+
+  // Without getBranch(), getEntries() is used.
+  captureState.spans = [];
+  const entriesOnly = createFakeCtx({
+    sessionManager: {
+      getSessionId: () => "sess-entries",
+      getSessionFile: () => undefined,
+      getEntries: () => entries,
+    },
+  });
+  await replayRun(pi, entriesOnly, { shutdown: false });
+  assertTurn(spanByLogType("agent"), "pi", 5);
+});
+
+test("turn numbering: a prompt already appended to the session is not counted twice", async () => {
+  captureState.spans = [];
+  const instrumentor = new PiInstrumentor();
+  instrumentor.activate();
+  const pi = createFakePi();
+  instrumentor.extension(pi);
+  const branch = [
+    sessionEntry("user", "First question"),
+    sessionEntry("assistant", [{ type: "text", text: "First answer" }]),
+    sessionEntry("user", "Second question"),
+    sessionEntry("assistant", [{ type: "text", text: "Second answer" }]),
+    // The runtime already appended the prompt of this run (replayRun's "Inspect the repo").
+    sessionEntry("user", [{ type: "text", text: "Inspect the repo" }]),
+  ];
+  const ctx = createFakeCtx({
+    sessionManager: {
+      getSessionId: () => "sess-appended",
+      getSessionFile: () => undefined,
+      getBranch: () => branch,
+    },
+  });
+  await replayRun(pi, ctx, { shutdown: false });
+  assertTurn(spanByLogType("agent"), "pi", 3);
+
+  // A different last prompt is a new turn.
+  captureState.spans = [];
+  branch.push(sessionEntry("assistant", [{ type: "text", text: "Third answer" }]));
+  branch.push(sessionEntry("user", "Something else"));
+  await replayRun(pi, ctx, { shutdown: false });
+  assertTurn(spanByLogType("agent"), "pi", 5);
+
+  // The same prompt sent again after an answer ("continue" twice in a row) is
+  // a new turn: only a user message that is the LAST message counts as appended.
+  captureState.spans = [];
+  branch.push(sessionEntry("assistant", [{ type: "text", text: "Fourth answer" }]));
+  branch.push(sessionEntry("user", "Inspect the repo"));
+  branch.push(sessionEntry("assistant", [{ type: "text", text: "Fifth answer" }]));
+  branch.push({ type: "model_change", provider: "anthropic", modelId: "claude-sonnet-4-5" });
+  await replayRun(pi, ctx, { shutdown: false });
+  assertTurn(spanByLogType("agent"), "pi", 6);
+});
+
+test("turn numbering: without session history, consecutive runs count up within the tracer", async () => {
+  captureState.spans = [];
+  const instrumentor = new PiInstrumentor({ agentName: "helper" });
+  instrumentor.activate();
+  const pi = createFakePi();
+  instrumentor.extension(pi);
+  // createFakeCtx()'s session manager has neither getBranch() nor getEntries().
+  const ctx = createFakeCtx();
+  await replayRun(pi, ctx, { shutdown: false });
+  await replayRun(pi, ctx, { shutdown: false });
+  const turns = spansByLogType("agent");
+  assert.equal(turns.length, 2);
+  assertTurn(turns[0], "helper", 1);
+  assertTurn(turns[1], "helper", 2);
+  // Run scope: each turn is its own trace.
+  assert.notEqual(turns[0].spanContext().traceId, turns[1].spanContext().traceId);
+
+  // A bare tracer counts the same way; an explicit turnNumber wins over the count.
+  const sink = [];
+  const tracer = new PiSessionTracer({ emit: (span) => sink.push(span) });
+  tracer.setSession({ sessionId: "direct" });
+  for (const prompt of ["one", "two", "three"]) {
+    tracer.onBeforeAgentStart({ prompt, systemPrompt: "sys" });
+    tracer.onAgentStart();
+    tracer.onAgentEnd({ messages: [] });
+  }
+  assert.deepEqual(
+    sink.map((span) => span.name),
+    ["pi.turn-1.agent", "pi.turn-2.agent", "pi.turn-3.agent"],
+  );
+  tracer.onBeforeAgentStart({ prompt: "resumed", turnNumber: 9 });
+  tracer.onAgentEnd({ messages: [] });
+  assertTurn(sink[3], "pi", 9);
+  // A continuation (agent_start without before_agent_start) is a turn of its own.
+  tracer.onAgentStart();
+  tracer.onAgentEnd({ messages: [] });
+  assertTurn(sink[4], "pi", 10);
+  assert.equal(sink[4].attributes["respan.metadata.continuation"], true);
+});
+
+test("turn numbering: subscribe mode counts the user messages of session.messages", () => {
+  captureState.spans = [];
+  const instrumentor = new PiInstrumentor();
+  instrumentor.activate();
+  const history = () => [
+    { role: "user", content: "Earlier question", timestamp: 1 },
+    { ...assistantFinal, content: [{ type: "text", text: "Earlier answer" }] },
+    { role: "user", content: [{ type: "text", text: "Another question" }], timestamp: 3 },
+    { ...assistantFinal, content: [{ type: "text", text: "Another answer" }] },
+  ];
+  const session = createFakeSession("sdk-turns", history());
+  const detach = instrumentor.attach(session);
+
+  // pi appends the prompt to session.messages after agent_start: 2 earlier prompts → turn 3.
+  const prompt = { role: "user", content: "Third question", timestamp: 5 };
+  session.emit({ type: "agent_start" });
+  session.emit({ type: "turn_start" });
+  session.emit({ type: "message_start", message: prompt });
+  session.emit({ type: "message_end", message: prompt });
+  session.messages.push(prompt);
+  session.emit({ type: "message_start", message: { ...assistantFinal, content: [], stopReason: "pending" } });
+  session.emit({ type: "message_end", message: assistantFinal });
+  session.messages.push(assistantFinal);
+  session.emit({ type: "agent_end", messages: session.messages, willRetry: false });
+  assert.equal(captureState.spans.length, 2);
+  const third = spanByLogType("agent");
+  assertTurn(third, "pi", 3);
+  assert.deepEqual(JSON.parse(third.attributes["traceloop.entity.input"]), [
+    { role: "user", content: "Third question" },
+  ]);
+
+  // The next prompt of the same session is turn 4.
+  captureState.spans = [];
+  const next = { role: "user", content: "Fourth question", timestamp: 7 };
+  session.emit({ type: "agent_start" });
+  session.emit({ type: "message_start", message: next });
+  session.emit({ type: "message_end", message: next });
+  session.messages.push(next);
+  session.emit({ type: "agent_end", messages: session.messages, willRetry: false });
+  assertTurn(spanByLogType("agent"), "pi", 4);
+  detach();
+
+  // A session manager on the session (its branch) wins over session.messages.
+  captureState.spans = [];
+  const managed = createFakeSession("sdk-managed", history());
+  managed.sessionManager = {
+    getSessionId: () => "sdk-managed",
+    getBranch: () => [sessionEntry("user", "Only one so far")],
+  };
+  const detachManaged = instrumentor.attach(managed);
+  managed.emit({ type: "agent_start" });
+  managed.emit({ type: "agent_end", messages: [], willRetry: false });
+  assertTurn(spanByLogType("agent"), "pi", 2);
+  detachManaged();
+});
+
+test("turn numbering: session scope numbers the roots of the shared trace", async () => {
+  captureState.spans = [];
+  const uuid = "9b2d3c44-1e0f-4a6b-8c7d-0123456789ab";
+  const instrumentor = new PiInstrumentor({ traceScope: "session" });
+  instrumentor.activate();
+  const pi = createFakePi();
+  instrumentor.extension(pi);
+  const ctx = createFakeCtx({ sessionId: uuid });
+  await replayRun(pi, ctx, { shutdown: false });
+  await replayRun(pi, ctx, { shutdown: false });
+
+  const turns = spansByLogType("agent");
+  assert.equal(turns.length, 2);
+  assertTurn(turns[0], "pi", 1);
+  assertTurn(turns[1], "pi", 2);
+  assert.notEqual(turns[0].spanContext().spanId, turns[1].spanContext().spanId);
+  for (const turn of turns) {
+    assert.equal(turn.spanContext().traceId, sessionTraceId(uuid));
+    assert.equal(parentSpanId(turn), undefined);
+    assert.equal(turn.attributes["respan.trace.trace_group_identifier"], uuid);
+  }
+
+  // The session resumed in a new process (a fresh extension runtime) continues
+  // the numbering from the session history, in the same trace.
+  captureState.spans = [];
+  const resumedPi = createFakePi();
+  instrumentor.extension(resumedPi);
+  const resumedCtx = createFakeCtx({
+    sessionId: uuid,
+    sessionManager: {
+      getSessionId: () => uuid,
+      getSessionFile: () => undefined,
+      getBranch: () => [
+        sessionEntry("user", "First question"),
+        sessionEntry("assistant", [{ type: "text", text: "First answer" }]),
+        sessionEntry("user", "Second question"),
+        sessionEntry("assistant", [{ type: "text", text: "Second answer" }]),
+      ],
+    },
+  });
+  await replayRun(resumedPi, resumedCtx, { shutdown: false });
+  const resumed = spanByLogType("agent");
+  assertTurn(resumed, "pi", 3);
+  assert.equal(resumed.spanContext().traceId, sessionTraceId(uuid));
+  assert.equal(parentSpanId(resumed), undefined);
+  for (const span of captureState.spans) {
+    assertCommonContract(span);
+  }
 });

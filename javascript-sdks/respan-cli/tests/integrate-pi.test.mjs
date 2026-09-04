@@ -114,3 +114,20 @@ test('buildPiRespanConfig never writes credentials', () => {
   const serialized = JSON.stringify(config);
   assert.equal(/api[_-]?key|access[_-]?token/i.test(serialized), false);
 });
+
+test('buildPiRespanConfig --with-collector points base_url at the local collector', () => {
+  // The extension appends /api and posts to <base_url>/api/v2/traces, which is
+  // the collector's traces_url_path.
+  const config = buildPiRespanConfig({}, { enabled: true, baseUrl: DEFAULT_BASE_URL, collectorPort: 4318 });
+  assert.deepEqual(config, { enabled: true, base_url: 'http://127.0.0.1:4318' });
+
+  // The collector wins over an explicit base URL; the port is honoured.
+  assert.equal(
+    buildPiRespanConfig({}, { enabled: true, baseUrl: 'https://respan.example.com/api', collectorPort: 4319 }).base_url,
+    'http://127.0.0.1:4319',
+  );
+  // Without the option nothing changes.
+  assert.equal('base_url' in buildPiRespanConfig({}, { enabled: true, baseUrl: DEFAULT_BASE_URL }), false);
+  // Re-running without --with-collector keeps the stored collector URL (layering).
+  assert.equal(buildPiRespanConfig(config, { enabled: true, baseUrl: DEFAULT_BASE_URL }).base_url, 'http://127.0.0.1:4318');
+});

@@ -34,6 +34,7 @@ import type {
   PiExtensionAPI,
   PiExtensionContextLike,
   PiExtensionFactory,
+  PiSessionManagerLike,
   PiToolDefinitionLike,
 } from "./_pi_types.js";
 
@@ -117,7 +118,7 @@ export class PiInstrumentor implements RespanInstrumentation {
   }
 
   /**
-   * Closes every open run — emitting its workflow/agent spans and any
+   * Closes every open run — emitting its turn (agent) span and any
    * interrupted chat/tool spans while emission is still enabled —
    * unsubscribes every `attach()`ed session, then stops emitting.
    * `Respan.shutdown()` calls this before the final flush, so a run cut short
@@ -282,11 +283,15 @@ export class PiInstrumentor implements RespanInstrumentation {
     on("before_agent_start", (event, ctx) => {
       bind(ctx);
       refreshTools();
-      tracer.onBeforeAgentStart({ prompt: event.prompt, systemPrompt: event.systemPrompt });
+      tracer.onBeforeAgentStart({
+        prompt: event.prompt,
+        systemPrompt: event.systemPrompt,
+        turnNumber: turnNumberFromSession(ctx?.sessionManager, event.prompt),
+      });
     });
     on("agent_start", (_event, ctx) => {
       bind(ctx);
-      tracer.onAgentStart();
+      tracer.onAgentStart({ turnNumber: turnNumberFromSession(ctx?.sessionManager) });
     });
     on("context", (event) => {
       tracer.onContext(event.messages);
@@ -404,7 +409,11 @@ function handleSessionEvent(
     case "agent_start":
       bindSession(tracer, session);
       tracer.setToolDefinitions(readSessionTools(session));
-      tracer.onAgentStart();
+      tracer.onAgentStart({
+        turnNumber:
+          turnNumberFromSession(session.sessionManager) ??
+          turnNumberFromMessages(callSafely(() => session.messages)),
+      });
       break;
     case "agent_end":
       tracer.onAgentEnd({ messages: event.messages, willRetry: event.willRetry === true });
@@ -591,4 +600,81 @@ function stringValue(value: unknown): string | undefined {
 
 function isRecord(value: unknown): value is RecordValue {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+// ── Turn numbering ────────────────────────────────────────────────────────
+
+/**
+ * 1-based number of the prompt that is about to run, derived from the session
+ * history so it survives a resume in a new process. pi session entries look
+ * like `{ type: "message", message: { role: "user" } }`; plain message arrays
+ * like `{ role: "user" }`. If the LAST message on the branch is a user message
+ * equal to the current prompt (the runtime appended it before the event), it
+ * is not counted twice; an earlier identical prompt ("continue" twice in a
+ * row) is followed by an assistant message and stays its own turn.
+ */
+function turnNumberFromSession(
+  sessionManager: PiSessionManagerLike | undefined,
+  currentPrompt?: unknown,
+): number | undefined {
+  const entries =
+    callSafely(() => sessionManager?.getBranch?.()) ??
+    callSafely(() => sessionManager?.getEntries?.());
+  if (!Array.isArray(entries)) {
+    return undefined;
+  }
+  return countTurns(entries, currentPrompt);
+}
+
+function turnNumberFromMessages(messages: unknown, currentPrompt?: unknown): number | undefined {
+  if (!Array.isArray(messages)) {
+    return undefined;
+  }
+  return countTurns(messages, currentPrompt);
+}
+
+function countTurns(items: unknown[], currentPrompt?: unknown): number {
+  let count = 0;
+  let last: { role: string; content: unknown } | undefined;
+  for (const item of items) {
+    const message = messageOf(item);
+    if (!message) {
+      continue;
+    }
+    last = message;
+    if (message.role === "user") {
+      count += 1;
+    }
+  }
+  const alreadyAppended =
+    typeof currentPrompt === "string" &&
+    currentPrompt.length > 0 &&
+    last?.role === "user" &&
+    renderedText(last.content) === currentPrompt;
+  return alreadyAppended ? count : count + 1;
+}
+
+function messageOf(item: unknown): { role: string; content: unknown } | undefined {
+  if (!isRecord(item)) {
+    return undefined;
+  }
+  if (typeof item.role === "string") {
+    return { role: item.role, content: item.content };
+  }
+  if (item.type === "message" && isRecord(item.message) && typeof item.message.role === "string") {
+    return { role: item.message.role, content: item.message.content };
+  }
+  return undefined;
+}
+
+function renderedText(content: unknown): string | undefined {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => (isRecord(part) && typeof part.text === "string" ? part.text : ""))
+      .join("");
+  }
+  return undefined;
 }

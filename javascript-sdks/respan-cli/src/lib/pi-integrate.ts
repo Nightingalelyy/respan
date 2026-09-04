@@ -1,6 +1,7 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { DEFAULT_BASE_URL, Scope } from './integrate.js';
+import { collectorBaseUrl } from './collector.js';
 
 // Pure helpers for `respan integrate pi`. Kept free of oclif / process state so
 // they can be unit-tested directly (tests/integrate-pi.test.mjs).
@@ -50,6 +51,12 @@ export interface PiRespanConfigOptions {
   traceScope?: PiTraceScope;
   /** Only written when it differs from the SaaS default. */
   baseUrl?: string;
+  /**
+   * Port of a local `respan collector`. When set, `base_url` points at it
+   * (http://127.0.0.1:<port>) instead of `baseUrl`, so traces are delivered
+   * through the collector's persistent queue.
+   */
+  collectorPort?: number;
   /** Custom attributes, stored under `metadata` and merged with existing ones. */
   attrs?: Record<string, string>;
 }
@@ -86,7 +93,9 @@ export function buildPiRespanConfig(
   if (opts.traceScope) {
     config.trace_scope = opts.traceScope;
   }
-  if (opts.baseUrl) {
+  if (opts.collectorPort !== undefined) {
+    config.base_url = collectorBaseUrl(opts.collectorPort);
+  } else if (opts.baseUrl) {
     const normalized = opts.baseUrl.replace(/\/+$/, '');
     if (normalized && normalized !== DEFAULT_BASE_URL) {
       config.base_url = normalized;

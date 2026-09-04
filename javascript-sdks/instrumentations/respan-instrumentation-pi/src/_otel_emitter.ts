@@ -9,13 +9,17 @@
  * handlers below.
  *
  * Trace model: by default ONE TRACE PER AGENT RUN (user prompt → `agent_end`,
- * `traceScope: "run"`). Every run of a pi session shares
- * `respan.threads.thread_identifier` / `respan.sessions.session_identifier` =
- * the pi session id, so a session that is resumed after a week of silence
- * simply adds another trace to the same thread. With `traceScope: "session"`
- * every run of the session shares one trace id derived from the session id
- * (one multi-root trace per session). No span is ever held open across idle
- * time in either scope.
+ * `traceScope: "run"`). Each run is one root agent span displayed as
+ * `agent.turn-<n>` (n = the prompt's index within the session, like
+ * Braintrust's "Turn n"), with one chat span per assistant message and one tool
+ * span per tool execution underneath. Every run of a pi session shares
+ * `respan.threads.thread_identifier` / `respan.sessions.session_identifier` /
+ * `respan.trace.trace_group_identifier` = the pi session id, so a session that
+ * is resumed after a week of silence simply adds another trace to the same
+ * thread. With `traceScope: "session"` every run of the session shares one
+ * trace id derived from the session id (one multi-root trace per session:
+ * Session > turn-1, turn-2, … > llm / tool). No span is ever held open across
+ * idle time in either scope.
  */
 
 import { createHash } from "node:crypto";
@@ -65,9 +69,9 @@ export type PiTraceScope = "run" | "session";
 export type PiMetadataValue = string | number | boolean;
 
 export interface PiTracerOptions {
-  /** Name of the root workflow span and `respan.trace.trace_group_identifier`. Default `"pi"`. */
+  /** `traceloop.workflow.name` on the run span. Default `"pi"`. */
   workflowName?: string;
-  /** Name of the agent span. Default `"pi"`. */
+  /** Agent name (`respan.metadata.agent_name`); the run span itself is displayed as `agent.turn-<n>`. Default `"pi"`. */
   agentName?: string;
   /**
    * `"run"` (default): one trace per agent run (a prompt → `agent_end`),
@@ -75,7 +79,7 @@ export interface PiTracerOptions {
    * run of a pi session shares one trace id derived from the pi session id
    * (see `sessionTraceId`), so a long-lived session — an email chain resumed
    * over weeks — is one multi-root trace; each run still emits its own root
-   * workflow span.
+   * turn (agent) span.
    */
   traceScope?: PiTraceScope;
   /**
@@ -157,9 +161,10 @@ interface PendingTask {
 
 interface RunState {
   traceId: string;
-  workflowSpanId: string;
   agentSpanId: string;
   parentSpanId?: string;
+  /** 1-based index of this run (user prompt) within the pi session. */
+  turnNumber: number;
   startTime: HrTime;
   prompt: string;
   promptKnown: boolean;
@@ -258,6 +263,8 @@ export class PiSessionTracer {
   private session: PiSessionInfo = {};
   private model?: PiModelLike;
   private thinkingLevel?: string;
+  /** Number of runs (prompts) seen by this tracer; the turn number when the adapter cannot read session history. */
+  private runCounter = 0;
   private toolDefinitionsJson?: string;
   private toolDefinitionsTruncated = false;
 
@@ -365,7 +372,12 @@ export class PiSessionTracer {
     // Nothing to emit: runs open on before_agent_start / agent_start.
   }
 
-  onBeforeAgentStart(event: { prompt?: unknown; systemPrompt?: unknown }): void {
+  onBeforeAgentStart(event: {
+    prompt?: unknown;
+    systemPrompt?: unknown;
+    /** 1-based number of this prompt within the session, when the adapter knows it. */
+    turnNumber?: unknown;
+  }): void {
     if (this.run) {
       // A run was still open (missed agent_end); close it before starting the next.
       this.closeRun();
@@ -379,14 +391,20 @@ export class PiSessionTracer {
       promptKnown: true,
       systemPrompt: nonEmptyString(event?.systemPrompt),
       truncated: capture.truncated,
+      turnNumber: positiveInteger(event?.turnNumber),
     });
   }
 
-  onAgentStart(): void {
+  onAgentStart(event: { turnNumber?: unknown } = {}): void {
     if (this.run) {
       return;
     }
-    this.openRun({ prompt: "", promptKnown: false, truncated: false });
+    this.openRun({
+      prompt: "",
+      promptKnown: false,
+      truncated: false,
+      turnNumber: positiveInteger(event?.turnNumber),
+    });
   }
 
   /**
@@ -694,16 +712,21 @@ export class PiSessionTracer {
     promptKnown: boolean;
     systemPrompt?: string;
     truncated: boolean;
+    turnNumber?: number;
   }): void {
     const { traceId, parentSpanId } = this.traceContext();
+    // Turn numbering: the adapter passes the number of prompts already in the
+    // session when it can read the session history (so numbering survives a
+    // resume in a new process); otherwise count within this tracer.
+    this.runCounter = init.turnNumber && init.turnNumber > 0 ? init.turnNumber : this.runCounter + 1;
     // Random span ids: in session scope several processes (a resumed session)
     // write into one trace, so ids derived from a per-process counter could
     // collide.
     this.run = {
       traceId,
-      workflowSpanId: ensureSpanId(),
       agentSpanId: ensureSpanId(),
       parentSpanId,
+      turnNumber: this.runCounter,
       startTime: hrTime(),
       prompt: init.prompt,
       promptKnown: init.promptKnown,
@@ -744,14 +767,19 @@ export class PiSessionTracer {
       errorMessage = run.lastErrorMessage ?? `pi assistant message ${run.lastStopReason}`;
     }
 
-    const agentAttrs = this.baseAttrs(this.agentName, this.agentName, RespanLogType.AGENT);
+    // One run-level span per prompt: the agent span is the trace root (or the
+    // child of an active OTEL span) and is displayed as `agent.turn-<n>`, like
+    // Braintrust's "Turn n". It is a structural span: no model on it — the
+    // model lives on the chat spans underneath.
+    const turnDetail = `turn-${run.turnNumber}`;
+    const agentAttrs = this.baseAttrs(this.agentName, "", RespanLogType.AGENT);
     agentAttrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = input;
     agentAttrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = output;
     agentAttrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] = this.workflowName;
     agentAttrs[RespanSpanAttributes.RESPAN_METADATA_AGENT_NAME] = this.agentName;
-    if (this.model?.id) {
-      agentAttrs[SpanAttributes.LLM_REQUEST_MODEL] = this.model.id;
-    }
+    agentAttrs[RespanSpanAttributes.RESPAN_INTERNAL_SPAN_NAME_KIND] = "agent";
+    agentAttrs[RespanSpanAttributes.RESPAN_INTERNAL_SPAN_NAME_DETAIL] = turnDetail;
+    setMetadata(agentAttrs, "turn_number", run.turnNumber);
     setMetadata(agentAttrs, "pi_version", this.session.piVersion);
     setMetadata(agentAttrs, "thinking_level", this.thinkingLevel);
     setMetadata(agentAttrs, "session_file", this.session.sessionFile);
@@ -766,33 +794,14 @@ export class PiSessionTracer {
       agentAttrs[metadataKey("truncated")] = true;
     }
 
-    const workflowAttrs = this.baseAttrs(this.workflowName, "", RespanLogType.WORKFLOW);
-    workflowAttrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = input;
-    workflowAttrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = output;
-    workflowAttrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] = this.workflowName;
-    if (truncated) {
-      workflowAttrs[metadataKey("truncated")] = true;
-    }
-
     this.emitSpan({
-      name: `${this.agentName}.agent`,
+      name: `${this.agentName}.${turnDetail}.agent`,
       traceId: run.traceId,
       spanId: run.agentSpanId,
-      parentId: run.workflowSpanId,
-      startTime: run.startTime,
-      endTime,
-      attributes: agentAttrs,
-      statusCode,
-      errorMessage,
-    });
-    this.emitSpan({
-      name: `${this.workflowName}.workflow`,
-      traceId: run.traceId,
-      spanId: run.workflowSpanId,
       parentId: run.parentSpanId,
       startTime: run.startTime,
       endTime,
-      attributes: workflowAttrs,
+      attributes: agentAttrs,
       statusCode,
       errorMessage,
     });
@@ -1067,11 +1076,13 @@ export class PiSessionTracer {
       [SpanAttributes.TRACELOOP_ENTITY_PATH]: entityPath,
       "telemetry.sdk.name": PI_INSTRUMENTATION_NAME,
       "telemetry.sdk.version": PACKAGE_VERSION,
-      [RespanSpanAttributes.RESPAN_TRACE_GROUP_ID]: this.workflowName,
     };
     const sessionId = this.session.sessionId;
     if (sessionId) {
       attrs[RespanSpanAttributes.RESPAN_SESSION_ID] = sessionId;
+      // The trace group ties the traces of one resumed session together
+      // (Respan's documented use of `trace_group_identifier`).
+      attrs[RespanSpanAttributes.RESPAN_TRACE_GROUP_ID] = sessionId;
     }
     // The session-id default for the thread id is applied in emitSpan() so a
     // propagated thread_identifier can take precedence over it.
@@ -1092,7 +1103,7 @@ export class PiSessionTracer {
   }
 
   /**
-   * Trace id / parent for a new root (a run's workflow span, or a compaction /
+   * Trace id / parent for a new root (a run's turn span, or a compaction /
    * branch-summary span outside a run). Run scope nests under an active OTEL
    * span when there is one; session scope derives the trace id from the pi
    * session id and always emits a root (the session id wins over any active
@@ -1450,6 +1461,11 @@ function compactRecord(record: Record<string, unknown>): RecordValue {
 
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  const parsed = integerValue(value);
+  return parsed !== undefined && parsed > 0 ? parsed : undefined;
 }
 
 function integerValue(value: unknown): number | undefined {

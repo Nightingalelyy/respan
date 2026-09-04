@@ -345,7 +345,7 @@ test("Respan's console chatter is filtered while pi's own console output passes 
           ctx,
         );
         await pi.emit("agent_end", { messages: [] }, ctx);
-        assert.equal(received.length, 3, "chat, agent and workflow spans reached the processor");
+        assert.equal(received.length, 2, "chat and agent spans reached the processor");
         assert.deepEqual(stdout, [], "no [Respan …] line reached stdout");
 
         // Everything else is forwarded untouched, even while flushes are in flight.

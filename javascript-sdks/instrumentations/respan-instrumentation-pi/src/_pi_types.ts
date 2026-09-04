@@ -149,6 +149,10 @@ export interface PiSessionManagerLike {
   getSessionId?(): string;
   getSessionFile?(): string | undefined;
   getCwd?(): string;
+  /** All entries of the session file (pi `ReadonlySessionManager.getEntries`). */
+  getEntries?(): unknown[];
+  /** Entries on the current branch (pi `ReadonlySessionManager.getBranch`). */
+  getBranch?(): unknown[];
 }
 
 /** Subset of pi's `ExtensionContext` that the instrumentation reads. */
