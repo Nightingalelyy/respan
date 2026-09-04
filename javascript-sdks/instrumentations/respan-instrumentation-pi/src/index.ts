@@ -169,9 +169,9 @@ export class PiInstrumentor implements RespanInstrumentation {
     return this._active;
   }
 
-  /** Configured trace scope (`"run"` unless `"session"` was requested). */
+  /** Configured trace scope (`"session"` unless `"run"` was requested). */
   get traceScope(): PiTraceScope {
-    return this._options.traceScope === "session" ? "session" : "run";
+    return this._options.traceScope === "run" ? "run" : "session";
   }
 
   /** Number of live tracers (attached sessions + live extension runtimes). */

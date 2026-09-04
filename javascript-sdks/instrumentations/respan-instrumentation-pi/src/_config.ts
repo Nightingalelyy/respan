@@ -23,7 +23,7 @@ export interface PiRespanConfig {
   baseURL?: string;
   workflowName?: string;
   agentName?: string;
-  /** `"run"` (default: one trace per agent run) or `"session"` (one multi-root trace per pi session). */
+  /** `"session"` (default: one multi-root trace per pi session) or `"run"` (one trace per agent run). */
   traceScope?: PiTraceScope;
   customerIdentifier?: string;
   metadata?: Record<string, string>;
