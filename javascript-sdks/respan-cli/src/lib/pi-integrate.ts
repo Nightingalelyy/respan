@@ -39,7 +39,7 @@ export function piConfigPath(
     : path.join(home, '.pi', 'agent', 'respan.json');
 }
 
-/** `run` = one trace per agent run (default); `session` = one multi-root trace per pi session. */
+/** `session` = one multi-root trace per pi session (default); `run` = one trace per agent run. */
 export type PiTraceScope = 'run' | 'session';
 
 export interface PiRespanConfigOptions {

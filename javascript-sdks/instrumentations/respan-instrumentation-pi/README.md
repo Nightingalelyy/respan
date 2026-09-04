@@ -116,7 +116,7 @@ no base URL is configured. Base URLs are normalized to end with `/api`.
 | `base_url` | string | Respan API base URL (self-hosted / EU) |
 | `workflow_name` | string | `traceloop.workflow.name` on every turn span (`span_name` is accepted as an alias) |
 | `agent_name` | string | Agent name: turn spans are named `<agent_name>.turn-<n>.agent` and carry `respan.metadata.agent_name` |
-| `trace_scope` | `"run"` \| `"session"` | One trace per agent run (default) or one multi-root trace per pi session — see [below](#one-trace-per-run-vs-one-trace-per-session) |
+| `trace_scope` | `"session"` \| `"run"` | One multi-root trace per pi session (default) or one trace per agent run — see [below](#one-trace-per-run-vs-one-trace-per-session) |
 | `customer_id` | string | `respan.customer_params.customer_identifier` on every span |
 | `project_id` | string | Recorded as `respan.metadata.project_id` |
 | `metadata` | object of strings | `respan.metadata.<key>` on every span |
@@ -324,12 +324,12 @@ resumed after days of silence).
 
 `traceScope` decides what one Respan *trace* is for a pi session:
 
-| | `"run"` (default) | `"session"` |
+| | `"session"` (default) | `"run"` |
 |---|---|---|
-| Trace | one per agent run (user prompt → `agent_end`) | one per pi session, shared by every run |
-| Trace id | random, or the active OTEL span's trace when there is one (the run nests under it) | derived from the pi session id — the dash-stripped UUID, or a SHA-256 prefix for non-UUID ids (`sessionTraceId(id)`); an active OTEL span is ignored |
-| Root spans | one turn span (`pi.turn-<n>.agent`) per trace | one turn span per run; all of them are roots of the same trace (Session > turn-1, turn-2, …) |
-| Compaction / branch summary outside a run | root of its own trace | another root of the session trace |
+| Trace | one per pi session, shared by every run | one per agent run (user prompt → `agent_end`) |
+| Trace id | derived from the pi session id — the dash-stripped UUID, or a SHA-256 prefix for non-UUID ids (`sessionTraceId(id)`); an active OTEL span is ignored | random, or the active OTEL span's trace when there is one (the run nests under it) |
+| Root spans | one turn span per run; all of them are roots of the same trace (Session > turn-1, turn-2, …) | one turn span (`pi.turn-<n>.agent`) per trace |
+| Compaction / branch summary outside a run | another root of the session trace | root of its own trace |
 | `respan.threads.thread_identifier` / `respan.sessions.session_identifier` | pi session id | pi session id |
 
 In session scope the Respan backend groups the roots under a synthetic
@@ -342,12 +342,12 @@ open across a pause. Turn span ids are random, so runs of one
 session emitted from different processes never collide inside the shared
 trace.
 
-Pick `"run"` for interactive CLI use and short jobs: each prompt is a
-self-contained trace, and the Threads page (thread id = session id) still
-shows the whole conversation with per-thread cost and token totals. Pick
-`"session"` for long-lived, resumed sessions — one pi session per email chain
-that wakes up every few days — so the chain is one trace you can open as a
-whole.
+`"session"` is the default: a pi session — one email chain that wakes up every
+few days, from whichever process handles it — is one trace you can open as a
+whole, the same shape as Braintrust's session trace. Pick `"run"` when each
+prompt should be a self-contained trace with its own cost and latency (short
+jobs, or when a run must nest under an outer OTEL trace); the Threads page
+(thread id = session id) still shows the whole conversation either way.
 
 Set it with the `traceScope` option, `"trace_scope": "session"` in
 `respan.json` (`respan integrate pi --trace-scope session`), or

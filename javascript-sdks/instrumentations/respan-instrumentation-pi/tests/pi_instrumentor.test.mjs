@@ -1117,9 +1117,10 @@ test("traceScope: session shares one trace across runs; run scope gives one trac
     assert.equal(span.spanContext().traceId, hashed);
   }
 
-  // Run scope (default): the same session gets a new trace per run.
+  // Session scope is the default; run scope gives the same session a new trace per run.
+  assert.equal(new PiInstrumentor().traceScope, "session");
   captureState.spans = [];
-  const perRun = new PiInstrumentor();
+  const perRun = new PiInstrumentor({ traceScope: "run" });
   assert.equal(perRun.traceScope, "run");
   perRun.activate();
   const runPi = createFakePi();
@@ -1155,7 +1156,7 @@ test("run scope nests under an active OTEL span; session scope always emits a ro
     };
 
     captureState.spans = [];
-    const runScoped = new PiInstrumentor();
+    const runScoped = new PiInstrumentor({ traceScope: "run" });
     runScoped.activate();
     const nested = createFakeSession("3f2504e0-4f89-11d3-9a0c-0305e82c3301", []);
     const detachNested = runScoped.attach(nested);
@@ -1249,7 +1250,7 @@ test("deactivate() closes open runs before it stops emitting", async () => {
 
 test("a retry that never happens closes the run on auto_retry_end / agent_settled", () => {
   captureState.spans = [];
-  const instrumentor = new PiInstrumentor({ promptCapture: "delta" });
+  const instrumentor = new PiInstrumentor({ traceScope: "run", promptCapture: "delta" });
   instrumentor.activate();
   const session = createFakeSession("retry-abandoned", []);
   const detach = instrumentor.attach(session);
@@ -1568,7 +1569,7 @@ test("turn numbering: a prompt already appended to the session is not counted tw
 
 test("turn numbering: without session history, consecutive runs count up within the tracer", async () => {
   captureState.spans = [];
-  const instrumentor = new PiInstrumentor({ agentName: "helper" });
+  const instrumentor = new PiInstrumentor({ traceScope: "run", agentName: "helper" });
   instrumentor.activate();
   const pi = createFakePi();
   instrumentor.extension(pi);

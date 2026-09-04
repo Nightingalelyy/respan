@@ -170,7 +170,7 @@ test("enabled config initializes once, flushes after runs and shuts down on quit
   assert.equal(options.logLevel, "debug");
   assert.equal(options.instrumentations.length, 1);
   assert.equal(options.instrumentations[0].name, "pi");
-  assert.equal(options.instrumentations[0].traceScope, "run");
+  assert.equal(options.instrumentations[0].traceScope, "session");
   assert.equal(calls.initialize, 0);
 
   // The tracer handlers and the lifecycle handlers are both registered.

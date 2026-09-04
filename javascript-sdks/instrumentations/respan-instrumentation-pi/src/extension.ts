@@ -411,7 +411,7 @@ function runtimeKey(config: PiRespanConfig): string {
     config.baseURL,
     config.workflowName,
     config.agentName,
-    config.traceScope ?? "run",
+    config.traceScope ?? "session",
     config.customerIdentifier,
     config.metadata ?? {},
     config.debug,

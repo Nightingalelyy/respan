@@ -33,8 +33,8 @@ Scope:
   --local    pi install -l npm:@respan/instrumentation-pi + .pi/respan.json in the project root
 
 Trace scope (--trace-scope, "trace_scope" in respan.json):
-  run        one trace per agent run; runs of a session share a thread id (default)
-  session    one multi-root trace per pi session (long-lived, resumed sessions)
+  session    one multi-root trace per pi session, across processes and pauses (default)
+  run        one trace per agent run; runs of a session share a thread id
 
 Durable delivery (--with-collector):
   Sets base_url to a local Respan collector (http://127.0.0.1:4318) so traces
@@ -49,7 +49,7 @@ RESPAN_API_KEY or ~/.respan/credentials.json (from "respan auth login").`;
     'respan integrate pi --disable',
     'respan integrate pi --local',
     'respan integrate pi --customer-id frank --workflow-name email-agent',
-    'respan integrate pi --trace-scope session',
+    'respan integrate pi --trace-scope run',
     'respan integrate pi --with-collector',
     'respan integrate pi --project-id my-project --attrs \'{"env":"prod"}\'',
     'respan integrate pi --dry-run',
@@ -67,7 +67,7 @@ RESPAN_API_KEY or ~/.respan/credentials.json (from "respan auth login").`;
     }),
     'trace-scope': Flags.string({
       description:
-        'Trace scope: "run" = one trace per agent run (default), "session" = one multi-root trace per pi session',
+        'Trace scope: "session" = one multi-root trace per pi session (default), "run" = one trace per agent run',
       options: ['run', 'session'],
     }),
     'with-collector': Flags.boolean({
@@ -193,11 +193,11 @@ RESPAN_API_KEY or ~/.respan/credentials.json (from "respan auth login").`;
       this.log('Set properties via integrate flags or edit respan.json:');
       this.log('  respan integrate pi --customer-id "frank" --workflow-name "my-agent"');
       this.log('  respan integrate pi --attrs \'{"team":"platform","env":"staging"}\'');
-      this.log('  respan integrate pi --trace-scope session   # one trace per pi session ("trace_scope")');
+      this.log('  respan integrate pi --trace-scope run       # one trace per prompt instead of one per session ("trace_scope")');
       this.log('');
       this.log('Override per-session with env vars:');
       this.log('  export RESPAN_CUSTOMER_ID="your-name"');
-      this.log('  export RESPAN_PI_TRACE_SCOPE=session   # or run (default)');
+      this.log('  export RESPAN_PI_TRACE_SCOPE=run       # or session (default)');
       this.log('  export RESPAN_PI_TRACING=false     # skip tracing for one session');
       this.log('');
       this.log('One-off run without installing (from a project that has the package):');

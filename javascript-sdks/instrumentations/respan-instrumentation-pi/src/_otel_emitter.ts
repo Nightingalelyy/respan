@@ -8,8 +8,11 @@
  * events and `AgentSession.subscribe()` events — drive the same normalized
  * handlers below.
  *
- * Trace model: by default ONE TRACE PER AGENT RUN (user prompt → `agent_end`,
- * `traceScope: "run"`). Each run is one root agent span displayed as
+ * Trace model: by default ONE TRACE PER PI SESSION (`traceScope: "session"`):
+ * every agent run (user prompt → `agent_end`) adds a root to the trace whose
+ * id is derived from the pi session id, so an email chain resumed over weeks
+ * and across processes stays one trace. `traceScope: "run"` gives one trace
+ * per run instead. Either way each run is one root agent span displayed as
  * `agent.turn-<n>` (n = the prompt's index within the session, like
  * Braintrust's "Turn n"), with one chat span per assistant message and one tool
  * span per tool execution underneath. Every run of a pi session shares
@@ -80,12 +83,12 @@ export interface PiTracerOptions {
   /** Agent name (`respan.metadata.agent_name`); the run span itself is displayed as `agent.turn-<n>`. Default `"pi"`. */
   agentName?: string;
   /**
-   * `"run"` (default): one trace per agent run (a prompt → `agent_end`),
-   * nested under an active OTEL span when there is one. `"session"`: every
-   * run of a pi session shares one trace id derived from the pi session id
-   * (see `sessionTraceId`), so a long-lived session — an email chain resumed
-   * over weeks — is one multi-root trace; each run still emits its own root
-   * turn (agent) span.
+   * `"session"` (default): every run of a pi session shares one trace id
+   * derived from the pi session id (see `sessionTraceId`), so a long-lived
+   * session — an email chain resumed over weeks, from any process — is one
+   * multi-root trace; each run still emits its own root turn (agent) span.
+   * `"run"`: one trace per agent run (a prompt → `agent_end`), nested under
+   * an active OTEL span when there is one.
    */
   traceScope?: PiTraceScope;
   /**
@@ -300,7 +303,7 @@ export class PiSessionTracer {
   constructor(options: PiTracerOptions = {}) {
     this.workflowName = nonEmptyString(options.workflowName) ?? DEFAULT_WORKFLOW_NAME;
     this.agentName = nonEmptyString(options.agentName) ?? DEFAULT_AGENT_NAME;
-    this.traceScope = options.traceScope === "session" ? "session" : "run";
+    this.traceScope = options.traceScope === "run" ? "run" : "session";
     this.promptCapture = options.promptCapture === "delta" ? "delta" : "full";
     this.captureSystemPrompt = options.captureSystemPrompt ?? true;
     this.captureReasoning = options.captureReasoning ?? true;
