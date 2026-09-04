@@ -17,6 +17,8 @@
  * emitted while the instrumentor is active (i.e. after `Respan.initialize()`).
  */
 
+import { execFileSync } from "node:child_process";
+
 import { hrTime } from "@opentelemetry/core";
 import type { HrTime } from "@opentelemetry/api";
 import type { RespanInstrumentation } from "@respan/respan";
@@ -24,6 +26,7 @@ import type { RespanInstrumentation } from "@respan/respan";
 import { debugLog } from "./_debug.js";
 import {
   PiSessionTracer,
+  type PiGitInfo,
   type PiMetadataValue,
   type PiTraceScope,
   type PiTracerOptions,
@@ -39,7 +42,9 @@ import type {
 } from "./_pi_types.js";
 
 export type {
+  PiGitInfo,
   PiPromptCapture,
+  PiRunEndInfo,
   PiSessionInfo,
   PiTraceScope,
   PiTracerOptions,
@@ -272,10 +277,12 @@ export class PiInstrumentor implements RespanInstrumentation {
         return;
       }
       const sessionManager = ctx.sessionManager;
+      const cwd = typeof ctx.cwd === "string" ? ctx.cwd : undefined;
       tracer.setSession({
         sessionId: callSafely(() => sessionManager?.getSessionId?.()),
         sessionFile: callSafely(() => sessionManager?.getSessionFile?.()),
-        cwd: typeof ctx.cwd === "string" ? ctx.cwd : undefined,
+        cwd,
+        git: gitMetadataFor(cwd),
       });
       tracer.setModel(ctx.model);
       tracer.setThinkingLevel(ctx.thinkingLevel);
@@ -526,11 +533,13 @@ function readSessionMessages(session: PiAgentSessionLike): unknown[] {
 }
 
 function bindSession(tracer: PiSessionTracer, session: PiAgentSessionLike): void {
+  const cwd = callSafely(() => session.sessionManager?.getCwd?.());
   tracer.setSession({
     sessionId: callSafely(() => session.sessionId),
     sessionFile: callSafely(() => session.sessionFile),
-    cwd: callSafely(() => session.sessionManager?.getCwd?.()),
+    cwd,
     piVersion: detectPiVersion(),
+    git: gitMetadataFor(cwd),
   });
   tracer.setModel(callSafely(() => session.model));
   tracer.setThinkingLevel(callSafely(() => session.thinkingLevel));
@@ -687,4 +696,54 @@ function renderedText(content: unknown): string | undefined {
       .join("");
   }
   return undefined;
+}
+
+// ── Git metadata ──────────────────────────────────────────────────────────
+
+const gitMetadataCache = new Map<string, PiGitInfo | undefined>();
+
+/**
+ * Best-effort git metadata for a working directory (repository URL without
+ * credentials, branch, commit), cached per directory. Never throws; returns
+ * undefined outside a repository or when `git` is unavailable.
+ */
+export function gitMetadataFor(cwd: string | undefined): PiGitInfo | undefined {
+  if (!cwd) {
+    return undefined;
+  }
+  if (gitMetadataCache.has(cwd)) {
+    return gitMetadataCache.get(cwd);
+  }
+  const git = (args: string[]): string | undefined => {
+    try {
+      const out = execFileSync("git", args, {
+        cwd,
+        encoding: "utf8",
+        timeout: 1000,
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      return out.length > 0 ? out : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  let info: PiGitInfo | undefined;
+  const commit = git(["rev-parse", "HEAD"]);
+  if (commit) {
+    info = {
+      commit,
+      branch: git(["rev-parse", "--abbrev-ref", "HEAD"]),
+      repository: stripCredentials(git(["config", "--get", "remote.origin.url"])),
+    };
+  }
+  gitMetadataCache.set(cwd, info);
+  return info;
+}
+
+function stripCredentials(url: string | undefined): string | undefined {
+  if (!url) {
+    return undefined;
+  }
+  // https://user:token@host/org/repo.git -> https://host/org/repo.git
+  return url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@/]+@/i, "$1");
 }

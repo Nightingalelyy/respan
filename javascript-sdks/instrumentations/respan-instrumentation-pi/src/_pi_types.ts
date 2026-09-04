@@ -142,6 +142,7 @@ export interface PiAssistantMessageEventLike {
 
 export interface PiExtensionUILike {
   setStatus?(key: string, text: string | undefined): void;
+  setWidget?(key: string, lines: string[] | undefined, options?: { placement?: string }): void;
   notify?(message: string, type?: string): void;
 }
 

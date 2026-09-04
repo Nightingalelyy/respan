@@ -59,6 +59,8 @@ interface SharedRuntime {
   key?: string;
   respan: RespanLike;
   instrumentor: PiInstrumentor;
+  /** Latest extension context with a UI, for the trace-link widget. */
+  ui: { ctx?: PiExtensionContextLike };
   initPromise?: Promise<boolean>;
   /** `beforeExit` flush hook installed (once per runtime). */
   exitHookInstalled?: boolean;
@@ -169,7 +171,15 @@ export function createRespanPiExtension(
       void flush();
     };
 
+    const rememberUi = (_event: unknown, ctx: PiExtensionContextLike | undefined): void => {
+      if (ctx?.hasUI) {
+        runtime.ui.ctx = ctx;
+      }
+    };
+    pi.on("before_agent_start", rememberUi);
+    pi.on("agent_start", rememberUi);
     pi.on("session_start", async (_event: unknown, ctx: PiExtensionContextLike | undefined) => {
+      rememberUi(_event, ctx);
       try {
         const ok = await ensureInitialized();
         setStatus(
@@ -196,6 +206,8 @@ export function createRespanPiExtension(
         debug(`session_shutdown handler failed: ${messageOf(error)}`);
       } finally {
         setStatus(ctx, undefined);
+        clearWidget(ctx);
+        runtime.ui.ctx = undefined;
       }
     });
 
@@ -247,12 +259,29 @@ function acquireRuntime(
   if (!config.debug) {
     installConsoleFilter();
   }
+  const ui: SharedRuntime["ui"] = {};
   const instrumentor = new PiInstrumentor({
     workflowName: config.workflowName,
     agentName: config.agentName,
     traceScope: config.traceScope,
     customerIdentifier: config.customerIdentifier,
     metadata: config.metadata,
+    // After each prompt, show a link to its trace in pi's TUI (like Braintrust's
+    // trace-link widget). Only for the Respan cloud, whose platform URL is known.
+    onRunEnd: (info) => {
+      const url = platformTraceUrl(config.baseURL, info.traceId);
+      const ctx = ui.ctx;
+      if (!url || !ctx?.hasUI) {
+        return;
+      }
+      try {
+        ctx.ui?.setWidget?.(WIDGET_KEY, [`Respan trace (turn ${info.turnNumber})`, url], {
+          placement: "belowEditor",
+        });
+      } catch {
+        // Widgets are best effort.
+      }
+    },
   });
   const options: RespanOptions = {
     apiKey: config.apiKey,
@@ -264,7 +293,7 @@ function acquireRuntime(
   };
   const factory: CreateRespanFn = createRespan ?? ((opts) => new Respan(opts));
   const respan = factory(options);
-  const runtime: SharedRuntime = { key, respan, instrumentor, initialized: false };
+  const runtime: SharedRuntime = { key, respan, instrumentor, ui, initialized: false };
   if (registry && key) {
     registry.set(key, runtime);
   }
@@ -336,6 +365,36 @@ function setStatus(ctx: PiExtensionContextLike | undefined, text: string | undef
   } catch {
     // The footer is best effort.
   }
+}
+
+const WIDGET_KEY = "respan-trace";
+
+function clearWidget(ctx: PiExtensionContextLike | undefined): void {
+  try {
+    if (ctx?.hasUI) {
+      ctx.ui?.setWidget?.(WIDGET_KEY, undefined);
+    }
+  } catch {
+    // Widgets are best effort.
+  }
+}
+
+/**
+ * Platform URL of a trace, when the API base URL is the Respan cloud
+ * (`api.respan.ai` → `platform.respan.ai`). Self-hosted deployments have no
+ * known platform host, so no link is produced for them.
+ */
+export function platformTraceUrl(baseURL: string | undefined, traceId: string): string | undefined {
+  let host: string;
+  try {
+    host = new URL(baseURL ?? "https://api.respan.ai").hostname;
+  } catch {
+    return undefined;
+  }
+  if (host !== "api.respan.ai" || !/^[0-9a-f]{32}$/i.test(traceId)) {
+    return undefined;
+  }
+  return `https://platform.respan.ai/platform/traces?trace_unique_id=${traceId}`;
 }
 
 /**

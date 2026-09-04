@@ -406,3 +406,39 @@ test("initializes eagerly without session_start (SDK sessions) and flushes on be
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(calls.flush, 2);
 });
+
+test("after each run the TUI shows a link to the trace (Respan cloud only)", async () => {
+  const { platformTraceUrl } = await import("../dist/extension.js");
+  assert.equal(
+    platformTraceUrl("https://api.respan.ai", "0123456789abcdef0123456789abcdef"),
+    "https://platform.respan.ai/platform/traces?trace_unique_id=0123456789abcdef0123456789abcdef",
+  );
+  assert.equal(platformTraceUrl("https://api.respan.ai/api", "0123456789abcdef0123456789abcdef").startsWith("https://platform.respan.ai/"), true);
+  assert.equal(platformTraceUrl("https://respan.internal.example.com/api", "0123456789abcdef0123456789abcdef"), undefined);
+  assert.equal(platformTraceUrl(undefined, "not-a-trace-id"), undefined);
+
+  const { factory } = createFakeRespanFactory({ activate: true });
+  const extension = createRespanPiExtension({
+    config: { enabled: true, apiKey: "sk-test", baseURL: "https://api.respan.ai", debug: false },
+    createRespan: factory,
+    log: () => {},
+  });
+  const pi = createFakePi();
+  extension(pi);
+  const widgets = [];
+  const ctx = createFakeCtx();
+  ctx.ui.setWidget = (key, lines, options) => widgets.push([key, lines, options]);
+  await pi.emit("session_start", { reason: "startup" }, ctx);
+  await pi.emit("before_agent_start", { prompt: "hi", systemPrompt: "sys" }, ctx);
+  await pi.emit("agent_start", {}, ctx);
+  await pi.emit("agent_end", { messages: [] }, ctx);
+
+  const shown = widgets.find(([key, lines]) => key === "respan-trace" && lines);
+  assert.ok(shown, "trace link widget was set");
+  assert.match(shown[1][0], /Respan trace \(turn 1\)/);
+  assert.match(shown[1][1], /^https:\/\/platform\.respan\.ai\/platform\/traces\?trace_unique_id=[0-9a-f]{32}$/);
+  assert.deepEqual(shown[2], { placement: "belowEditor" });
+
+  await pi.emit("session_shutdown", { reason: "quit" }, ctx);
+  assert.deepEqual(widgets.at(-1), ["respan-trace", undefined, undefined]);
+});

@@ -1729,3 +1729,56 @@ test("spans produced before activate() are buffered and emitted on activation", 
   await replayRun(pi, createFakeCtx(), { shutdown: false });
   assert.equal(captureState.spans.length, 8);
 });
+
+test("git metadata of the working directory lands on the turn span and onRunEnd reports the run", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { gitMetadataFor } = await import("../dist/index.js");
+
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "pi-git-"));
+  let hasGit = true;
+  try {
+    const git = (...args) => execFileSync("git", args, { cwd: repo, stdio: "pipe" });
+    git("init", "-q", "-b", "main");
+    git("config", "user.email", "t@example.com");
+    git("config", "user.name", "t");
+    git("remote", "add", "origin", "https://user:secret@github.com/acme/repo.git");
+    fs.writeFileSync(path.join(repo, "a.txt"), "a");
+    git("add", "a.txt");
+    git("commit", "-q", "-m", "init");
+  } catch {
+    hasGit = false;
+  }
+  if (!hasGit) {
+    return; // git not available in this environment
+  }
+  const meta = gitMetadataFor(repo);
+  assert.equal(meta.branch, "main");
+  assert.match(meta.commit, /^[0-9a-f]{40}$/);
+  assert.equal(meta.repository, "https://github.com/acme/repo.git", "credentials stripped");
+  assert.equal(gitMetadataFor(path.join(os.tmpdir())), undefined);
+
+  captureState.spans = [];
+  const runs = [];
+  const instrumentor = new PiInstrumentor({ onRunEnd: (info) => runs.push(info) });
+  instrumentor.activate();
+  const pi = createFakePi();
+  instrumentor.extension(pi);
+  const ctx = createFakeCtx();
+  ctx.cwd = repo;
+  await replayRun(pi, ctx);
+
+  const turn = spanByLogType("agent");
+  assert.equal(turn.attributes["respan.metadata.git_branch"], "main");
+  assert.equal(turn.attributes["respan.metadata.git_commit"], meta.commit);
+  assert.equal(turn.attributes["respan.metadata.git_repository"], "https://github.com/acme/repo.git");
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].turnNumber, 1);
+  assert.equal(runs[0].sessionId, "sess-123");
+  assert.equal(runs[0].traceId, turn.spanContext().traceId);
+  for (const span of captureState.spans) {
+    assertCommonContract(span);
+  }
+});

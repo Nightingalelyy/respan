@@ -89,7 +89,7 @@ loads the extension automatically after `pi install`. In the interactive TUI
 the footer shows `Respan: tracing` while active, `Respan: tracing off (run
 \`respan integrate pi\`)` when no API key was found, or `Respan: tracing
 unavailable: <reason>` if initialization failed. pi keeps running in all three
-cases.
+cases. After each prompt a widget below the editor shows a link to its trace on the platform (Respan cloud only).
 
 ### Configuration
 
@@ -263,6 +263,7 @@ already-active factory):
 | `<tool>.tool` | `traceloop.entity.input` = `{name, arguments}`, `traceloop.entity.output` = text output (or `{content, details}` JSON), `respan.metadata.tool_call_id`, `respan.metadata.skill_name` when a `SKILL.md` is read or the `skill` tool is used |
 | `pi.compaction` | input `{reason, willRetry, tokensBefore}`, output `{summary, tokensBefore, tokensAfter, firstKeptEntryId}` |
 | `pi.branch_summary` | input `{targetId, oldLeafId, label}`, output `{summary, label, id, fromId, ...}` |
+| `<agent>.turn-<n>.agent` (git) | `respan.metadata.git_repository` (remote URL, credentials stripped), `respan.metadata.git_branch`, `respan.metadata.git_commit` of the working directory, cached per directory |
 
 Errors: an assistant message with `stopReason` `error`/`aborted` marks its chat
 span (and the run) with `status_code = 500` and `error.message`; a tool result

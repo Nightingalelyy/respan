@@ -107,6 +107,14 @@ export interface PiTracerOptions {
   emit?: (span: ReadableSpan) => void;
   /** Spans are emitted only while this returns `true`. Default: always. */
   enabled?: () => boolean;
+  /** Called after each run (prompt) closes, e.g. to show a link to its trace. */
+  onRunEnd?: (info: PiRunEndInfo) => void;
+}
+
+export interface PiGitInfo {
+  repository?: string;
+  branch?: string;
+  commit?: string;
 }
 
 export interface PiSessionInfo {
@@ -114,6 +122,14 @@ export interface PiSessionInfo {
   sessionFile?: string;
   cwd?: string;
   piVersion?: string;
+  /** Git metadata of the working directory (recorded on the turn span). */
+  git?: PiGitInfo;
+}
+
+export interface PiRunEndInfo {
+  traceId: string;
+  turnNumber: number;
+  sessionId?: string;
 }
 
 export interface PiContextOptions {
@@ -259,6 +275,7 @@ export class PiSessionTracer {
   private readonly metadata: Record<string, PiMetadataValue>;
   private readonly emitFn: (span: ReadableSpan) => void;
   private readonly enabledFn: () => boolean;
+  private readonly onRunEndFn?: (info: PiRunEndInfo) => void;
 
   private session: PiSessionInfo = {};
   private model?: PiModelLike;
@@ -288,6 +305,7 @@ export class PiSessionTracer {
     this.metadata = normalizeMetadata(options.metadata);
     this.emitFn = options.emit ?? ((span) => void injectSpan(span));
     this.enabledFn = options.enabled ?? (() => true);
+    this.onRunEndFn = options.onRunEnd;
   }
 
   // ── Session context ─────────────────────────────────────────────────────
@@ -301,6 +319,7 @@ export class PiSessionTracer {
     if (sessionFile) this.session.sessionFile = sessionFile;
     if (cwd) this.session.cwd = cwd;
     if (piVersion) this.session.piVersion = piVersion;
+    if (info.git) this.session.git = { ...info.git };
   }
 
   setModel(model: unknown): void {
@@ -787,6 +806,9 @@ export class PiSessionTracer {
     setMetadata(agentAttrs, "turn_count", run.turnCount);
     setMetadata(agentAttrs, "tool_call_count", toolCallCount);
     setMetadata(agentAttrs, "stop_reason", run.lastStopReason);
+    setMetadata(agentAttrs, "git_repository", this.session.git?.repository);
+    setMetadata(agentAttrs, "git_branch", this.session.git?.branch);
+    setMetadata(agentAttrs, "git_commit", this.session.git?.commit);
     if (continuation) {
       setMetadata(agentAttrs, "continuation", true);
     }
@@ -825,6 +847,18 @@ export class PiSessionTracer {
     }
     run.pendingLlm.length = 0;
     run.pendingTools.clear();
+
+    if (this.onRunEndFn) {
+      try {
+        this.onRunEndFn({
+          traceId: run.traceId,
+          turnNumber: run.turnNumber,
+          sessionId: this.session.sessionId,
+        });
+      } catch {
+        // Callbacks are best effort and must never affect pi.
+      }
+    }
   }
 
   // ── Span builders ───────────────────────────────────────────────────────
