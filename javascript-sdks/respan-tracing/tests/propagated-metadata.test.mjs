@@ -23,10 +23,11 @@ test("synthetic spans merge propagated metadata into one canonical JSON attribut
     const span = propagateAttributes(
       { metadata: { run_id: "outer", shared: "outer" } },
       () => propagateAttributes(
-        { metadata: { run_id: "inner", shared: "propagated" } },
+        { metadata: { run_id: "inner", shared: "propagated", source: "propagated" } },
         () => buildReadableSpan({
           name: "vendor.call",
           attributes: {
+            [`${METADATA}.source`]: "sdk",
             [METADATA]: JSON.stringify({
               provider_request_id: "request-1",
               shared: "instrumentation",
@@ -41,6 +42,7 @@ test("synthetic spans merge propagated metadata into one canonical JSON attribut
       provider_request_id: "request-1",
       run_id: "inner",
       shared: "instrumentation",
+      source: "sdk",
     });
   } finally {
     context.disable();
@@ -62,6 +64,7 @@ test("live span processing merges propagated metadata without aliases", async ()
   const span = {
     name: "vendor.call",
     attributes: {
+      [`${METADATA}.source`]: "sdk",
       [METADATA]: JSON.stringify({
         provider_request_id: "request-1",
         shared: "instrumentation",
@@ -75,7 +78,7 @@ test("live span processing merges propagated metadata without aliases", async ()
 
   try {
     propagateAttributes(
-      { metadata: { run_id: "run-1", shared: "propagated" } },
+      { metadata: { run_id: "run-1", shared: "propagated", source: "propagated" } },
       () => processor.onStart(span, context.active()),
     );
 
@@ -85,6 +88,7 @@ test("live span processing merges propagated metadata without aliases", async ()
       provider_request_id: "request-1",
       run_id: "run-1",
       shared: "instrumentation",
+      source: "sdk",
     });
   } finally {
     await processor.shutdown();

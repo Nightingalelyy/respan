@@ -12,7 +12,7 @@ import { hrTime, hrTimeDuration } from "@opentelemetry/core";
 import { RESPAN_SPAN_ATTRIBUTES_MAP, RespanSpanAttributes } from "@respan/respan-sdk";
 import { RESPAN_PACKAGE_NAME } from "../constants/index.js";
 import { getPropagatedAttributes } from "./context.js";
-import { mergeCanonicalMetadata } from "./metadata.js";
+import { mergeCanonicalMetadataAttributes } from "./metadata.js";
 
 // ── ID helpers ──────────────────────────────────────────────────────────────
 
@@ -107,7 +107,7 @@ export function buildReadableSpan(opts: BuildSpanOptions): ReadableSpan {
         const attrKey = RESPAN_SPAN_ATTRIBUTES_MAP[key];
         if (!attrKey) continue;
         if (key === "metadata") {
-          attrs[attrKey] = mergeCanonicalMetadata(attrs[attrKey], value);
+          attrs[attrKey] = mergeCanonicalMetadataAttributes(attrs, value);
         // Only set non-metadata values when caller attrs do not already exist.
         } else if (attrs[attrKey] !== undefined) {
           continue;

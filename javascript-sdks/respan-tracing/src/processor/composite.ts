@@ -11,7 +11,7 @@ import {
 import { MultiProcessorManager } from "./manager.js";
 import { getEntityPath, getPropagatedAttributes } from "../utils/context.js";
 import { LOG_PREFIX, LOG_PREFIX_DEBUG, LOG_PREFIX_ERROR } from "../constants/index.js";
-import { mergeCanonicalMetadata } from "../utils/metadata.js";
+import { mergeCanonicalMetadataAttributes } from "../utils/metadata.js";
 import {
   acquireSpanTransformerHost,
   releaseSpanTransformerHost,
@@ -86,7 +86,10 @@ export class RespanCompositeProcessor implements SpanProcessor {
         if (key === "metadata") {
           span.setAttribute(
             attrKey,
-            mergeCanonicalMetadata(readableSpan.attributes[attrKey], value),
+            mergeCanonicalMetadataAttributes(
+              readableSpan.attributes as Record<string, unknown>,
+              value,
+            ),
           );
         } else if (key === "prompt" && typeof value === "object") {
           span.setAttribute(attrKey, JSON.stringify(value));
