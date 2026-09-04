@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
@@ -287,7 +288,10 @@ class SyncContextManager {
 function assertCommonContract(span) {
   assert.equal(span.attributes["respan.entity.log_method"], "ts_tracing");
   assert.equal(span.attributes["telemetry.sdk.name"], "@respan/instrumentation-pi");
-  assert.equal(span.attributes["telemetry.sdk.version"], "0.1.0");
+  assert.equal(
+    span.attributes["telemetry.sdk.version"],
+    JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version,
+  );
   assert.equal(span.instrumentationScope.name, "@respan/instrumentation-pi");
   assert.equal(typeof span.attributes["traceloop.entity.name"], "string");
   assert.equal(typeof span.attributes["traceloop.entity.path"], "string");

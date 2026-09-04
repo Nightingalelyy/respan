@@ -22,6 +22,7 @@
  * idle time in either scope.
  */
 
+import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
 
 import { context, isSpanContextValid, trace, type HrTime } from "@opentelemetry/api";
@@ -44,7 +45,12 @@ import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
 
 import type { PiModelLike, PiToolDefinitionLike } from "./_pi_types.js";
 
-export const PACKAGE_VERSION = "0.1.0";
+const packageManifest = createRequire(import.meta.url)("../package.json") as {
+  version?: string;
+};
+
+/** Version of this package as published (read from package.json, so pipeline bumps are reflected). */
+export const PACKAGE_VERSION: string = packageManifest.version ?? "unknown";
 export const PI_INSTRUMENTATION_NAME = "@respan/instrumentation-pi";
 
 const RESPAN_LOG_METHOD_TS_TRACING = "ts_tracing";

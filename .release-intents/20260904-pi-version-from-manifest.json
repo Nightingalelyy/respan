@@ -1,0 +1,6 @@
+{
+  "summary": "@respan/instrumentation-pi: read PACKAGE_VERSION (telemetry.sdk.version on every span) from package.json at runtime instead of a hardcoded \"0.1.0\", so pipeline version bumps are reflected (0.1.1 reported itself as 0.1.0).",
+  "packages": {
+    "@respan/instrumentation-pi": "patch"
+  }
+}
