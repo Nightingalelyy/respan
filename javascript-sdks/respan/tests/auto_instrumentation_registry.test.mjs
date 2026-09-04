@@ -61,6 +61,7 @@ test("clean committed framework packages stay explicit-only", () => {
   const expected = {
     "codex-sdk": "agent-framework",
     "cursor-sdk": "agent-framework",
+    pi: "agent-framework",
     livekit: "agent-framework",
     flue: "app-framework",
   };
