@@ -124,6 +124,7 @@ Check higher-priority categories first. If a match is found, use that instrument
 | Vercel AI SDK | — | `ai` | — | `@respan/instrumentation-vercel` | [docs](https://respan.ai/docs/integrations/vercel-ai-sdk.md) |
 | OpenAI Agents SDK | `openai-agents` | `@openai/agents` | `respan-instrumentation-openai-agents` | `@respan/instrumentation-openai-agents` | [docs](https://respan.ai/docs/integrations/openai-agents-sdk.md) |
 | Claude Agent SDK | `claude-agent-sdk` | — | `respan-instrumentation-claude-agent-sdk` | — | [docs](https://respan.ai/docs/integrations/claude-agents-sdk.md) |
+| Pi coding agent | — | `@earendil-works/pi-coding-agent` | — | `@respan/instrumentation-pi` | [README](https://github.com/RespanAI/respan/tree/main/javascript-sdks/instrumentations/respan-instrumentation-pi) |
 | Pydantic AI | `pydantic-ai` | — | `respan-instrumentation-pydantic-ai` | — | [docs](https://respan.ai/docs/integrations/pydantic-ai.md) |
 | LangChain | `langchain` | `langchain` | `respan-instrumentation-langchain` | `@respan/instrumentation-langchain` | [docs](https://respan.ai/docs/integrations/langchain.md) |
 | LangGraph | `langgraph` | `@langchain/langgraph` | `respan-instrumentation-langchain` | `@respan/instrumentation-langchain` | [docs](https://respan.ai/docs/integrations/langgraph.md) |
@@ -138,6 +139,8 @@ If a Priority 1 framework is found, use its instrumentation. Do NOT also add Pri
 For direct Vercel AI SDK usage, the explicit `VercelAIInstrumentor` and per-operation telemetry option are required in both Auto and Full. Never replace them with core-only `new Respan()` setup, and never stack them with a higher-level integration that already owns AI SDK telemetry.
 
 **LangChain / LangGraph setup differs by language** (one package covers both frameworks: `respan-instrumentation-langchain` / `@respan/instrumentation-langchain`). In **Python**, pass `LangChainInstrumentor()` to `Respan(instrumentations=[...])` — it patches the LangChain and LangGraph callback managers globally on init, so every chain, graph, node, LLM, tool, and retriever run is traced **automatically with no per-call setup**. `add_respan_callback(config=...)` is optional and only labels a run with a name, tags, or metadata. In **TypeScript**, create a `LangChainInstrumentor`, pass it to `new Respan({ instrumentations: [...] })`, **and** attach `instrumentor.addCallback(...)` to the **outermost** chain or graph invocation (`.invoke()` / `.stream()`, not inside a node — LangChain/LangGraph propagate it to nested runs); the TypeScript instrumentor does **not** patch globally, so without the callback no spans are emitted. (The other Priority-1 frameworks use the standard `Respan(instrumentations=[XInstrumentor()])` plugin pattern.)
+
+**Pi coding agent (TypeScript only)** has no global patch point, so the instrumentor must be wired into the session. Create `new PiInstrumentor()` from `@respan/instrumentation-pi`, pass it to `new Respan({ instrumentations: [...] })`, and either pass `instrumentor.extension` via `new DefaultResourceLoader({ cwd: process.cwd(), agentDir: getAgentDir(), extensionFactories: [instrumentor.extension] })` (pi requires `cwd` and `agentDir`; `getAgentDir` is exported by `@earendil-works/pi-coding-agent`) before `createAgentSession(...)`, or call `instrumentor.attach(session)` on an existing `AgentSession`. Each agent run becomes one trace by default (`traceScope: "session"` makes every run of a pi session join one multi-root trace instead); all runs of a pi session share its thread id. For always-on agent fleets, pair it with a local OpenTelemetry Collector persistent queue (see Delivery Guarantees below) so spans survive Respan outages and restarts without a local journal. For the interactive `pi` CLI, run `respan integrate pi` instead — it installs the `@respan/instrumentation-pi` pi package (a pi extension) and writes a non-secret `respan.json` (`--trace-scope session` for long-lived, resumed sessions).
 
 **Priority 2 — Direct LLM SDKs** (only if no P1 framework covers this provider):
 
@@ -526,6 +529,10 @@ respan.flush()
 ```
 
 In serverless/Lambda: call `flush()` at the end of every handler invocation.
+
+### Delivery Guarantees
+
+The SDK batches spans in memory and the OTLP exporter retries 429/502/503/504 with backoff; it never writes to disk. Spans still queued during a long outage or a process crash are lost — the same trade-off every LLM observability SDK makes. For long-running production agents where that is not acceptable, run the packaged Respan Collector next to the application: `respan collector start` (Docker if available, otherwise the pinned `otelcol-contrib` binary) or `docker compose -f collector/docker-compose.yaml up -d` from the monorepo's `collector/` directory, then set `RESPAN_BASE_URL=http://127.0.0.1:4318`. It is the upstream OpenTelemetry Collector with a persistent, bounded queue (`file_storage` write-ahead log capped by `RESPAN_COLLECTOR_MAX_SIZE_BYTES`, `RESPAN_COLLECTOR_QUEUE_SIZE`, retries with `max_elapsed_time: 0`, uncompressed JSON export because Respan's ingest does not inflate gzip) receiving on `/api/v2/traces`, the path the SDK posts to. Never build a local journal into the application itself; alert on `otelcol_exporter_enqueue_failed_spans` (drops) and watch `otelcol_exporter_queue_size`. `respan collector status` prints those counters.
 
 ### Trace Hierarchy Example
 
