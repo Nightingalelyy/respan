@@ -1,7 +1,7 @@
 {
-  "summary": "Add official Dify JavaScript SDK instrumentation and its explicit-only facade registry entry",
+  "summary": "Record the manually bootstrapped Dify JavaScript instrumentation release without republishing the package or facade on merge",
   "packages": {
-    "@respan/instrumentation-dify": "new",
-    "@respan/respan": "patch"
+    "@respan/instrumentation-dify": "none",
+    "@respan/respan": "none"
   }
 }
