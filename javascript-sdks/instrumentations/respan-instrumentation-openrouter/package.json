@@ -1,6 +1,11 @@
 {
   "name": "@respan/instrumentation-openrouter",
   "version": "0.1.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/respanai/respan",
+    "directory": "javascript-sdks/instrumentations/respan-instrumentation-openrouter"
+  },
   "description": "Respan tracing instrumentation for the OpenRouter TypeScript SDK",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

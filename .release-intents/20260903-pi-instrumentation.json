@@ -1,7 +1,7 @@
 {
-  "summary": "Add Pi coding agent TypeScript instrumentation (@respan/instrumentation-pi) with a pi extension entry, a `respan integrate pi` CLI command, a Respan facade registry entry, and tracing skill guidance",
+  "summary": "Add Pi coding agent TypeScript instrumentation (@respan/instrumentation-pi) with a pi extension entry, a `respan integrate pi` CLI command, a Respan facade registry entry, and tracing skill guidance Follow-up: 0.1.0 of @respan/instrumentation-pi was published by hand before this merged, so the pipeline publishes 0.1.1 (patch) instead of 'new'.",
   "packages": {
-    "@respan/instrumentation-pi": "new",
+    "@respan/instrumentation-pi": "patch",
     "@respan/cli": "minor",
     "@respan/respan": "minor"
   }
