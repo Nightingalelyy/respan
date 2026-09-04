@@ -295,6 +295,17 @@ export const AUTO_INSTRUMENTATION_REGISTRY: AutoInstrumentationEntry[] = [
     autoDisabledReason: FRAMEWORK_DISABLED_REASON,
   },
   {
+    id: "pi",
+    category: "agent-framework",
+    sdkPackage: "@earendil-works/pi-coding-agent",
+    instrumentationPackage: "@respan/instrumentation-pi",
+    instrumentorClass: "PiInstrumentor",
+    enabledByDefault: false,
+    priority: 40,
+    aliases: ["pi-coding-agent", "PiInstrumentor"],
+    autoDisabledReason: FRAMEWORK_DISABLED_REASON,
+  },
+  {
     id: "livekit",
     category: "agent-framework",
     sdkPackage: "@livekit/agents",

@@ -1,0 +1,32 @@
+# Respan Collector as a sidecar on the machine that runs your agents.
+#
+#   export RESPAN_API_KEY=...
+#   docker compose -f collector/docker-compose.yaml up -d
+#   export RESPAN_BASE_URL=http://127.0.0.1:4318   # point the SDK at the collector
+#
+# Health:  curl http://127.0.0.1:13133
+# Metrics: curl http://127.0.0.1:8888/metrics | grep otelcol_exporter_
+
+services:
+  respan-collector:
+    build: .
+    image: respanai/collector:0.160.0
+    restart: unless-stopped
+    environment:
+      RESPAN_API_KEY: ${RESPAN_API_KEY:?set RESPAN_API_KEY}
+      # Self-hosted / EU: point at your ingest endpoint.
+      RESPAN_COLLECTOR_EXPORT_URL: ${RESPAN_COLLECTOR_EXPORT_URL:-https://api.respan.ai/api/v2/traces}
+      # Disk cap for the persistent queue (bytes). 512 MiB by default.
+      RESPAN_COLLECTOR_MAX_SIZE_BYTES: ${RESPAN_COLLECTOR_MAX_SIZE_BYTES:-536870912}
+      # Batches kept while Respan is unreachable.
+      RESPAN_COLLECTOR_QUEUE_SIZE: ${RESPAN_COLLECTOR_QUEUE_SIZE:-10000}
+      RESPAN_COLLECTOR_MEMORY_LIMIT_MIB: ${RESPAN_COLLECTOR_MEMORY_LIMIT_MIB:-512}
+    ports:
+      - "127.0.0.1:4318:4318"    # OTLP/HTTP receiver (the SDK's RESPAN_BASE_URL)
+      - "127.0.0.1:13133:13133"  # health check
+      - "127.0.0.1:8888:8888"    # Prometheus metrics
+    volumes:
+      - respan-collector-queue:/var/lib/otelcol/respan
+
+volumes:
+  respan-collector-queue: {}

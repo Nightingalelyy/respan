@@ -1,0 +1,10 @@
+{
+  "summary": "Republish five packages whose npm manifests still carry literal workspace: ranges and are therefore uninstallable (this also breaks `npm install @respan/respan`, which lists aws-bedrock and openrouter as optional dependencies). No source change; the yarn-pack publish flow rewrites the ranges.",
+  "packages": {
+    "@respan/instrumentation-aws-bedrock": "patch",
+    "@respan/instrumentation-openrouter": "patch",
+    "@respan/instrumentation-codex-sdk": "patch",
+    "@respan/instrumentation-cursor": "patch",
+    "@respan/instrumentation-llama-index": "patch"
+  }
+}
