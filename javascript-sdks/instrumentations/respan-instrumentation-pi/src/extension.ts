@@ -2,16 +2,17 @@
  * pi package entry (`"pi": { "extensions": ["./dist/extension.js"] }`).
  *
  * Loaded by the pi CLI after `pi install npm:@respan/instrumentation-pi`
- * (or `respan integrate pi`). It resolves configuration, creates a `Respan`
- * umbrella with an explicit `PiInstrumentor` (explicit instrumentations
- * disable Traceloop auto-instrumentation inside the pi process), initializes
- * tracing lazily on the first `session_start`, starts a flush after each
+ * (or `respan integrate pi`). It resolves configuration, creates a
+ * `RespanTelemetry` engine from `@respan/tracing` with every Traceloop
+ * auto-instrumentation disabled (pi's LLM and tool calls are traced from pi's
+ * own events, so nothing else may patch clients inside the pi process),
+ * activates an explicit `PiInstrumentor`, initializes eagerly, starts a flush after each
  * agent run without ever blocking pi on it, and shuts down on quit within a
  * bounded wait. Everything is fail-open: if tracing is unavailable pi keeps
  * running and the footer shows why.
  */
 
-import { Respan, type RespanOptions } from "@respan/respan";
+import { RespanTelemetry } from "@respan/tracing";
 
 import { resolvePiRespanConfig, type PiRespanConfig } from "./_config.js";
 import { PiInstrumentor } from "./index.js";
@@ -26,12 +27,83 @@ export interface RespanLike {
   shutdown(): Promise<void>;
 }
 
-export type CreateRespanFn = (options: RespanOptions) => RespanLike;
+/** The instrumentation contract (`@respan/respan`'s `RespanInstrumentation`, without the dependency). */
+export interface PiRuntimeInstrumentation {
+  name: string;
+  activate(): void;
+  deactivate(): void;
+}
+
+/** Options the pi package hands to its tracing runtime (a subset of the facade's options). */
+export interface PiRuntimeOptions {
+  apiKey?: string;
+  baseURL?: string;
+  appName?: string;
+  instrumentations: PiRuntimeInstrumentation[];
+  silenceInitializationMessage?: boolean;
+  logLevel?: "debug" | "info" | "warn" | "error";
+}
+
+export type CreateRespanFn = (options: PiRuntimeOptions) => RespanLike;
+
+/**
+ * Traceloop auto-instrumentations `@respan/tracing` would otherwise install
+ * inside the pi process. All of them are disabled: pi's LLM calls are traced
+ * from pi's own events, so a patched client would only duplicate spans. Same
+ * list `@respan/respan` applies when explicit instrumentations are given.
+ */
+const TRACELOOP_INSTRUMENTATIONS = [
+  "openAI", "anthropic", "azureOpenAI", "cohere", "bedrock",
+  "googleVertexAI", "googleAIPlatform", "pinecone", "together",
+  "langChain", "llamaIndex", "chromaDB", "qdrant",
+];
+
+type RespanTelemetryOptions = NonNullable<ConstructorParameters<typeof RespanTelemetry>[0]>;
+
+/**
+ * Default runtime: `@respan/tracing` driven directly (no `@respan/respan`
+ * dependency, so the pi package installs with only the core packages).
+ */
+export function createTracingRuntime(options: PiRuntimeOptions): RespanLike {
+  const telemetry = new RespanTelemetry({
+    apiKey: options.apiKey,
+    baseURL: options.baseURL,
+    appName: options.appName,
+    disabledInstrumentations: TRACELOOP_INSTRUMENTATIONS as RespanTelemetryOptions["disabledInstrumentations"],
+    silenceInitializationMessage: options.silenceInitializationMessage,
+    logLevel: options.logLevel,
+  });
+  let initialized = false;
+  return {
+    async initialize() {
+      if (initialized) {
+        return;
+      }
+      initialized = true;
+      await telemetry.initialize();
+      // Activate after the tracer provider exists (mirrors `Respan.initialize`).
+      for (const instrumentation of options.instrumentations) {
+        instrumentation.activate();
+      }
+    },
+    flush: () => telemetry.flush(),
+    async shutdown() {
+      for (const instrumentation of options.instrumentations) {
+        try {
+          instrumentation.deactivate();
+        } catch {
+          // Deactivation is best effort during shutdown.
+        }
+      }
+      await telemetry.shutdown();
+    },
+  };
+}
 
 export interface RespanPiExtensionOverrides {
   /** Use this configuration instead of resolving files/env. */
   config?: Partial<PiRespanConfig>;
-  /** Factory for the Respan umbrella (tests inject a fake). */
+  /** Factory for the tracing runtime (default `createTracingRuntime`; tests inject a fake). */
   createRespan?: CreateRespanFn;
   cwd?: string;
   env?: Record<string, string | undefined>;
@@ -283,7 +355,7 @@ function acquireRuntime(
       }
     },
   });
-  const options: RespanOptions = {
+  const options: PiRuntimeOptions = {
     apiKey: config.apiKey,
     baseURL: config.baseURL,
     appName: config.workflowName ?? "pi",
@@ -291,7 +363,7 @@ function acquireRuntime(
     silenceInitializationMessage: true,
     logLevel: config.debug ? "debug" : "error",
   };
-  const factory: CreateRespanFn = createRespan ?? ((opts) => new Respan(opts));
+  const factory: CreateRespanFn = createRespan ?? createTracingRuntime;
   const respan = factory(options);
   const runtime: SharedRuntime = { key, respan, instrumentor, ui, initialized: false };
   if (registry && key) {

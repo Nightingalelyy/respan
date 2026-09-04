@@ -5362,7 +5362,6 @@ __metadata:
     "@opentelemetry/core": "npm:^2.10.0"
     "@opentelemetry/sdk-trace-base": "npm:^2.10.0"
     "@opentelemetry/semantic-conventions": "npm:^1.43.0"
-    "@respan/respan": "workspace:^"
     "@respan/respan-sdk": "workspace:^"
     "@respan/tracing": "workspace:^"
     "@traceloop/ai-semantic-conventions": "npm:^0.13.0"
@@ -5547,7 +5546,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@respan/respan@workspace:^, @respan/respan@workspace:respan":
+"@respan/respan@workspace:respan":
   version: 0.0.0-use.local
   resolution: "@respan/respan@workspace:respan"
   dependencies:

@@ -21,7 +21,6 @@ import { execFileSync } from "node:child_process";
 
 import { hrTime } from "@opentelemetry/core";
 import type { HrTime } from "@opentelemetry/api";
-import type { RespanInstrumentation } from "@respan/respan";
 
 import { debugLog } from "./_debug.js";
 import {
@@ -88,6 +87,18 @@ interface AttachedSession {
 }
 
 type RecordValue = Record<string, unknown>;
+
+/**
+ * Structural copy of `@respan/respan`'s `RespanInstrumentation` so this
+ * package does not depend on the facade: `new Respan({ instrumentations:
+ * [new PiInstrumentor()] })` still type-checks, and the pi package entry
+ * activates the instrumentor itself.
+ */
+export interface RespanInstrumentation {
+  name: string;
+  activate(): void;
+  deactivate(): void;
+}
 
 export class PiInstrumentor implements RespanInstrumentation {
   public readonly name = "pi";
