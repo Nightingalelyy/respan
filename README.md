@@ -174,5 +174,9 @@ Structure traces with `@workflow` / `@task` (Python) or `withWorkflow` / `withTa
 
 Attach `customer_identifier`, `thread_identifier`, and `metadata` to all spans in scope. See the [attributes example](python-sdks/examples/openai-sdk/attributes.py).
 
+### Respan Collector (at-least-once delivery)
+
+The SDKs batch spans in memory and retry, but never write to disk, so spans still queued during a long outage or a process crash are lost. For long-running agents that must not lose spans, run the packaged [Respan Collector](collector/) next to the application — the upstream OpenTelemetry Collector with a persistent, bounded queue — and point `RESPAN_BASE_URL` at it (`respan collector start` or `docker compose -f collector/docker-compose.yaml up -d`).
+
 ## Star us
 Please star us if you found this helpful!

@@ -1,0 +1,6 @@
+{
+  "summary": "Retry the @respan/instrumentation-openrouter republish from 20260904-republish-workspace-leaks: the first attempt failed npm's provenance check (E422) because package.json had no repository field; the other four packages in that intent were published.",
+  "packages": {
+    "@respan/instrumentation-openrouter": "patch"
+  }
+}

@@ -349,13 +349,15 @@ def collect_published_versions(artifact_root: Path) -> dict[str, str]:
             )
         versions[package_name] = version
 
-    for payload_path in sorted(artifact_root.glob("*/version.json")):
+    # Artifacts land either as <root>/<artifact-name>/<file> or, when the
+    # download action extracts a single match, directly as <root>/<file>.
+    for payload_path in sorted(artifact_root.rglob("version.json")):
         payload = json.loads(payload_path.read_text())
         if not isinstance(payload, dict):
             raise ValueError(f"invalid published version payload in {payload_path}")
         add_version(payload.get("name"), payload.get("version"), payload_path)
 
-    for payload_path in sorted(artifact_root.glob("*/versions.json")):
+    for payload_path in sorted(artifact_root.rglob("versions.json")):
         payload = json.loads(payload_path.read_text())
         if not isinstance(payload, dict):
             raise ValueError(f"invalid published versions payload in {payload_path}")

@@ -1,6 +1,6 @@
 {
   "name": "@respan/cli",
-  "version": "0.13.2",
+  "version": "0.14.1",
   "description": "Respan CLI - manage your LLM observability from the command line",
   "type": "module",
   "main": "dist/index.js",
@@ -38,7 +38,12 @@
       "@oclif/plugin-not-found",
       "@oclif/plugin-autocomplete"
     ],
-    "topicSeparator": " "
+    "topicSeparator": " ",
+    "topics": {
+      "collector": {
+        "description": "Run a local OpenTelemetry Collector that queues traces to Respan durably"
+      }
+    }
   },
   "dependencies": {
     "@inquirer/prompts": "^7",

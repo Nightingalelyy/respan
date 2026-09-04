@@ -1,0 +1,73 @@
+{
+  "name": "@respan/instrumentation-pi",
+  "type": "module",
+  "version": "0.1.3",
+  "description": "Respan instrumentation plugin and pi extension for the pi coding agent (@earendil-works/pi-coding-agent)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./extension": {
+      "types": "./dist/extension.d.ts",
+      "import": "./dist/extension.js"
+    }
+  },
+  "author": "Respan <team@respan.ai>",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/respanai/respan",
+    "directory": "javascript-sdks/instrumentations/respan-instrumentation-pi"
+  },
+  "keywords": [
+    "respan",
+    "pi",
+    "pi-package",
+    "tracing",
+    "observability",
+    "llm"
+  ],
+  "pi": {
+    "extensions": [
+      "./dist/extension.js"
+    ]
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "yarn build && node --test tests/*.test.mjs",
+    "publish:package": "yarn npm publish",
+    "release": "yarn build && yarn version patch && yarn publish:package"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/core": "^2.10.0",
+    "@opentelemetry/sdk-trace-base": "^2.10.0",
+    "@opentelemetry/semantic-conventions": "^1.43.0",
+    "@respan/respan-sdk": "workspace:^",
+    "@respan/tracing": "workspace:^",
+    "@traceloop/ai-semantic-conventions": "^0.13.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.65.0"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.29",
+    "typescript": "^5.7.3"
+  }
+}
