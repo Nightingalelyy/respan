@@ -6,6 +6,22 @@ This package enables the Claude Agent SDK's native OpenTelemetry emission and
 normalizes those spans into the Respan/Traceloop conventions used by the OTLP
 pipeline.
 
+Tool execution spans preserve `gen_ai.tool.call.id` so their inputs and results
+can be matched to the agent's canonical tool calls. Repeated observations of the
+same invocation ID produce one canonical call, with JSON argument formatting and
+object-key order ignored during comparison. If the same ID has conflicting names
+or arguments, the processor logs a warning and keeps the first call. Missing
+fields are filled from later observations of the same ID. Calls without an ID
+are compared by name and normalized arguments.
+
+Repeated activation on the same tracer provider shares one normalization
+processor. Deactivating one instrumentor keeps that processor active until its
+last owner deactivates. Normalization also preserves already-normalized tool
+types, names, inputs, and results.
+The upstream SDK patches are global: the first active instance's provider,
+`agent_name`, and `capture_content` settings remain in effect until all instances
+deactivate.
+
 ## Configuration
 
 ### 1. Install

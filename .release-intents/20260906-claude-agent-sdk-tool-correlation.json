@@ -1,0 +1,6 @@
+{
+  "summary": "Preserve Claude Agent SDK tool invocation IDs, deduplicate canonical calls by ID and normalized arguments, and make repeated instrumentation safe",
+  "packages": {
+    "respan-instrumentation-claude-agent-sdk": "patch"
+  }
+}

@@ -1054,7 +1054,10 @@ def test_span_processor_on_end_merges_pending_tool_calls_into_parent_agent_span(
     processor.on_end(tool_span)
     processor.on_end(agent_span)
 
-    assert not any(key.startswith("gen_ai.tool.") for key in tool_span._attributes)
+    assert tool_span._attributes["gen_ai.tool.call.id"] == "toolu_123"
+    assert {
+        key for key in tool_span._attributes if key.startswith("gen_ai.tool.")
+    } == {"gen_ai.tool.call.id"}
     assert json.loads(agent_span._attributes[_COMPLETION_TOOL_CALLS_ATTR]) == [
         {
             "id": "toolu_123",
