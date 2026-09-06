@@ -11,6 +11,7 @@ from threading import RLock
 from typing import Any
 
 from opentelemetry import trace
+from opentelemetry.trace import StatusCode
 
 from respan_instrumentation_claude_agent_sdk._processor import (  # type: ignore[reportMissingImports]
     ClaudeAgentSDKSpanProcessor,
@@ -194,12 +195,23 @@ class ClaudeAgentSDKInstrumentor:
             spans_module = importlib.import_module(
                 "opentelemetry.instrumentation.claude_agent_sdk._spans"
             )
+            hooks_module = importlib.import_module(
+                "opentelemetry.instrumentation.claude_agent_sdk._hooks"
+            )
+            from ._tool_lifecycle import (
+                _InvocationMessageStream,
+                _capture_failure_output,
+                _reconcile_sdk_message,
+            )
+
             instrumentor_class = _load_upstream_instrumentor_class()
+            original_set_tool_error_attributes = hooks_module.set_tool_error_attributes
 
             # Read the upstream constant names inside the guarded block so a version
             # that renames or drops one degrades to a logged no-op instead of an
             # uncaught AttributeError out of activate().
             output_messages_attr = constants_module.GEN_AI_OUTPUT_MESSAGES
+            error_type_attr = constants_module.ERROR_TYPE
             usage_input_tokens_attr = constants_module.GEN_AI_USAGE_INPUT_TOKENS
             usage_output_tokens_attr = constants_module.GEN_AI_USAGE_OUTPUT_TOKENS
             usage_cache_creation_tokens_attr = (
@@ -224,6 +236,37 @@ class ClaudeAgentSDKInstrumentor:
             instrumentor_class._instrumented_receive_response
         )
         original_handle_control_request = Query._handle_control_request
+        original_instrumented_query = getattr(instrumentor_class, "_instrumented_query", None)
+
+        def patched_set_tool_error_attributes(span: Any, error: str) -> None:
+            ctx = context_module.get_invocation_context()
+            capture_content = bool(getattr(ctx, "capture_content", False))
+            _capture_failure_output(
+                span, error, capture_content=capture_content,
+            )
+            original_set_tool_error_attributes(
+                span, error if capture_content else "Tool execution failed",
+            )
+
+        async def patched_instrumented_query(
+            instrumentor: Any, wrapped: Any, args: tuple[Any, ...], kwargs: dict[str, Any],
+        ) -> Any:
+            from claude_agent_sdk import ResultMessage
+
+            previous_invocation_ctx = context_module.get_invocation_context()
+            source = _InvocationMessageStream(wrapped)
+            messages = original_instrumented_query(instrumentor, source, args, kwargs)
+            after_result = False
+            try:
+                async for message in messages:
+                    _reconcile_sdk_message(context_module.get_invocation_context(), message)
+                    after_result = isinstance(message, ResultMessage)
+                    yield message
+            finally:
+                try:
+                    await source.close(messages, after_result=after_result)
+                finally:
+                    context_module.set_invocation_context(previous_invocation_ctx)
 
         def patched_set_response_content(span: Any, content: Any) -> None:
             if content is None:
@@ -252,6 +295,11 @@ class ClaudeAgentSDKInstrumentor:
 
         def patched_set_result_attributes(span: Any, result_message: Any) -> None:
             original_set_result_attributes(span, result_message)
+            if getattr(result_message, "is_error", False) is True:
+                # A caller can stop at this result before the SDK raises its later
+                # exception. Classify the observed failure without exposing content.
+                span.set_attribute(error_type_attr, "claude_agent_sdk_error")
+                span.set_status(StatusCode.ERROR, "Claude Agent SDK invocation failed")
 
             usage = getattr(result_message, "usage", None)
             if isinstance(usage, dict):
@@ -314,27 +362,40 @@ class ClaudeAgentSDKInstrumentor:
             args: tuple[Any, ...],
             kwargs: dict[str, Any],
         ) -> Any:
+            from claude_agent_sdk import ResultMessage
+
             previous_invocation_ctx = context_module.get_invocation_context()
             invocation_ctx = getattr(instance, "_otel_invocation_ctx", None)
             query = getattr(instance, "_query", None)
+            terminal_result = None
+            source = _InvocationMessageStream(wrapped)
+            messages = original_instrumented_receive_response(
+                instrumentor, source, instance, args, kwargs,
+            )
             if invocation_ctx is not None:
                 context_module.set_invocation_context(invocation_ctx)
                 if query is not None:
                     query._otel_invocation_ctx = invocation_ctx
 
             try:
-                async for message in original_instrumented_receive_response(
-                    instrumentor,
-                    wrapped,
-                    instance,
-                    args,
-                    kwargs,
-                ):
-                    yield message
+                async for message in messages:
+                    if terminal_result is not None:
+                        yield terminal_result
+                        terminal_result = None
+                    _reconcile_sdk_message(invocation_ctx, message)
+                    if isinstance(message, ResultMessage):
+                        terminal_result = message
+                    else:
+                        yield message
             finally:
-                if query is not None:
-                    query._otel_invocation_ctx = None
-                context_module.set_invocation_context(previous_invocation_ctx)
+                try:
+                    await source.close(messages, after_result=False)
+                finally:
+                    if query is not None:
+                        query._otel_invocation_ctx = None
+                    context_module.set_invocation_context(previous_invocation_ctx)
+            if terminal_result is not None:
+                yield terminal_result
 
         async def patched_handle_control_request(query: Any, request: Any) -> Any:
             previous_invocation_ctx = context_module.get_invocation_context()
@@ -379,6 +440,16 @@ class ClaudeAgentSDKInstrumentor:
             (Query, "_handle_control_request", getattr(Query, "_handle_control_request"))
         )
         Query._handle_control_request = patched_handle_control_request
+
+        self._patched_modules.append(
+            (hooks_module, "set_tool_error_attributes", original_set_tool_error_attributes)
+        )
+        hooks_module.set_tool_error_attributes = patched_set_tool_error_attributes
+        if original_instrumented_query is not None:
+            self._patched_modules.append(
+                (instrumentor_class, "_instrumented_query", original_instrumented_query)
+            )
+            instrumentor_class._instrumented_query = patched_instrumented_query
 
         return True
 

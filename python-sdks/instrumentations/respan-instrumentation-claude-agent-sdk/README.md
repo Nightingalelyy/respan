@@ -22,6 +22,15 @@ The upstream SDK patches are global: the first active instance's provider,
 `agent_name`, and `capture_content` settings remain in effect until all instances
 deactivate.
 
+Failed-tool hooks retain their error result when content capture is enabled.
+For both `query()` and `ClaudeSDKClient`, terminal SDK tool results also close
+matching spans when a post-tool hook is missing. Explicit permission denials
+are recorded as SDK denial outcomes, not fabricated tool stderr. Repeated
+results and late post-tool hooks cannot close the same span twice. Unmatched
+tool or subagent spans still report genuine cleanup errors.
+This compatibility handling is provided by Respan; it does not require a fork
+or changes to the installed upstream instrumentation package.
+
 ## Configuration
 
 ### 1. Install
