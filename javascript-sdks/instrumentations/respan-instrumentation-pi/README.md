@@ -42,6 +42,7 @@ pi.turn-1.agent (agent)                         one per agent run, shown as agen
 │     prompts, completion, tool_calls, usage, TTFT, cost
 ├── bash.tool (tool)                            one per tool execution
 ├── read.tool (tool)                            skill usage detected from SKILL.md
+├── pi.turn-2.steer (task)                      a user message steered into the running turn, shown as steer
 ├── pi.chat (chat)
 └── pi.compaction (task)                        when compaction happens mid-run
 
@@ -54,6 +55,20 @@ streams into the dashboard while it is still running; the turn's agent span
 arrives when the run ends. The turn number is read from the session history
 (the user messages already on the session branch), so it survives a resume in
 a new process; without a session manager the tracer counts runs itself.
+
+### Steering
+
+When a message is delivered into a run that is already working — pi's
+`session.steer()` / `followUp()`, or typing while the agent streams — pi
+injects it at the next tool boundary and the run carries on. The message gets
+its own `steer` span under the turn at the moment it was delivered, so it is
+visible in the tree instead of only as the last input item of the next LLM
+call. It is also appended to the turn span's input, and the turn span carries
+`respan.metadata.steer_count`.
+
+Turn numbers count the session's user messages, so a steer takes the next
+number: a `turn-1` run that received three steers (`turn-2`, `turn-3`,
+`turn-4`) is followed by `agent.turn-5`.
 
 ## Install for the pi CLI
 
@@ -258,9 +273,10 @@ already-active factory):
 | Span | Attributes |
 |---|---|
 | all | `respan.entity.log_type`, `traceloop.entity.name/path`, `respan.threads.thread_identifier`, `respan.sessions.session_identifier`, `respan.trace.trace_group_identifier` (all three = the pi session id), `respan.customer_params.customer_identifier`, `respan.metadata.*`, `telemetry.sdk.name/version`, `status_code` + `error.message` on failures |
-| `<agent>.turn-<n>.agent` | `traceloop.workflow.name`, input `[{role: "user", content: prompt}]`, output = final assistant text, `respan.metadata.agent_name`, `respan.metadata.turn_number`, `respan.metadata.{pi_version, thinking_level, session_file, cwd, turn_count, tool_call_count, stop_reason, continuation}`. A structural span: no `gen_ai.request.model` (the model is on the chat spans) |
+| `<agent>.turn-<n>.agent` | `traceloop.workflow.name`, input `[{role: "user", content: prompt}, ...steered messages]`, output = final assistant text, `respan.metadata.steer_count` when the run was steered, `respan.metadata.agent_name`, `respan.metadata.turn_number`, `respan.metadata.{pi_version, thinking_level, session_file, cwd, turn_count, tool_call_count, stop_reason, continuation}`. A structural span: no `gen_ai.request.model` (the model is on the chat spans) |
 | `pi.chat` | `gen_ai.system` (provider), `llm.request.type = chat`, `gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.prompt.N.role/content/tool_calls`, `gen_ai.completion.0.role/content/tool_calls`, `traceloop.entity.input/output` (output carries `reasoning`), `llm.request.functions` (tool definitions, capped at `maxContentChars`), `gen_ai.usage.input_tokens` / `gen_ai.usage.prompt_tokens` (= input + cacheRead + cacheWrite), `gen_ai.usage.output_tokens` / `gen_ai.usage.completion_tokens`, `llm.usage.total_tokens`, `gen_ai.usage.cache_read.input_tokens` / `llm.usage.cache_read_input_tokens`, `gen_ai.usage.cache_creation.input_tokens`, `respan.metadata.{reasoning_tokens, estimated_cost_usd, time_to_first_token_ms, stop_reason, response_id, turn_index, thinking_level, api, prompt_capture, prompt_message_offset}` |
 | `<tool>.tool` | `traceloop.entity.input` = `{name, arguments}`, `traceloop.entity.output` = text output (or `{content, details}` JSON), `respan.metadata.tool_call_id`, `respan.metadata.skill_name` when a `SKILL.md` is read or the `skill` tool is used |
+| `<agent>.turn-<n>.steer` | input `[{role: "user", content: steered message}]`, `respan.metadata.turn_number` (the steer's own number), `respan.metadata.steered_into_turn`, `respan.metadata.steer_index`, `respan.metadata.delivered_after` (`tool_results` \| `assistant_reply` \| `run_start`) |
 | `pi.compaction` | input `{reason, willRetry, tokensBefore}`, output `{summary, tokensBefore, tokensAfter, firstKeptEntryId}` |
 | `pi.branch_summary` | input `{targetId, oldLeafId, label}`, output `{summary, label, id, fromId, ...}` |
 | `<agent>.turn-<n>.agent` (git) | `respan.metadata.git_repository` (remote URL, credentials stripped), `respan.metadata.git_branch`, `respan.metadata.git_commit` of the working directory, cached per directory |

@@ -222,6 +222,120 @@ async function replayRun(pi, ctx, { toolOutput = "README.md", shutdown = true } 
   }
 }
 
+test("steers: user messages delivered into a running turn become steer spans and take the next turn numbers", async () => {
+  captureState.spans = [];
+  const instrumentor = new PiInstrumentor();
+  instrumentor.activate();
+  const pi = createFakePi();
+  instrumentor.extension(pi);
+  const ctx = createFakeCtx({ sessionId: "3f2504e0-4f89-11d3-9a0c-0305e82c3399" });
+  const steerOne = { role: "user", content: [{ type: "text", text: "New email: reschedule 43878" }], timestamp: Date.now() };
+  const steerTwo = { role: "user", content: "One more: ignore the first", timestamp: Date.now() };
+
+  await pi.emit("session_start", { reason: "startup" }, ctx);
+  await pi.emit("before_agent_start", { prompt: "Inspect the repo", systemPrompt: "You are pi" }, ctx);
+  await pi.emit("agent_start", {}, ctx);
+  await pi.emit("turn_start", { turnIndex: 0 }, ctx);
+  // pi emits the run's own prompt first: that one is NOT a steer.
+  await pi.emit("message_start", { message: userMessage }, ctx);
+  await pi.emit("message_end", { message: userMessage }, ctx);
+  await pi.emit("context", { messages: [userMessage] }, ctx);
+  await pi.emit("message_end", { message: assistantWithTool }, ctx);
+  await pi.emit("tool_execution_start", { toolCallId: "call-1", toolName: "bash", args: { command: "ls" } }, ctx);
+  await pi.emit(
+    "tool_execution_end",
+    { toolCallId: "call-1", toolName: "bash", result: { content: [{ type: "text", text: "README.md" }] }, isError: false },
+    ctx,
+  );
+  await pi.emit("turn_end", { turnIndex: 0, message: assistantWithTool, toolResults: [toolResultMessage] }, ctx);
+  // Delivered at the tool boundary.
+  await pi.emit("turn_start", { turnIndex: 1 }, ctx);
+  await pi.emit("message_start", { message: steerOne }, ctx);
+  await pi.emit("message_end", { message: steerOne }, ctx);
+  await pi.emit("context", { messages: [userMessage, assistantWithTool, toolResultMessage, steerOne] }, ctx);
+  await pi.emit("message_end", { message: assistantFinal }, ctx);
+  await pi.emit("turn_end", { turnIndex: 1, message: assistantFinal, toolResults: [] }, ctx);
+  // Delivered when the agent was about to stop: the run continues.
+  await pi.emit("turn_start", { turnIndex: 2 }, ctx);
+  await pi.emit("message_start", { message: steerTwo }, ctx);
+  await pi.emit("message_end", { message: steerTwo }, ctx);
+  await pi.emit("message_end", { message: assistantFinal }, ctx);
+  await pi.emit("agent_end", { messages: [] }, ctx);
+
+  const steers = captureState.spans.filter((span) => span.name.endsWith(".steer"));
+  assert.equal(steers.length, 2);
+  const [agent] = spansByLogType("agent");
+  assert.equal(agent.name, "pi.turn-1.agent");
+  for (const steer of steers) {
+    assert.equal(parentSpanId(steer), agent.spanContext().spanId);
+    assert.equal(steer.spanContext().traceId, agent.spanContext().traceId);
+    assert.equal(steer.attributes["respan.entity.log_type"], "task");
+    assert.equal(steer.attributes["respan.internal.span_name.kind"], "steer");
+    assert.equal(steer.attributes["respan.metadata.steered_into_turn"], 1);
+    assertNoBannedAliases(steer);
+  }
+  assert.equal(steers[0].name, "pi.turn-2.steer");
+  assert.equal(steers[0].attributes["respan.metadata.turn_number"], 2);
+  assert.equal(steers[0].attributes["respan.metadata.delivered_after"], "tool_results");
+  assert.deepEqual(JSON.parse(steers[0].attributes["traceloop.entity.input"]), [
+    { role: "user", content: "New email: reschedule 43878" },
+  ]);
+  assert.equal(steers[1].name, "pi.turn-3.steer");
+  assert.equal(steers[1].attributes["respan.metadata.delivered_after"], "assistant_reply");
+
+  // The turn span lists everything the user fed the run, and counts the steers.
+  assert.deepEqual(JSON.parse(agent.attributes["traceloop.entity.input"]), [
+    { role: "user", content: "Inspect the repo" },
+    { role: "user", content: "New email: reschedule 43878" },
+    { role: "user", content: "One more: ignore the first" },
+  ]);
+  assert.equal(agent.attributes["respan.metadata.steer_count"], 2);
+  assert.equal(spansByLogType("chat").length, 3);
+
+  // Without session history the next run continues after the steers: turn 4.
+  captureState.spans = [];
+  await pi.emit("before_agent_start", { prompt: "Next email", systemPrompt: "You are pi" }, ctx);
+  await pi.emit("agent_start", {}, ctx);
+  await pi.emit("message_start", { message: { role: "user", content: "Next email" } }, ctx);
+  await pi.emit("message_end", { message: assistantFinal }, ctx);
+  await pi.emit("agent_end", { messages: [] }, ctx);
+  const [next] = spansByLogType("agent");
+  assert.equal(next.name, "pi.turn-4.agent");
+  assert.equal(next.attributes["respan.metadata.steer_count"], undefined);
+  assert.equal(captureState.spans.filter((span) => span.name.endsWith(".steer")).length, 0);
+  instrumentor.deactivate();
+});
+
+test("steers: subscribe mode (attach) records a steer delivered through session events", () => {
+  captureState.spans = [];
+  const instrumentor = new PiInstrumentor({ traceScope: "run" });
+  instrumentor.activate();
+  const session = createFakeSession("sess-steer", []);
+  const detach = instrumentor.attach(session);
+  const prompt = { role: "user", content: "Handle the inbox" };
+  const steer = { role: "user", content: "Urgent: new email from Tiffany" };
+  session.emit({ type: "agent_start" });
+  session.emit({ type: "message_start", message: prompt });
+  session.emit({ type: "message_end", message: prompt });
+  session.messages.push(prompt);
+  session.emit({ type: "message_end", message: assistantWithTool });
+  session.emit({ type: "message_start", message: steer });
+  session.emit({ type: "message_end", message: steer });
+  session.emit({ type: "message_end", message: assistantFinal });
+  session.emit({ type: "agent_end", messages: [] });
+  detach();
+
+  const steers = captureState.spans.filter((span) => span.name.endsWith(".steer"));
+  assert.equal(steers.length, 1);
+  const [agent] = spansByLogType("agent");
+  assert.equal(parentSpanId(steers[0]), agent.spanContext().spanId);
+  assert.deepEqual(JSON.parse(agent.attributes["traceloop.entity.input"]), [
+    { role: "user", content: "Handle the inbox" },
+    { role: "user", content: "Urgent: new email from Tiffany" },
+  ]);
+  instrumentor.deactivate();
+});
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 function spansByLogType(logType, spans = captureState.spans) {

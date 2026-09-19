@@ -193,6 +193,13 @@ interface RunState {
   startTime: HrTime;
   prompt: string;
   promptKnown: boolean;
+  /** The run's own prompt message was seen (every later user message is a steer). */
+  promptMessageSeen: boolean;
+  /**
+   * User messages pi delivered into this run while it was working
+   * (`steer()` / `followUp()`), in order. Each one takes the next turn number.
+   */
+  steers: string[];
   systemPrompt?: string;
   truncated: boolean;
   chatCount: number;
@@ -500,7 +507,19 @@ export class PiSessionTracer {
       run.assistantMessageStart = hrTime();
       return;
     }
-    if (message.role === "user" && !run.promptKnown) {
+    if (message.role !== "user") {
+      return;
+    }
+    // pi emits the run's own prompt as the first user message of the run.
+    // Any user message after that — or after the model already answered, for
+    // a continuation run that has no prompt message — was queued with
+    // `steer()` / `followUp()` and delivered into the running turn.
+    if (run.promptMessageSeen || run.chatCount > 0 || run.pendingLlm.length > 0) {
+      this.emitSteerSpan(run, message);
+      return;
+    }
+    run.promptMessageSeen = true;
+    if (!run.promptKnown) {
       const capture = this.capture();
       const prompt = renderContent(message.content, capture);
       run.prompt = prompt;
@@ -758,6 +777,8 @@ export class PiSessionTracer {
       startTime: hrTime(),
       prompt: init.prompt,
       promptKnown: init.promptKnown,
+      promptMessageSeen: false,
+      steers: [],
       systemPrompt: init.systemPrompt,
       truncated: init.truncated,
       chatCount: 0,
@@ -781,7 +802,12 @@ export class PiSessionTracer {
     // Prompt and final text were already truncated when captured.
     const prompt = run.promptKnown ? run.prompt : (this.lastPrompt ?? "");
     const truncated = run.truncated || (continuation && this.lastPromptTruncated);
-    const input = safeJson([{ role: "user", content: prompt }]);
+    // The turn's input is everything the user fed this run: the prompt and
+    // the messages steered into it while it was working.
+    const input = safeJson([
+      { role: "user", content: prompt },
+      ...run.steers.map((content) => ({ role: "user", content })),
+    ]);
     const output = run.lastAssistantText;
     const toolCallCount = run.toolCallCount + run.pendingTools.size;
 
@@ -814,6 +840,9 @@ export class PiSessionTracer {
     setMetadata(agentAttrs, "cwd", this.session.cwd);
     setMetadata(agentAttrs, "turn_count", run.turnCount);
     setMetadata(agentAttrs, "tool_call_count", toolCallCount);
+    if (run.steers.length > 0) {
+      setMetadata(agentAttrs, "steer_count", run.steers.length);
+    }
     setMetadata(agentAttrs, "stop_reason", run.lastStopReason);
     setMetadata(agentAttrs, "git_repository", this.session.git?.repository);
     setMetadata(agentAttrs, "git_branch", this.session.git?.branch);
@@ -1044,6 +1073,54 @@ export class PiSessionTracer {
       attributes: attrs,
       statusCode,
       errorMessage,
+    });
+  }
+
+  /**
+   * A user message pi delivered into a run that was already working
+   * (`session.steer()` / `followUp()`, or typing while the agent streams).
+   * It becomes its own `steer` span under the turn, so it is visible in the
+   * tree instead of only as the last input item of the next LLM call. Turn
+   * numbers count the session's user messages, so a steer takes the next
+   * number: a turn-1 run with three steers is followed by turn 5.
+   */
+  private emitSteerSpan(run: RunState, message: RecordValue): void {
+    const capture = this.capture();
+    const content = renderContent(message.content, capture);
+    run.steers.push(content);
+    run.truncated = run.truncated || capture.truncated;
+    // Keep the in-tracer counter aligned with the session history count.
+    this.runCounter = run.turnNumber + run.steers.length;
+    const turnNumber = this.runCounter;
+    const now = hrTime();
+
+    const attrs = this.baseAttrs("steer", "steer", RespanLogType.TASK);
+    attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson([{ role: "user", content }]);
+    attrs[RespanSpanAttributes.RESPAN_INTERNAL_SPAN_NAME_KIND] = "steer";
+    attrs[RespanSpanAttributes.RESPAN_INTERNAL_SPAN_NAME_DETAIL] = `turn-${turnNumber}`;
+    setMetadata(attrs, "turn_number", turnNumber);
+    setMetadata(attrs, "steered_into_turn", run.turnNumber);
+    setMetadata(attrs, "steer_index", run.steers.length);
+    setMetadata(
+      attrs,
+      "delivered_after",
+      run.chatCount === 0
+        ? "run_start"
+        : run.lastStopReason === "toolUse"
+          ? "tool_results"
+          : "assistant_reply",
+    );
+    if (capture.truncated) {
+      attrs[metadataKey("truncated")] = true;
+    }
+    this.emitSpan({
+      name: `${this.agentName}.turn-${turnNumber}.steer`,
+      traceId: run.traceId,
+      spanId: ensureSpanId(),
+      parentId: run.agentSpanId,
+      startTime: now,
+      endTime: now,
+      attributes: attrs,
     });
   }
 
