@@ -9,6 +9,8 @@ import {
   ATTR_GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
 } from "@opentelemetry/semantic-conventions/incubating";
 import { propagateAttributes } from "@respan/tracing";
+// Internal module on purpose: asserts the name the platform actually displays.
+import { semanticSpanNameForSpan } from "@respan/tracing/dist/processor/spanName.js";
 
 import { PiInstrumentor, PiSessionTracer, createPiExtension, sessionTraceId } from "../dist/index.js";
 
@@ -270,11 +272,14 @@ test("steers: user messages delivered into a running turn become steer spans and
     assert.equal(parentSpanId(steer), agent.spanContext().spanId);
     assert.equal(steer.spanContext().traceId, agent.spanContext().traceId);
     assert.equal(steer.attributes["respan.entity.log_type"], "task");
-    assert.equal(steer.attributes["respan.internal.span_name.kind"], "steer");
     assert.equal(steer.attributes["respan.metadata.steered_into_turn"], 1);
     assertNoBannedAliases(steer);
   }
   assert.equal(steers[0].name, "pi.turn-2.steer");
+  // What the platform shows after the exporter's semantic renaming.
+  assert.equal(semanticSpanNameForSpan(agent), "agent.turn-1");
+  assert.equal(semanticSpanNameForSpan(steers[0]), "steer.turn-2");
+  assert.equal(semanticSpanNameForSpan(steers[1]), "steer.turn-3");
   assert.equal(steers[0].attributes["respan.metadata.turn_number"], 2);
   assert.equal(steers[0].attributes["respan.metadata.delivered_after"], "tool_results");
   assert.deepEqual(JSON.parse(steers[0].attributes["traceloop.entity.input"]), [

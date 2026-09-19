@@ -42,7 +42,7 @@ pi.turn-1.agent (agent)                         one per agent run, shown as agen
 │     prompts, completion, tool_calls, usage, TTFT, cost
 ├── bash.tool (tool)                            one per tool execution
 ├── read.tool (tool)                            skill usage detected from SKILL.md
-├── pi.turn-2.steer (task)                      a user message steered into the running turn, shown as steer
+├── pi.turn-2.steer (task)                      a user message steered into the running turn, shown as steer.turn-2
 ├── pi.chat (chat)
 └── pi.compaction (task)                        when compaction happens mid-run
 
@@ -61,7 +61,7 @@ a new process; without a session manager the tracer counts runs itself.
 When a message is delivered into a run that is already working — pi's
 `session.steer()` / `followUp()`, or typing while the agent streams — pi
 injects it at the next tool boundary and the run carries on. The message gets
-its own `steer` span under the turn at the moment it was delivered, so it is
+its own span under the turn, displayed as `steer.turn-<n>`, at the moment it was delivered, so it is
 visible in the tree instead of only as the last input item of the next LLM
 call. It is also appended to the turn span's input, and the turn span carries
 `respan.metadata.steer_count`. The first LLM call that sees the steered
