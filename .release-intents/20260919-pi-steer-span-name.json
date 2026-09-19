@@ -1,0 +1,6 @@
+{
+  "summary": "@respan/instrumentation-pi: steer spans are displayed as `steer.turn-<n>` (the steer's own turn number in the name) instead of a bare `steer`.",
+  "packages": {
+    "@respan/instrumentation-pi": "patch"
+  }
+}

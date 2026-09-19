@@ -1109,8 +1109,11 @@ export class PiSessionTracer {
 
     const attrs = this.baseAttrs("steer", "steer", RespanLogType.TASK);
     attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson([{ role: "user", content }]);
-    attrs[RespanSpanAttributes.RESPAN_INTERNAL_SPAN_NAME_KIND] = "steer";
-    attrs[RespanSpanAttributes.RESPAN_INTERNAL_SPAN_NAME_DETAIL] = `turn-${turnNumber}`;
+    // Displayed as `steer.turn-<n>`. The semantic namer only appends a detail
+    // to agent/tool/handoff/llm, but it uses an unrecognized kind verbatim
+    // (dots and hyphens survive), so the number rides in the kind hint. This
+    // works with every released @respan/tracing.
+    attrs[RespanSpanAttributes.RESPAN_INTERNAL_SPAN_NAME_KIND] = `steer.turn-${turnNumber}`;
     setMetadata(attrs, "turn_number", turnNumber);
     setMetadata(attrs, "steered_into_turn", run.turnNumber);
     setMetadata(attrs, "steer_index", run.steers.length);
