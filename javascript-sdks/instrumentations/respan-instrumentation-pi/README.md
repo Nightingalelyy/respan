@@ -64,7 +64,10 @@ injects it at the next tool boundary and the run carries on. The message gets
 its own `steer` span under the turn at the moment it was delivered, so it is
 visible in the tree instead of only as the last input item of the next LLM
 call. It is also appended to the turn span's input, and the turn span carries
-`respan.metadata.steer_count`.
+`respan.metadata.steer_count`. The first LLM call that sees the steered
+message is flagged with `respan.metadata.after_steer = "true"` (and
+`steer_turn_numbers`), so filtering on `after_steer` lists exactly the model
+calls that reacted to a steer.
 
 Turn numbers count the session's user messages, so a steer takes the next
 number: a `turn-1` run that received three steers (`turn-2`, `turn-3`,

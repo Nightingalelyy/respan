@@ -200,6 +200,8 @@ interface RunState {
    * (`steer()` / `followUp()`), in order. Each one takes the next turn number.
    */
   steers: string[];
+  /** Turn numbers of steers no LLM call has consumed yet (flagged on the next chat span). */
+  unseenSteerTurns: number[];
   systemPrompt?: string;
   truncated: boolean;
   chatCount: number;
@@ -779,6 +781,7 @@ export class PiSessionTracer {
       promptKnown: init.promptKnown,
       promptMessageSeen: false,
       steers: [],
+      unseenSteerTurns: [],
       systemPrompt: init.systemPrompt,
       truncated: init.truncated,
       chatCount: 0,
@@ -1000,6 +1003,15 @@ export class PiSessionTracer {
     // pi emits turn_start before the LLM call, so the turn current at message_end
     // is this response's turn (the pending value covers dangling calls).
     setMetadata(attrs, "turn_index", run.currentTurnIndex ?? pending.turnIndex);
+    // The first LLM call that sees a steered message is flagged, so
+    // `after_steer = true` filters exactly the calls that reacted to a steer.
+    if (run.unseenSteerTurns.length > 0) {
+      // A string, not a boolean: the platform's metadata filter matches text,
+      // and `after_steer = true` is what people type.
+      setMetadata(attrs, "after_steer", "true");
+      setMetadata(attrs, "steer_turn_numbers", run.unseenSteerTurns.join(","));
+      run.unseenSteerTurns = [];
+    }
     setMetadata(attrs, "thinking_level", this.thinkingLevel);
     if (capture.truncated) {
       attrs[metadataKey("truncated")] = true;
@@ -1092,6 +1104,7 @@ export class PiSessionTracer {
     // Keep the in-tracer counter aligned with the session history count.
     this.runCounter = run.turnNumber + run.steers.length;
     const turnNumber = this.runCounter;
+    run.unseenSteerTurns.push(turnNumber);
     const now = hrTime();
 
     const attrs = this.baseAttrs("steer", "steer", RespanLogType.TASK);

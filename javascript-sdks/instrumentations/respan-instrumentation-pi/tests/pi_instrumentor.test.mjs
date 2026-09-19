@@ -290,7 +290,14 @@ test("steers: user messages delivered into a running turn become steer spans and
     { role: "user", content: "One more: ignore the first" },
   ]);
   assert.equal(agent.attributes["respan.metadata.steer_count"], 2);
-  assert.equal(spansByLogType("chat").length, 3);
+  // Only the LLM call that first sees a steer is flagged (filter: after_steer = true).
+  const chats = spansByLogType("chat");
+  assert.equal(chats.length, 3);
+  assert.equal(chats[0].attributes["respan.metadata.after_steer"], undefined);
+  assert.equal(chats[1].attributes["respan.metadata.after_steer"], "true");
+  assert.equal(chats[1].attributes["respan.metadata.steer_turn_numbers"], "2");
+  assert.equal(chats[2].attributes["respan.metadata.after_steer"], "true");
+  assert.equal(chats[2].attributes["respan.metadata.steer_turn_numbers"], "3");
 
   // Without session history the next run continues after the steers: turn 4.
   captureState.spans = [];
