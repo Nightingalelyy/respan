@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { BasicTracerProvider, InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
-import { generateText, streamText, embedMany, rerank, registerTelemetry, Output, jsonSchema, tool } from "ai";
-import { MockLanguageModelV4, MockEmbeddingModelV4, MockRerankingModelV4 } from "ai/test";
+import { generateText, streamText, embedMany, rerank, registerTelemetry, Output, jsonSchema, tool, experimental_evaluate } from "ai";
+import { MockLanguageModelV4, MockEmbeddingModelV4, MockRerankingModelV4, Experimental_EvaluationMockModelV4 } from "ai/test";
 import { OpenTelemetry } from "@ai-sdk/otel";
 import { VercelAITranslator } from "../../dist/_translator.js";
 
@@ -27,7 +27,7 @@ test("real AI SDK 7.0.112 and @ai-sdk/otel 1.0.112 emit compatible spans", async
     { onStart: (span, ctx) => translator.onStart(span, ctx), onEnd: span => translator.onEnd(span), forceFlush: async () => {}, shutdown: async () => {} },
     new SimpleSpanProcessor(exporter),
   ] });
-  const integration = new OpenTelemetry({ tracer: provider.getTracer("gen_ai"), embedding: true, reranking: true });
+  const integration = new OpenTelemetry({ tracer: provider.getTracer("gen_ai"), embedding: true, reranking: true, experimental_evaluation: true });
   registerTelemetry(integration);
   const spans = () => exporter.getFinishedSpans();
   const chat = () => spans().find(span => span.name.startsWith("chat "));
@@ -88,6 +88,66 @@ test("real AI SDK 7.0.112 and @ai-sdk/otel 1.0.112 emit compatible spans", async
       assert.ok(result.content.some(part => part.type === "tool-approval-request"));
       assert.equal(JSON.parse(chat().attributes["gen_ai.completion.0.tool_calls"])[0].id, "approval-call");
       assert.ok(!spans().some(span => span.attributes["respan.entity.log_type"] === "tool"));
+    });
+    exporter.reset();
+    await t.test("experimental evaluation retains state, questions, and typed answers", async () => {
+      await experimental_evaluate({
+        model: new Experimental_EvaluationMockModelV4({ doEvaluate: async () => ({ answers: { correct: { type: "boolean", probability: 0.95 } }, warnings: [] }) }),
+        state: "4 is even", questions: { correct: { type: "boolean", instructions: "Is the state true?" } },
+      });
+      const evaluation = spans().find(span => span.attributes["traceloop.entity.output"]);
+      assert.equal(evaluation.attributes["respan.entity.log_type"], "task");
+      assert.equal(JSON.parse(evaluation.attributes["traceloop.entity.input"]).state, "4 is even");
+      assert.equal(JSON.parse(evaluation.attributes["traceloop.entity.output"]).correct.probability, 0.95);
+    });
+    exporter.reset();
+    await t.test("global content opt-out vetoes native SDK recording", async () => {
+      const previous = process.env.RESPAN_TRACE_CONTENT;
+      try {
+        process.env.RESPAN_TRACE_CONTENT = "false";
+        await generateText({ model: new MockLanguageModelV4({ doGenerate: response }), instructions: "GLOBAL_PRIVATE_SYSTEM", prompt: "GLOBAL_PRIVATE_PROMPT" });
+        await embedMany({ model: new MockEmbeddingModelV4({ doEmbed: { embeddings: [[0.1]], usage: { tokens: 1 } } }), values: ["GLOBAL_PRIVATE_EMBED"] });
+      } finally {
+        if (previous === undefined) delete process.env.RESPAN_TRACE_CONTENT;
+        else process.env.RESPAN_TRACE_CONTENT = previous;
+      }
+      assert.ok(spans().length > 0);
+      for (const span of spans()) {
+        assert.equal(span.attributes["traceloop.entity.input"], undefined);
+        assert.equal(span.attributes["traceloop.entity.output"], undefined);
+        assert.ok(!JSON.stringify(span.attributes).includes("GLOBAL_PRIVATE"));
+      }
+    });
+    exporter.reset();
+    await t.test("content veto at start survives an end-of-call opt-in", async () => {
+      const previous = process.env.RESPAN_TRACE_CONTENT;
+      try {
+        process.env.RESPAN_TRACE_CONTENT = "false";
+        await generateText({ model: new MockLanguageModelV4({ doGenerate: async () => { process.env.RESPAN_TRACE_CONTENT = "true"; return response; } }), prompt: "GLOBAL_PRIVATE_PROMPT" });
+      } finally {
+        if (previous === undefined) delete process.env.RESPAN_TRACE_CONTENT;
+        else process.env.RESPAN_TRACE_CONTENT = previous;
+      }
+      for (const span of spans()) {
+        assert.equal(span.attributes["traceloop.entity.input"], undefined);
+        assert.equal(span.attributes["traceloop.entity.output"], undefined);
+      }
+    });
+    exporter.reset();
+    await t.test("workflow and harness root event shapes retain agent I/O", async () => {
+      // Source contracts: @ai-sdk/workflow 2.0.43 and @ai-sdk/harness 1.0.122.
+      // This checks their events through the real OTel adapter, not a hosted run.
+      for (const operationId of ["ai.workflowAgent.stream", "ai.harness"]) {
+        integration.onStart({ callId: operationId, operationId, provider: "test", modelId: "fixture", functionId: operationId, messages: [{ role: "user", content: "agent fixture" }], tools: {}, maxRetries: 0 });
+        integration.onEnd({ callId: operationId, finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1 }, text: "agent answer", finalStep: {}, toolCalls: [], toolResults: [], files: [] });
+      }
+      assert.equal(spans().length, 2);
+      for (const span of spans()) {
+        assert.equal(span.attributes["respan.entity.log_type"], "agent");
+        assert.equal(JSON.parse(span.attributes["traceloop.entity.input"])[0].content, "agent fixture");
+        assert.equal(JSON.parse(span.attributes["traceloop.entity.output"]).content, "agent answer");
+        assert.equal(span.attributes["gen_ai.request.model"], undefined);
+      }
     });
     exporter.reset();
     await t.test("embedding batches retain input and vectors", async () => {

@@ -12,7 +12,8 @@
 
 import type { Context } from "@opentelemetry/api";
 import type { ReadableSpan, Span } from "@opentelemetry/sdk-trace-base";
-import type { RespanSpanTransformer } from "@respan/tracing";
+import { shouldSendTraces, type RespanSpanTransformer } from "@respan/tracing";
+import { stripContentAttributes } from "./_translator/content.js";
 import {
   ATTR_GEN_AI_AGENT_ID,
   ATTR_GEN_AI_AGENT_NAME,
@@ -37,6 +38,9 @@ import {
 import {
   AI_AGENT_ID,
   AI_DOCUMENTS,
+  AI_EVALUATION_STATE,
+  AI_EVALUATION_QUESTIONS,
+  AI_EVALUATION_ANSWERS,
   AI_RANKING,
   parseJsonish,
   AI_MODEL_ID,
@@ -66,6 +70,8 @@ import { enrichMetadata, enrichModel, enrichPerformanceMetrics, enrichSystem, en
  */
 export class VercelAITranslator implements RespanSpanTransformer {
   /** Open structural wrappers, isolated by trace even if span IDs are reused. */
+  private readonly _contentDisabled = new WeakSet<object>();
+
   private readonly _openStructuralSpans = new Map<string, OpenStructuralSpan>();
 
   /**
@@ -81,6 +87,11 @@ export class VercelAITranslator implements RespanSpanTransformer {
     const scopeName = instrumentationScopeName(writableSpan);
     if (!name.startsWith(AI_PREFIX) && !isModernVercelAISpanName(name) && !isVercelAIScope(scopeName)) {
       return;
+    }
+
+    if (!shouldSendTraces()) {
+      this._contentDisabled.add(writableSpan);
+      if (writableSpan.attributes) stripContentAttributes(writableSpan.attributes);
     }
 
     const identity = spanIdentity(writableSpan);
@@ -191,6 +202,9 @@ export class VercelAITranslator implements RespanSpanTransformer {
     const config = VERCEL_SPAN_CONFIG[name];
     const parentLogType = VERCEL_PARENT_SPANS[name];
     const logType = resolveLogType(name, attrs);
+    const captureContent = shouldSendTraces() && !this._contentDisabled.has(span);
+    this._contentDisabled.delete(span);
+    if (!captureContent) stripContentAttributes(attrs);
 
     // Embedding spans (span-contract.md): input = embedded text, output = the
     // embedding vector(s) — captured, not dropped (debuggable RAG data; size is
@@ -219,6 +233,19 @@ export class VercelAITranslator implements RespanSpanTransformer {
       if (ranking !== undefined) {
         setDefault(attrs, TraceloopSpanAttributes.TRACELOOP_ENTITY_OUTPUT,
           safeJsonStr(Array.isArray(ranking) ? ranking.map(parseJsonish) : parseJsonish(ranking)));
+      }
+    }
+
+    if (modernOperationName(name, attrs) === "evaluate") {
+      const state = attrs[AI_EVALUATION_STATE];
+      const questions = attrs[AI_EVALUATION_QUESTIONS];
+      if (state !== undefined || questions !== undefined) {
+        setDefault(attrs, TraceloopSpanAttributes.TRACELOOP_ENTITY_INPUT,
+          safeJsonStr({ state: parseJsonish(state), questions: parseJsonish(questions) }));
+      }
+      if (attrs[AI_EVALUATION_ANSWERS] !== undefined) {
+        setDefault(attrs, TraceloopSpanAttributes.TRACELOOP_ENTITY_OUTPUT,
+          safeJsonStr(parseJsonish(attrs[AI_EVALUATION_ANSWERS])));
       }
     }
 
@@ -377,6 +404,7 @@ export class VercelAITranslator implements RespanSpanTransformer {
     }
 
     stripRedundantAttrs(attrs, logType);
+    if (!captureContent) stripContentAttributes(attrs);
   }
 
   /** Clear structural correlation state after the registry drains this lease. */
