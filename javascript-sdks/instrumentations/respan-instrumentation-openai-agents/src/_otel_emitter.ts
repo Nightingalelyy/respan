@@ -22,7 +22,7 @@ import {
 import { RespanLogType, RespanSpanAttributes } from "@respan/respan-sdk";
 import type { Span, Trace } from "@openai/agents";
 
-import { isStreaming } from "./_streaming.js";
+import { isStreaming, shouldCaptureContent } from "./_streaming.js";
 
 const packageRequire = createRequire(import.meta.url);
 const { version: PACKAGE_VERSION } = packageRequire("../package.json") as {
@@ -299,13 +299,16 @@ function normalizeToolCall(rawToolCall: any): Record<string, any> | null {
     (toolCall as any).toolName ??
     (toolCallType.endsWith("_call") ? toolCallType : "") ??
     "";
+  const hostedArguments = Object.fromEntries(Object.entries(toolCall).filter(
+    ([key]) => !["id", "call_id", "type", "name", "status", "result", "output", "outputs"].includes(key),
+  ));
   const functionArguments =
     (toolCall as any).arguments ??
     (toolCall as any).function?.arguments ??
     (toolCall as any).action ??
     (toolCall as any).actions ??
     (toolCall as any).operation ??
-    "";
+    hostedArguments;
 
   if (
     !functionName &&
@@ -329,6 +332,8 @@ function normalizeToolCall(rawToolCall: any): Record<string, any> | null {
       arguments: stringifyStructured(functionArguments),
     },
   };
+  const hostedOutput = (toolCall as any).result ?? (toolCall as any).output ?? (toolCall as any).outputs;
+  if (hostedOutput !== undefined) normalized.output = hostedOutput;
   if ((toolCall as any).namespace !== undefined) {
     normalized.function.namespace = (toolCall as any).namespace;
   }
@@ -762,7 +767,7 @@ function buildReadableSpan(opts: BuildSpanOptions): ReadableSpan {
       ? { code: SpanStatusCode.ERROR, message: opts.errorMessage ?? "" }
       : { code: SpanStatusCode.OK, message: "" };
 
-  if (["false", "0", "no", "off"].includes((process.env.RESPAN_TRACE_CONTENT ?? "true").trim().toLowerCase())) {
+  if (!shouldCaptureContent() || ["false", "0", "no", "off"].includes((process.env.RESPAN_TRACE_CONTENT ?? "true").trim().toLowerCase())) {
     for (const key of Object.keys(opts.attributes)) {
       if ([SpanAttributes.TRACELOOP_ENTITY_INPUT, SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
         SpanAttributes.LLM_REQUEST_FUNCTIONS].includes(key) ||

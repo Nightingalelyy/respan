@@ -875,3 +875,37 @@ test('raw Responses hosted calls survive output and conversation history', () =>
     assert.equal(JSON.parse(attrs['gen_ai.prompt.0.tool_calls'])[0].id,'hosted_123');
   }
 });
+
+test('native Responses no-data tracing cannot export SDK private payload fields', async () => {
+  const { OpenAIResponsesModel, withTrace } = await import('@openai/agents');
+  const { OpenAIAgentsInstrumentor } = await import('../dist/index.js');
+  const inst = new OpenAIAgentsInstrumentor();inst.activate();captureState.spans=[];
+  try {
+    const model = new OpenAIResponsesModel({baseURL:'https://api.openai.com/v1'},'gpt-4o');
+    model._fetchResponse=async()=>({id:'response_private',object:'response',created_at:1,status:'completed',
+      model:'gpt-4o',output:[{id:'message',type:'message',role:'assistant',status:'completed',
+        content:[{type:'output_text',text:'PRIVATE_OUTPUT',annotations:[]}]}],
+      usage:{input_tokens:1,output_tokens:1,total_tokens:2,input_tokens_details:{cached_tokens:0},output_tokens_details:{reasoning_tokens:0}},
+    });
+    await withTrace('private-response',()=>model.getResponse({input:[{type:'message',role:'user',content:'PRIVATE_INPUT'}],
+      modelSettings:{},tools:[],handoffs:[],outputType:'text',tracing:'enabled_without_data'}));
+    const modelSpan=captureState.spans.find(s=>s.attributes[RespanSpanAttributes.RESPAN_LOG_TYPE]==='chat');
+    assert.ok(modelSpan);
+    assert.ok(!JSON.stringify(modelSpan.attributes).includes('PRIVATE_'));
+    assert.equal(modelSpan.attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT],undefined);
+    assert.equal(modelSpan.attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT],undefined);
+  } finally {inst.deactivate();}
+});
+
+test('hosted file search, interpreter, and image payloads retain arguments and results',()=>{
+  for(const [call,args,result] of [
+    [{type:'file_search_call',id:'fs',queries:['hello']},{queries:['hello']},undefined],
+    [{type:'code_interpreter_call',id:'ci',code:'print(42)',container_id:'c',outputs:[{type:'logs',logs:'42'}]},{code:'print(42)',container_id:'c'},[{type:'logs',logs:'42'}]],
+    [{type:'image_generation_call',id:'img',revised_prompt:'cat',result:'BASE64'},{revised_prompt:'cat'},'BASE64'],
+  ]) {
+    const attrs=emitAndCapture(makeBaseSpanData({type:'response',_response:{output:[call]}}));
+    const mapped=JSON.parse(attrs['gen_ai.completion.0.tool_calls'])[0];
+    assert.deepEqual(JSON.parse(mapped.function.arguments),args);
+    assert.deepEqual(mapped.output,result);
+  }
+});
