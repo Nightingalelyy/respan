@@ -6,11 +6,23 @@ import ast
 import json
 import logging
 import threading
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 from opentelemetry.semconv_ai import SpanAttributes
 from opentelemetry.trace import Status, StatusCode
+from respan_sdk.constants.llm_logging import (
+    LOG_TYPE_AGENT,
+    LOG_TYPE_TOOL,
+    LogMethodChoices,
+)
+from respan_sdk.constants.span_attributes import (
+    RESPAN_LOG_METHOD,
+    RESPAN_LOG_TYPE,
+    RESPAN_SESSION_ID,
+)
+from respan_sdk.utils.serialization import serialize_value
 
 from respan_instrumentation_claude_agent_sdk._constants import (
     CLAUDE_AGENT_SDK_AGENT_NAME_ATTR,
@@ -33,17 +45,6 @@ from respan_instrumentation_claude_agent_sdk._constants import (
     RESPAN_OVERRIDE_TOOL_CALLS_ATTR,
     RESPAN_OVERRIDE_TOOLS_ATTR,
 )
-from respan_sdk.constants.llm_logging import (
-    LOG_TYPE_AGENT,
-    LOG_TYPE_TOOL,
-    LogMethodChoices,
-)
-from respan_sdk.constants.span_attributes import (
-    RESPAN_LOG_METHOD,
-    RESPAN_LOG_TYPE,
-    RESPAN_SESSION_ID,
-)
-from respan_sdk.utils.serialization import serialize_value
 
 logger = logging.getLogger(__name__)
 
@@ -125,9 +126,7 @@ def _pop_attrs(attrs: dict[str, Any], *keys: str) -> None:
 
 def _pop_attr_prefixes(attrs: dict[str, Any], *prefixes: str) -> None:
     keys_to_remove = [
-        key
-        for key in attrs
-        if any(key.startswith(prefix) for prefix in prefixes)
+        key for key in attrs if any(key.startswith(prefix) for prefix in prefixes)
     ]
     for key in keys_to_remove:
         attrs.pop(key, None)
@@ -177,9 +176,7 @@ def _extract_usage(
         SpanAttributes.LLM_USAGE_CACHE_CREATION_INPUT_TOKENS
     )
 
-    normalized_prompt_tokens = (
-        prompt_tokens if isinstance(prompt_tokens, int) else None
-    )
+    normalized_prompt_tokens = prompt_tokens if isinstance(prompt_tokens, int) else None
     normalized_cache_hit_tokens = (
         cache_hit_tokens if isinstance(cache_hit_tokens, int) else None
     )
@@ -192,8 +189,7 @@ def _extract_usage(
         or normalized_cache_creation_tokens is not None
     ):
         uncached_prompt_tokens = normalized_prompt_tokens - (
-            (normalized_cache_hit_tokens or 0)
-            + (normalized_cache_creation_tokens or 0)
+            (normalized_cache_hit_tokens or 0) + (normalized_cache_creation_tokens or 0)
         )
         if uncached_prompt_tokens >= 0:
             normalized_prompt_tokens = uncached_prompt_tokens
@@ -320,7 +316,9 @@ def _normalize_tool_definition(tool_definition: Any) -> dict[str, Any] | None:
     description = tool_definition.get("description")
     if description is not None:
         normalized_function["description"] = description
-    parameters = tool_definition.get("input_schema") or tool_definition.get("parameters")
+    parameters = tool_definition.get("input_schema") or tool_definition.get(
+        "parameters"
+    )
     if parameters is not None:
         normalized_function["parameters"] = parameters
 
@@ -422,7 +420,9 @@ def _extract_existing_tool_calls(
 
     raw_tool_calls = attrs.get(RESPAN_OVERRIDE_TOOL_CALLS_ATTR)
     if isinstance(raw_tool_calls, list):
-        return [tool_call for tool_call in raw_tool_calls if isinstance(tool_call, Mapping)]
+        return [
+            tool_call for tool_call in raw_tool_calls if isinstance(tool_call, Mapping)
+        ]
 
     parsed_tool_calls = _safe_json_loads(attrs.get(_LEGACY_RESPAN_SPAN_TOOL_CALLS_ATTR))
     if isinstance(parsed_tool_calls, list):
@@ -483,7 +483,9 @@ def _normalized_tool_arguments(arguments: Any) -> str:
     else:
         parsed_arguments = arguments
     return "json:" + json.dumps(
-        serialize_value(parsed_arguments), sort_keys=True, separators=(",", ":"),
+        serialize_value(parsed_arguments),
+        sort_keys=True,
+        separators=(",", ":"),
         default=str,
     )
 
@@ -536,7 +538,8 @@ def _merge_tool_calls(
 
 
 def _merge_tool_call_observation(
-    existing_call: dict[str, Any], incoming_call: Mapping[str, Any],
+    existing_call: dict[str, Any],
+    incoming_call: Mapping[str, Any],
 ) -> None:
     """Fill absent fields without replacing the first populated observation."""
     incoming_function = incoming_call.get("function")
@@ -555,10 +558,9 @@ def _merge_tool_call_observation(
         if existing_value is None or existing_value == "":
             merged_function[field] = incoming_value
         elif field == "arguments":
-            conflicting |= (
-                _normalized_tool_arguments(existing_value)
-                != _normalized_tool_arguments(incoming_value)
-            )
+            conflicting |= _normalized_tool_arguments(
+                existing_value
+            ) != _normalized_tool_arguments(incoming_value)
         else:
             conflicting |= existing_value != incoming_value
     if conflicting:
@@ -628,7 +630,9 @@ def _reconcile_tools_with_tool_calls(
                 if prefix:
                     inferred_prefixes.add(prefix)
 
-    shared_prefix = next(iter(inferred_prefixes)) if len(inferred_prefixes) == 1 else None
+    shared_prefix = (
+        next(iter(inferred_prefixes)) if len(inferred_prefixes) == 1 else None
+    )
 
     reconciled_tools = []
     for tool_definition in normalized_tools:
@@ -782,9 +786,12 @@ def enrich_claude_agent_sdk_span(span: ReadableSpan) -> None:
         agent_name = _extract_agent_name(span, attrs)
         input_value, output_value = _extract_input_output(attrs)
         input_messages = _extract_normalized_input_messages(attrs)
-        output_messages = _extract_messages(attrs, CLAUDE_AGENT_SDK_OUTPUT_MESSAGES_ATTR)
+        output_messages = _extract_messages(
+            attrs, CLAUDE_AGENT_SDK_OUTPUT_MESSAGES_ATTR
+        )
         tool_calls = _merge_tool_calls(
-            _extract_existing_tool_calls(attrs), _extract_tool_calls(attrs),
+            _extract_existing_tool_calls(attrs),
+            _extract_tool_calls(attrs),
         )
         tools = _reconcile_tools_with_tool_calls(
             tools=_extract_tools(attrs),
@@ -808,9 +815,13 @@ def enrich_claude_agent_sdk_span(span: ReadableSpan) -> None:
         if model is not None:
             _set_if_missing(attrs, SpanAttributes.LLM_REQUEST_MODEL, model)
         if prompt_tokens is not None:
-            _set_if_missing(attrs, SpanAttributes.LLM_USAGE_PROMPT_TOKENS, prompt_tokens)
+            _set_if_missing(
+                attrs, SpanAttributes.LLM_USAGE_PROMPT_TOKENS, prompt_tokens
+            )
         if completion_tokens is not None:
-            _set_if_missing(attrs, SpanAttributes.LLM_USAGE_COMPLETION_TOKENS, completion_tokens)
+            _set_if_missing(
+                attrs, SpanAttributes.LLM_USAGE_COMPLETION_TOKENS, completion_tokens
+            )
         if prompt_tokens is not None or completion_tokens is not None:
             _set_if_missing(
                 attrs,
@@ -839,7 +850,9 @@ def enrich_claude_agent_sdk_span(span: ReadableSpan) -> None:
                 serialize_value(tool_calls),
                 default=str,
             )
-            _set_if_missing(attrs, f"{SpanAttributes.LLM_COMPLETIONS}.0.role", "assistant")
+            _set_if_missing(
+                attrs, f"{SpanAttributes.LLM_COMPLETIONS}.0.role", "assistant"
+            )
 
     span._attributes = {
         key: value
@@ -939,7 +952,9 @@ class ClaudeAgentSDKSpanProcessor(SpanProcessor):
 
             pending_tool_calls = self._consume_pending_tool_calls(span)
             existing_tool_calls = _extract_existing_tool_calls(attrs)
-            merged_tool_calls = _merge_tool_calls(existing_tool_calls, pending_tool_calls)
+            merged_tool_calls = _merge_tool_calls(
+                existing_tool_calls, pending_tool_calls
+            )
             if merged_tool_calls is None:
                 return
 

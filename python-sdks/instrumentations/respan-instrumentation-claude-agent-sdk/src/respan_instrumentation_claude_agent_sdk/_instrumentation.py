@@ -12,12 +12,12 @@ from typing import Any
 
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
+from respan_sdk.constants.span_attributes import RESPAN_METADATA
 
 from respan_instrumentation_claude_agent_sdk._processor import (  # type: ignore[reportMissingImports]
     ClaudeAgentSDKSpanProcessor,
     _safe_json_loads,
 )
-from respan_sdk.constants.span_attributes import RESPAN_METADATA
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +182,7 @@ class ClaudeAgentSDKInstrumentor:
 
         try:
             query_module = importlib.import_module("claude_agent_sdk._internal.query")
-            Query = getattr(query_module, "Query")
+            Query = query_module.Query
             constants_module = importlib.import_module(
                 "opentelemetry.instrumentation.claude_agent_sdk._constants"
             )
@@ -199,8 +199,8 @@ class ClaudeAgentSDKInstrumentor:
                 "opentelemetry.instrumentation.claude_agent_sdk._hooks"
             )
             from ._tool_lifecycle import (
-                _InvocationMessageStream,
                 _capture_failure_output,
+                _InvocationMessageStream,
                 _reconcile_sdk_message,
             )
 
@@ -229,27 +229,34 @@ class ClaudeAgentSDKInstrumentor:
 
         serialize_value = getattr(spans_module, "_to_serializable", lambda value: value)
 
-        original_set_response_content = spans_module.set_response_content
         original_set_result_attributes = spans_module.set_result_attributes
         original_wrap_client_query = instrumentor_class._wrap_client_query
         original_instrumented_receive_response = (
             instrumentor_class._instrumented_receive_response
         )
         original_handle_control_request = Query._handle_control_request
-        original_instrumented_query = getattr(instrumentor_class, "_instrumented_query", None)
+        original_instrumented_query = getattr(
+            instrumentor_class, "_instrumented_query", None
+        )
 
         def patched_set_tool_error_attributes(span: Any, error: str) -> None:
             ctx = context_module.get_invocation_context()
             capture_content = bool(getattr(ctx, "capture_content", False))
             _capture_failure_output(
-                span, error, capture_content=capture_content,
+                span,
+                error,
+                capture_content=capture_content,
             )
             original_set_tool_error_attributes(
-                span, error if capture_content else "Tool execution failed",
+                span,
+                error if capture_content else "Tool execution failed",
             )
 
         async def patched_instrumented_query(
-            instrumentor: Any, wrapped: Any, args: tuple[Any, ...], kwargs: dict[str, Any],
+            instrumentor: Any,
+            wrapped: Any,
+            args: tuple[Any, ...],
+            kwargs: dict[str, Any],
         ) -> Any:
             from claude_agent_sdk import ResultMessage
 
@@ -259,7 +266,9 @@ class ClaudeAgentSDKInstrumentor:
             after_result = False
             try:
                 async for message in messages:
-                    _reconcile_sdk_message(context_module.get_invocation_context(), message)
+                    _reconcile_sdk_message(
+                        context_module.get_invocation_context(), message
+                    )
                     after_result = isinstance(message, ResultMessage)
                     yield message
             finally:
@@ -301,7 +310,43 @@ class ClaudeAgentSDKInstrumentor:
                 span.set_attribute(error_type_attr, "claude_agent_sdk_error")
                 span.set_status(StatusCode.ERROR, "Claude Agent SDK invocation failed")
 
+            ctx = context_module.get_invocation_context()
+            if bool(getattr(ctx, "capture_content", False)):
+                structured_output = getattr(result_message, "structured_output", None)
+                if structured_output is not None:
+                    patched_set_response_content(
+                        span,
+                        [
+                            {
+                                "type": "text",
+                                "text": json.dumps(
+                                    serialize_value(structured_output), default=str
+                                ),
+                            }
+                        ],
+                    )
+                elif not _get_span_attr_value(span, output_messages_attr):
+                    result_text = getattr(result_message, "result", None)
+                    if result_text is not None:
+                        patched_set_response_content(span, result_text)
+
             usage = getattr(result_message, "usage", None)
+            model_usage = getattr(result_message, "model_usage", None)
+            if not isinstance(usage, dict) and isinstance(model_usage, dict):
+                records = [
+                    record
+                    for record in model_usage.values()
+                    if isinstance(record, dict)
+                ]
+                usage = {
+                    target: sum(int(record.get(source, 0) or 0) for record in records)
+                    for target, source in (
+                        ("input_tokens", "inputTokens"),
+                        ("output_tokens", "outputTokens"),
+                        ("cache_read_input_tokens", "cacheReadInputTokens"),
+                        ("cache_creation_input_tokens", "cacheCreationInputTokens"),
+                    )
+                }
             if isinstance(usage, dict):
                 input_tokens = int(usage.get("input_tokens", 0) or 0)
                 output_tokens = int(usage.get("output_tokens", 0) or 0)
@@ -310,13 +355,12 @@ class ClaudeAgentSDKInstrumentor:
                 )
                 cache_read_tokens = int(usage.get("cache_read_input_tokens", 0) or 0)
 
-                # Emit the raw Anthropic input/output token counts. The span
-                # processor (ClaudeAgentSDKSpanProcessor) derives prompt/completion/
-                # total from these — with cache-token normalization and the override
-                # attr that rolls up into total_request_tokens — so writing those here
-                # would only pre-empt it. output_tokens was previously missing, which
-                # starved that roll-up and left total_request_tokens at 0 (A7).
-                span.set_attribute(usage_input_tokens_attr, input_tokens)
+                # Upstream's GenAI input count includes cached input. The
+                # normalizer removes cache counts exactly once for Respan.
+                span.set_attribute(
+                    usage_input_tokens_attr,
+                    input_tokens + cache_creation_tokens + cache_read_tokens,
+                )
                 span.set_attribute(usage_output_tokens_attr, output_tokens)
                 if cache_creation_tokens > 0:
                     span.set_attribute(
@@ -330,7 +374,9 @@ class ClaudeAgentSDKInstrumentor:
                     )
 
             total_cost = getattr(result_message, "total_cost_usd", None)
-            if isinstance(total_cost, (int, float)) and not isinstance(total_cost, bool):
+            if isinstance(total_cost, (int, float)) and not isinstance(
+                total_cost, bool
+            ):
                 # The backend reads cost from respan.metadata.response_cost (matches the
                 # LiteLLM/OpenAI instrumentors), not a bare "cost" attribute (A7).
                 span.set_attribute(f"{RESPAN_METADATA}.response_cost", str(total_cost))
@@ -370,7 +416,11 @@ class ClaudeAgentSDKInstrumentor:
             terminal_result = None
             source = _InvocationMessageStream(wrapped)
             messages = original_instrumented_receive_response(
-                instrumentor, source, instance, args, kwargs,
+                instrumentor,
+                source,
+                instance,
+                args,
+                kwargs,
             )
             if invocation_ctx is not None:
                 context_module.set_invocation_context(invocation_ctx)
@@ -409,10 +459,10 @@ class ClaudeAgentSDKInstrumentor:
 
         for module in (spans_module, instrumentor_module):
             self._patched_modules.append(
-                (module, "set_response_content", getattr(module, "set_response_content"))
+                (module, "set_response_content", module.set_response_content)
             )
             self._patched_modules.append(
-                (module, "set_result_attributes", getattr(module, "set_result_attributes"))
+                (module, "set_result_attributes", module.set_result_attributes)
             )
             module.set_response_content = patched_set_response_content
             module.set_result_attributes = patched_set_result_attributes
@@ -421,14 +471,14 @@ class ClaudeAgentSDKInstrumentor:
             (
                 instrumentor_class,
                 "_wrap_client_query",
-                getattr(instrumentor_class, "_wrap_client_query"),
+                instrumentor_class._wrap_client_query,
             )
         )
         self._patched_modules.append(
             (
                 instrumentor_class,
                 "_instrumented_receive_response",
-                getattr(instrumentor_class, "_instrumented_receive_response"),
+                instrumentor_class._instrumented_receive_response,
             )
         )
         instrumentor_class._wrap_client_query = patched_wrap_client_query
@@ -437,12 +487,16 @@ class ClaudeAgentSDKInstrumentor:
         )
 
         self._patched_modules.append(
-            (Query, "_handle_control_request", getattr(Query, "_handle_control_request"))
+            (Query, "_handle_control_request", Query._handle_control_request)
         )
         Query._handle_control_request = patched_handle_control_request
 
         self._patched_modules.append(
-            (hooks_module, "set_tool_error_attributes", original_set_tool_error_attributes)
+            (
+                hooks_module,
+                "set_tool_error_attributes",
+                original_set_tool_error_attributes,
+            )
         )
         hooks_module.set_tool_error_attributes = patched_set_tool_error_attributes
         if original_instrumented_query is not None:
@@ -479,8 +533,8 @@ class ClaudeAgentSDKInstrumentor:
         upstream module-level wrap is left intact, so behaviour is no worse than before.
         """
         try:
-            import wrapt
             import claude_agent_sdk
+            import wrapt
             from claude_agent_sdk._internal.client import InternalClient
         except ImportError as exc:
             logger.warning(
@@ -505,7 +559,7 @@ class ClaudeAgentSDKInstrumentor:
                 "InternalClient.process_query",
                 self._otel_instrumentor._wrap_query,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - optional instrumentation must not break the SDK
             self._patched_modules.pop()
             logger.warning(
                 "Claude Agent SDK: could not instrument the internal query seam; "
@@ -598,7 +652,7 @@ class ClaudeAgentSDKInstrumentor:
                     # provider, agent name, and content settings remain in effect.
                     self._otel_instrumentor = upstream.instrumentor
                     self._patched_modules = upstream.patched_modules
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - roll back partial activation safely
                 if instrument_attempted and self._otel_instrumentor is not None:
                     try:
                         self._otel_instrumentor.uninstrument()

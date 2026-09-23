@@ -7,8 +7,6 @@ from types import ModuleType, SimpleNamespace
 from opentelemetry import trace
 from opentelemetry.semconv_ai import LLMRequestTypeValues, SpanAttributes
 from opentelemetry.trace import StatusCode
-from respan_tracing.exporters.respan import _prepare_spans_for_export
-
 from respan_instrumentation_claude_agent_sdk import (
     ClaudeAgentSDKInstrumentor,
     _instrumentation,
@@ -30,7 +28,7 @@ from respan_sdk.constants.span_attributes import (
     RESPAN_LOG_TYPE,
     RESPAN_SESSION_ID,
 )
-
+from respan_tracing.exporters.respan import _prepare_spans_for_export
 
 _COMPLETION_TOOL_CALLS_ATTR = f"{SpanAttributes.LLM_COMPLETIONS}.0.tool_calls"
 _BANNED_ALIASES = {
@@ -173,9 +171,7 @@ def _install_fake_claude_agent_sdk_modules(
     constants_module.GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS = (
         usage_cache_creation_tokens_attr
     )
-    constants_module.GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS = (
-        usage_cache_read_tokens_attr
-    )
+    constants_module.GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS = usage_cache_read_tokens_attr
 
     context_state = {"value": None}
 
@@ -341,8 +337,13 @@ def test_instrumentation_helpers_read_attrs_and_parse_json():
 
     assert _instrumentation._safe_json_loads('{"a": 1}') == {"a": 1}
     assert _instrumentation._safe_json_loads("plain-text") is None
-    assert _instrumentation._get_span_attr_value(span_with_public_attrs, "key") == "value"
-    assert _instrumentation._get_span_attr_value(span_with_private_attrs, "key") == "private"
+    assert (
+        _instrumentation._get_span_attr_value(span_with_public_attrs, "key") == "value"
+    )
+    assert (
+        _instrumentation._get_span_attr_value(span_with_private_attrs, "key")
+        == "private"
+    )
 
 
 def test_register_and_unregister_processor_keep_processor_first():
@@ -404,8 +405,13 @@ def test_activate_patches_helpers_and_restores_originals(monkeypatch):
         "agent_name": "demo-agent",
         "capture_content": True,
     }
-    assert fake.spans_module.set_response_content is not fake.original_set_response_content
-    assert fake.spans_module.set_result_attributes is not fake.original_set_result_attributes
+    assert (
+        fake.spans_module.set_response_content is not fake.original_set_response_content
+    )
+    assert (
+        fake.spans_module.set_result_attributes
+        is not fake.original_set_result_attributes
+    )
 
     fake_query = fake.query_class()
     fake_query._otel_invocation_ctx = SimpleNamespace(marker="client-session")
@@ -439,16 +445,14 @@ def test_activate_patches_helpers_and_restores_originals(monkeypatch):
     assert json.loads(span.attributes["gen_ai.output.messages"]) == [
         {
             "role": "assistant",
-            "content": [
-                {"type": "tool_use", "id": "toolu_123", "name": "calculator"}
-            ],
+            "content": [{"type": "tool_use", "id": "toolu_123", "name": "calculator"}],
         },
         {
             "role": "assistant",
             "content": [{"type": "text", "text": "The tip is $18.00."}],
         },
     ]
-    assert span.attributes["gen_ai.usage.input_tokens"] == 4
+    assert span.attributes["gen_ai.usage.input_tokens"] == 39320
     assert span.attributes["gen_ai.usage.output_tokens"] == 121
     # Cost is emitted as respan.metadata.response_cost (string), matching the
     # LiteLLM/OpenAI instrumentors, not a bare "cost" attribute (A7).
@@ -463,7 +467,9 @@ def test_activate_patches_helpers_and_restores_originals(monkeypatch):
     assert instrumentor._is_instrumented is False
     assert tracer_provider._active_span_processor._span_processors == ()
     assert fake.spans_module.set_response_content is fake.original_set_response_content
-    assert fake.spans_module.set_result_attributes is fake.original_set_result_attributes
+    assert (
+        fake.spans_module.set_result_attributes is fake.original_set_result_attributes
+    )
     restored_ctx = asyncio.run(fake_query._handle_control_request({"request": {}}))
     assert restored_ctx is None
 
@@ -721,7 +727,10 @@ def test_build_tool_call_from_tool_span_attrs_and_merge_tool_calls():
 
     merged_tool_calls = _processor._merge_tool_calls(
         [built_tool_call],
-        [built_tool_call, {"id": "toolu_456", "function": {"name": "search", "arguments": "{}"}}],
+        [
+            built_tool_call,
+            {"id": "toolu_456", "function": {"name": "search", "arguments": "{}"}},
+        ],
     )
 
     assert merged_tool_calls == [
@@ -784,7 +793,10 @@ def test_enrich_claude_agent_sdk_span_maps_agent_fields():
 
     _processor.enrich_claude_agent_sdk_span(span)
 
-    assert span._attributes[RESPAN_LOG_METHOD] == LogMethodChoices.TRACING_INTEGRATION.value
+    assert (
+        span._attributes[RESPAN_LOG_METHOD]
+        == LogMethodChoices.TRACING_INTEGRATION.value
+    )
     assert span._attributes[RESPAN_LOG_TYPE] == LOG_TYPE_AGENT
     assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "weather_agent"
     assert span._attributes[SpanAttributes.TRACELOOP_WORKFLOW_NAME] == "weather_agent"
@@ -845,9 +857,7 @@ def test_enrich_agent_overrides_chat_and_keeps_session_cost_and_cache_usage():
     assert span._attributes[RESPAN_SESSION_ID] == "session-resume-1"
     assert span._attributes["respan.metadata.response_cost"] == "0.003"
     assert span._attributes[SpanAttributes.LLM_USAGE_CACHE_READ_INPUT_TOKENS] == 11
-    assert (
-        span._attributes[SpanAttributes.LLM_USAGE_CACHE_CREATION_INPUT_TOKENS] == 3
-    )
+    assert span._attributes[SpanAttributes.LLM_USAGE_CACHE_CREATION_INPUT_TOKENS] == 3
     assert span._attributes["gen_ai.usage.input_tokens"] == 20
     assert span._attributes["gen_ai.usage.output_tokens"] == 4
     _assert_no_banned_aliases(span._attributes)
@@ -871,8 +881,14 @@ def test_enrich_claude_agent_sdk_span_maps_tool_fields():
     _processor.enrich_claude_agent_sdk_span(span)
 
     assert span._attributes[RESPAN_LOG_TYPE] == LOG_TYPE_TOOL
-    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "mcp__demo__calculator"
-    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_PATH] == "mcp__demo__calculator"
+    assert (
+        span._attributes[SpanAttributes.TRACELOOP_ENTITY_NAME]
+        == "mcp__demo__calculator"
+    )
+    assert (
+        span._attributes[SpanAttributes.TRACELOOP_ENTITY_PATH]
+        == "mcp__demo__calculator"
+    )
     assert json.loads(span._attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT]) == {
         "expression": "120 * 0.15"
     }
@@ -932,8 +948,14 @@ def test_enrich_claude_agent_sdk_span_overrides_upstream_tool_chat_defaults():
     _processor.enrich_claude_agent_sdk_span(span)
 
     assert span._attributes[RESPAN_LOG_TYPE] == LOG_TYPE_TOOL
-    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "mcp__demo__get_weather"
-    assert span._attributes[SpanAttributes.TRACELOOP_ENTITY_PATH] == "mcp__demo__get_weather"
+    assert (
+        span._attributes[SpanAttributes.TRACELOOP_ENTITY_NAME]
+        == "mcp__demo__get_weather"
+    )
+    assert (
+        span._attributes[SpanAttributes.TRACELOOP_ENTITY_PATH]
+        == "mcp__demo__get_weather"
+    )
     assert json.loads(span._attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT]) == {
         "city": "Tokyo",
         "unit": "celsius",
@@ -1065,9 +1087,9 @@ def test_span_processor_on_end_merges_pending_tool_calls_into_parent_agent_span(
     processor.on_end(agent_span)
 
     assert tool_span._attributes["gen_ai.tool.call.id"] == "toolu_123"
-    assert {
-        key for key in tool_span._attributes if key.startswith("gen_ai.tool.")
-    } == {"gen_ai.tool.call.id"}
+    assert {key for key in tool_span._attributes if key.startswith("gen_ai.tool.")} == {
+        "gen_ai.tool.call.id"
+    }
     assert json.loads(agent_span._attributes[_COMPLETION_TOOL_CALLS_ATTR]) == [
         {
             "id": "toolu_123",

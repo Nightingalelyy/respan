@@ -4,7 +4,6 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from opentelemetry import trace
-
 from respan_instrumentation_claude_agent_sdk import ClaudeAgentSDKInstrumentor
 from test_instrumentation import (
     _install_fake_claude_agent_sdk_modules,
@@ -68,7 +67,9 @@ def test_owners_share_processor_and_keep_helpers_until_last_deactivation(
     assert upstream.uninstrument_calls == 1
     assert provider._active_span_processor._span_processors == (exporter,)
     assert fake.spans_module.set_response_content is fake.original_set_response_content
-    assert fake.spans_module.set_result_attributes is fake.original_set_result_attributes
+    assert (
+        fake.spans_module.set_result_attributes is fake.original_set_result_attributes
+    )
     assert fake.internal_client.process_query is original_seam
     assert fake.claude_sdk_module.query is fake.standalone_query
 
@@ -108,10 +109,14 @@ def test_deactivation_uses_captured_provider(lifecycle, monkeypatch):
     owner.deactivate()
 
     assert provider._active_span_processor._span_processors == ()
-    assert other_provider._active_span_processor._span_processors == (unrelated_processor,)
+    assert other_provider._active_span_processor._span_processors == (
+        unrelated_processor,
+    )
 
 
-def test_global_upstream_retains_first_provider_until_last_owner(lifecycle, monkeypatch):
+def test_global_upstream_retains_first_provider_until_last_owner(
+    lifecycle, monkeypatch
+):
     first_provider, _, make_owner = lifecycle
     first, second = make_owner(), make_owner()
     first.activate()
@@ -127,7 +132,9 @@ def test_global_upstream_retains_first_provider_until_last_owner(lifecycle, monk
     assert upstream.instrument_kwargs["tracer_provider"] is first_provider
     first.deactivate()
     assert first_provider._active_span_processor._span_processors == (first_processor,)
-    assert second_provider._active_span_processor._span_processors == (second_processor,)
+    assert second_provider._active_span_processor._span_processors == (
+        second_processor,
+    )
     assert upstream.uninstrument_calls == 0
 
     second.deactivate()
@@ -215,7 +222,9 @@ def test_uninstrument_failure_still_releases_ownership(lifecycle, monkeypatch):
         uninstrument(instance)
         raise RuntimeError("uninstrument failed")
 
-    monkeypatch.setattr(fake.instrumentor_class, "uninstrument", fail_after_uninstrument)
+    monkeypatch.setattr(
+        fake.instrumentor_class, "uninstrument", fail_after_uninstrument
+    )
     with pytest.raises(RuntimeError, match="uninstrument failed"):
         owner.deactivate()
 
@@ -241,7 +250,9 @@ def test_add_only_provider_reuses_processor_after_reactivation(lifecycle, monkey
     assert provider.added_processors == [processor]
 
 
-def test_external_upstream_instrumentation_is_not_uninstrumented(lifecycle, monkeypatch):
+def test_external_upstream_instrumentation_is_not_uninstrumented(
+    lifecycle, monkeypatch
+):
     provider, fake, make_owner = lifecycle
     external = fake.instrumentor_class()
     external.instrument(tracer_provider=provider)

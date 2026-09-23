@@ -8,18 +8,20 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.semconv_ai import SpanAttributes
-
 from respan_instrumentation_claude_agent_sdk import _processor
 from respan_instrumentation_claude_agent_sdk._constants import (
     CLAUDE_AGENT_SDK_TOOL_CALL_ID_ATTR,
 )
-from respan_sdk.constants.llm_logging import LOG_TYPE_AGENT, LOG_TYPE_CHAT, LOG_TYPE_TOOL
+from respan_sdk.constants.llm_logging import (
+    LOG_TYPE_AGENT,
+    LOG_TYPE_CHAT,
+    LOG_TYPE_TOOL,
+)
 from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
 from respan_tracing.exporters.respan import (
     _build_otlp_payload,
     _prepare_spans_for_export,
 )
-
 
 _TOOL_CALLS_ATTR = f"{SpanAttributes.LLM_COMPLETIONS}.0.tool_calls"
 
@@ -39,8 +41,7 @@ def test_equivalent_json_arguments_merge_without_warning(call_id, caplog):
         call_id=call_id,
     )
     reordered = _call(
-        '{ "options": { "case": true, "paths": ["src", "tests"] }, '
-        '"pattern": "TODO" }',
+        '{ "options": { "case": true, "paths": ["src", "tests"] }, "pattern": "TODO" }',
         call_id=call_id,
     )
 
@@ -70,7 +71,9 @@ def test_synthetic_102_observations_merge_to_76_invocations(caplog):
     ]
     repeated_tool_calls = [
         _call(
-            json.dumps({"path": "src", "pattern": f"TODO-{index}"}, separators=(",", ":")),
+            json.dumps(
+                {"path": "src", "pattern": f"TODO-{index}"}, separators=(",", ":")
+            ),
             call_id=f"toolu_{index}",
         )
         for index in range(26)
@@ -102,7 +105,10 @@ def test_conflicting_invocation_keeps_first_call_and_warns(conflicting_call, cap
 
     assert merged == [first]
     warnings = [record.getMessage() for record in caplog.records]
-    assert any("toolu_grep" in message and "conflict" in message.lower() for message in warnings)
+    assert any(
+        "toolu_grep" in message and "conflict" in message.lower()
+        for message in warnings
+    )
 
 
 @pytest.mark.parametrize(
@@ -203,28 +209,34 @@ def test_real_export_preserves_tool_identity_result_and_parent_calls(
         {
             "role": "assistant",
             "content": [
-                {"type": "tool_use", "id": "toolu_grep", "name": "Grep", "input": arguments},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_grep",
+                    "name": "Grep",
+                    "input": arguments,
+                },
                 {"type": "text", "text": "Found one TODO comment."},
             ],
         }
     ]
     try:
-        with tracer.start_as_current_span(
-            "invoke_agent code_search",
-            attributes={
-                "gen_ai.operation.name": "invoke_agent",
-                "gen_ai.agent.name": "code_search",
-                "gen_ai.input.messages": json.dumps(input_messages),
-                "gen_ai.output.messages": json.dumps(output_messages),
-                "gen_ai.tool.definitions": '[{"name":"Grep"}]',
-                "gen_ai.response.model": "claude-sonnet-4-5",
-                "gen_ai.usage.input_tokens": 30,
-                "gen_ai.usage.output_tokens": 7,
-                SpanAttributes.LLM_USAGE_CACHE_READ_INPUT_TOKENS: 10,
-                SpanAttributes.LLM_USAGE_CACHE_CREATION_INPUT_TOKENS: 4,
-            },
-        ):
-            with tracer.start_as_current_span(
+        with (
+            tracer.start_as_current_span(
+                "invoke_agent code_search",
+                attributes={
+                    "gen_ai.operation.name": "invoke_agent",
+                    "gen_ai.agent.name": "code_search",
+                    "gen_ai.input.messages": json.dumps(input_messages),
+                    "gen_ai.output.messages": json.dumps(output_messages),
+                    "gen_ai.tool.definitions": '[{"name":"Grep"}]',
+                    "gen_ai.response.model": "claude-sonnet-4-5",
+                    "gen_ai.usage.input_tokens": 30,
+                    "gen_ai.usage.output_tokens": 7,
+                    SpanAttributes.LLM_USAGE_CACHE_READ_INPUT_TOKENS: 10,
+                    SpanAttributes.LLM_USAGE_CACHE_CREATION_INPUT_TOKENS: 4,
+                },
+            ),
+            tracer.start_as_current_span(
                 tool_span_name,
                 attributes={
                     "gen_ai.operation.name": "execute_tool",
@@ -235,8 +247,9 @@ def test_real_export_preserves_tool_identity_result_and_parent_calls(
                     "gen_ai.tool.call.arguments": '{"pattern":"TODO","path":"src"}',
                     "gen_ai.tool.call.result": json.dumps(result),
                 },
-            ):
-                pass
+            ),
+        ):
+            pass
         finished = exporter.get_finished_spans()
     finally:
         provider.shutdown()
@@ -247,20 +260,30 @@ def test_real_export_preserves_tool_identity_result_and_parent_calls(
     assert tool.attributes[SpanAttributes.TRACELOOP_ENTITY_NAME] == "Grep"
     assert tool.attributes[SpanAttributes.TRACELOOP_ENTITY_PATH] == "Grep"
     assert tool.attributes[CLAUDE_AGENT_SDK_TOOL_CALL_ID_ATTR] == "toolu_grep"
-    assert json.loads(tool.attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT]) == arguments
+    assert (
+        json.loads(tool.attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT]) == arguments
+    )
     assert json.loads(tool.attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == result
     assert {key for key in tool.attributes if key.startswith("gen_ai.tool.")} == {
         CLAUDE_AGENT_SDK_TOOL_CALL_ID_ATTR
     }
     assert agent.attributes[RESPAN_LOG_TYPE] == LOG_TYPE_AGENT
-    assert json.loads(agent.attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT]) == input_messages
-    assert json.loads(agent.attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]) == output_messages
+    assert (
+        json.loads(agent.attributes[SpanAttributes.TRACELOOP_ENTITY_INPUT])
+        == input_messages
+    )
+    assert (
+        json.loads(agent.attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT])
+        == output_messages
+    )
     assert agent.attributes[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] == 16
     assert agent.attributes[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] == 7
     assert agent.attributes[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] == 23
     assert agent.attributes[SpanAttributes.LLM_USAGE_CACHE_READ_INPUT_TOKENS] == 10
     assert agent.attributes[SpanAttributes.LLM_USAGE_CACHE_CREATION_INPUT_TOKENS] == 4
-    assert json.loads(agent.attributes[_TOOL_CALLS_ATTR]) == [_call(json.dumps(arguments))]
+    assert json.loads(agent.attributes[_TOOL_CALLS_ATTR]) == [
+        _call(json.dumps(arguments))
+    ]
 
     # Explicit re-normalization must preserve all canonical fields after the
     # upstream role and content helper attributes have already been removed.
@@ -277,8 +300,13 @@ def test_real_export_preserves_tool_identity_result_and_parent_calls(
     assert json.loads(exported_chat.attributes[_TOOL_CALLS_ATTR]) == [
         _call(json.dumps(arguments))
     ]
-    assert exported_chat.attributes[SpanAttributes.LLM_USAGE_CACHE_READ_INPUT_TOKENS] == 10
-    assert exported_chat.attributes[SpanAttributes.LLM_USAGE_CACHE_CREATION_INPUT_TOKENS] == 4
+    assert (
+        exported_chat.attributes[SpanAttributes.LLM_USAGE_CACHE_READ_INPUT_TOKENS] == 10
+    )
+    assert (
+        exported_chat.attributes[SpanAttributes.LLM_USAGE_CACHE_CREATION_INPUT_TOKENS]
+        == 4
+    )
     assert exported_tool.parent == exported_agent.get_span_context()
     assert exported_chat.parent == exported_agent.get_span_context()
 
@@ -293,10 +321,20 @@ def test_real_export_preserves_tool_identity_result_and_parent_calls(
     wire_chat_attrs = {item["key"]: item["value"] for item in wire_chat["attributes"]}
     invocation_id = wire_tool_attrs[CLAUDE_AGENT_SDK_TOOL_CALL_ID_ATTR]["stringValue"]
     assert invocation_id == "toolu_grep"
-    assert json.loads(wire_chat_attrs[_TOOL_CALLS_ATTR]["stringValue"])[0]["id"] == invocation_id
-    assert json.loads(
-        wire_tool_attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]["stringValue"]
-    ) == result
+    assert (
+        json.loads(wire_chat_attrs[_TOOL_CALLS_ATTR]["stringValue"])[0]["id"]
+        == invocation_id
+    )
+    assert (
+        json.loads(
+            wire_tool_attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT]["stringValue"]
+        )
+        == result
+    )
     assert wire_tool["traceId"] == wire_agent["traceId"] == wire_chat["traceId"]
-    assert wire_tool["parentSpanId"] == wire_chat["parentSpanId"] == wire_agent["spanId"]
-    assert not [record for record in caplog.records if record.name == _processor.__name__]
+    assert (
+        wire_tool["parentSpanId"] == wire_chat["parentSpanId"] == wire_agent["spanId"]
+    )
+    assert not [
+        record for record in caplog.records if record.name == _processor.__name__
+    ]

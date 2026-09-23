@@ -92,7 +92,9 @@ def _finish_tool_span(
             )
             span.set_status(
                 StatusCode.ERROR,
-                "Tool permission denied" if permission_denied else "Tool execution failed",
+                "Tool permission denied"
+                if permission_denied
+                else "Tool execution failed",
             )
         if ctx.capture_content:
             _set_result_content(span, content)
@@ -111,11 +113,46 @@ def _reconcile_sdk_message(ctx: Any, message: Any) -> None:
 
     from claude_agent_sdk import ResultMessage, ToolResultBlock, UserMessage
 
+    # Recent CLIs may finish background work only with task_updated, without
+    # a post-tool hook or task_notification. Correlate explicit SDK IDs only.
+    subtype = getattr(message, "subtype", None)
+    if subtype in {"task_started", "task_notification", "task_updated"}:
+        data = getattr(message, "data", {})
+        if not isinstance(data, Mapping):
+            data = {}
+        task_id = getattr(message, "task_id", None) or data.get("task_id")
+        task_tools = getattr(ctx, "_respan_task_tools", None)
+        if task_tools is None:
+            task_tools = {}
+            ctx._respan_task_tools = task_tools
+        tool_id = getattr(message, "tool_use_id", None) or data.get("tool_use_id")
+        if isinstance(task_id, str) and isinstance(tool_id, str):
+            task_tools[task_id] = tool_id
+        patch = getattr(message, "patch", None) or data.get("patch", {})
+        status = getattr(message, "status", None) or data.get("status")
+        if status is None and isinstance(patch, Mapping):
+            status = patch.get("status")
+        if status in {"completed", "failed", "stopped", "killed"}:
+            matched_id = task_tools.pop(task_id, None)
+            if matched_id:
+                _finish_tool_span(
+                    ctx,
+                    matched_id,
+                    content={
+                        "status": status,
+                        "summary": getattr(message, "summary", None)
+                        or data.get("summary"),
+                    },
+                    is_error=status != "completed",
+                )
+
     if isinstance(message, UserMessage) and isinstance(message.content, list):
         for block in message.content:
             if isinstance(block, ToolResultBlock) and block.tool_use_id:
                 _finish_tool_span(
-                    ctx, block.tool_use_id, content=block.content,
+                    ctx,
+                    block.tool_use_id,
+                    content=block.content,
                     is_error=block.is_error is True,
                 )
 
@@ -126,10 +163,17 @@ def _reconcile_sdk_message(ctx: Any, message: Any) -> None:
         if not isinstance(denials, list):
             return
         for denial in denials:
-            tool_use_id = denial.get("tool_use_id") if isinstance(denial, Mapping) else None
+            tool_use_id = (
+                denial.get("tool_use_id") if isinstance(denial, Mapping) else None
+            )
             if isinstance(tool_use_id, str) and tool_use_id:
                 _finish_tool_span(
-                    ctx, tool_use_id,
-                    content={"error": "permission_denied", "source": "ResultMessage.permission_denials"},
-                    is_error=True, permission_denied=True,
+                    ctx,
+                    tool_use_id,
+                    content={
+                        "error": "permission_denied",
+                        "source": "ResultMessage.permission_denials",
+                    },
+                    is_error=True,
+                    permission_denied=True,
                 )
