@@ -456,10 +456,12 @@ async def test_json_dict_sink_replay_preserves_messages_usage_and_whole_tree(
         ]
     )
     sink = telemetry.DictSink()
-    async with telemetry.use_sink(sink):
-        async with ai.Agent(tools=[double]).run(model, [prompt]) as stream:
-            async for _ in stream:
-                pass
+    async with (
+        telemetry.use_sink(sink),
+        ai.Agent(tools=[double]).run(model, [prompt]) as stream,
+    ):
+        async for _ in stream:
+            pass
     payload = json.loads(
         json.dumps([span.model_dump(mode="json") for span in sink.finished_spans])
     )
@@ -586,3 +588,194 @@ async def test_wrapped_content_requires_permission_at_start_and_end(
     (span,) = exporter.get_finished_spans()
     assert SpanAttributes.TRACELOOP_ENTITY_INPUT not in span.attributes
     assert SpanAttributes.TRACELOOP_ENTITY_OUTPUT not in span.attributes
+
+
+@pytest.mark.parametrize("outer_parent", [False, True])
+@pytest.mark.parametrize(
+    "operation,arguments,log_type",
+    [
+        ("embed", [["hello", "world"]], "embedding"),
+        ("generate_image", ["image"], "task"),
+        ("generate_video", ["video"], "task"),
+        ("generate_audio", ["audio"], "task"),
+        ("transcribe", [b"audio"], "task"),
+        ("rerank", [["low", "high"], "high"], "task"),
+        (
+            "experimental_evaluate",
+            ["4 is even", {"correct": ai.ops.BooleanQuestion(instructions="correct?")}],
+            "task",
+        ),
+    ],
+)
+async def test_operation_dict_sink_defers_export_and_replays_full_content(
+    setup, operation, arguments, log_type, outer_parent
+):
+    from contextlib import nullcontext
+
+    from respan_instrumentation_vercel._constants import AI_OPERATION_CONTENT
+    from respan_instrumentation_vercel._translator import json_value
+    from respan_sdk.constants.span_attributes import RESPAN_METADATA
+
+    _, provider, exporter = setup
+    model = ai.Model(id="operation-test", provider=OperationProvider())
+    await getattr(ai.ops, operation)(model, *arguments)
+    (direct,) = exporter.get_finished_spans()
+    exporter.clear()
+    sink = telemetry.DictSink()
+    async with (
+        telemetry.use_sink(sink),
+        telemetry.span("serialized workflow") as parent,
+    ):
+        parent.trace_attrs["caller"] = "preserved"
+        result = await getattr(ai.ops, operation)(model, *arguments)
+        assert exporter.get_finished_spans() == ()
+    payload = json.loads(
+        json.dumps([s.model_dump(mode="json") for s in sink.finished_spans])
+    )
+    assert len(payload) == 2
+    operation_snapshot = next(
+        item for item in payload if item["data"]["kind"] != "custom"
+    )
+    marker = operation_snapshot["trace_attrs"][AI_OPERATION_CONTENT]
+    assert marker["span_id"] == operation_snapshot["id"]
+    assert marker["output"] == json_value(result.value)
+    assert exporter.get_finished_spans() == ()
+    with (
+        provider.get_tracer("test").start_as_current_span("outer application")
+        if outer_parent
+        else nullcontext()
+    ):
+        await telemetry.push_all(payload)
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 2 + int(outer_parent)
+    assert len({s.context.trace_id for s in spans}) == 1
+    ids = {s.context.span_id for s in spans}
+    assert all(s.parent is None or s.parent.span_id in ids for s in spans)
+    replayed = next(
+        s
+        for s in spans
+        if s.attributes.get(SpanAttributes.TRACELOOP_ENTITY_NAME)
+        == operation_snapshot["data"]["kind"]
+    )
+    assert replayed.attributes[RESPAN_LOG_TYPE] == log_type
+    for key, value in direct.attributes.items():
+        if key not in {RESPAN_METADATA, SpanAttributes.TRACELOOP_ENTITY_OUTPUT}:
+            assert replayed.attributes.get(key) == value
+    assert replayed.attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] == json_value(
+        result.value
+    )
+    metadata = json.loads(replayed.attributes[RESPAN_METADATA])
+    assert metadata["caller"] == "preserved"
+    for key, value in json.loads(direct.attributes.get(RESPAN_METADATA, "{}")).items():
+        assert metadata[key] == value
+    assert AI_OPERATION_CONTENT not in str(replayed.attributes)
+    if operation == "embed":
+        assert (
+            json.loads(replayed.attributes[SpanAttributes.TRACELOOP_ENTITY_OUTPUT])
+            == result.value
+        )
+        assert sum(s.attributes.get("gen_ai.usage.input_tokens", 0) for s in spans) == 7
+
+
+@pytest.mark.parametrize("capture_content", [False, True])
+async def test_deferred_operation_error_preserves_exception_status_and_privacy(
+    setup, capture_content
+):
+    from respan_instrumentation_vercel._constants import AI_OPERATION_CONTENT
+
+    first, provider, exporter = setup
+    first.deactivate()
+    plugin = VercelInstrumentor(
+        tracer_provider=provider, capture_content=capture_content
+    )
+    plugin.activate()
+    try:
+        sink = telemetry.DictSink()
+        async with telemetry.use_sink(sink):
+            with pytest.raises(ValueError, match="embedding failure"):
+                await ai.ops.embed(
+                    ai.Model(id="error-test", provider=OperationProvider()), ["fail"]
+                )
+        assert exporter.get_finished_spans() == ()
+        payload = json.loads(
+            json.dumps([s.model_dump(mode="json") for s in sink.finished_spans])
+        )
+        assert len(payload) == 1
+        assert (AI_OPERATION_CONTENT in payload[0]["trace_attrs"]) is capture_content
+        await telemetry.push_all(payload)
+        (span,) = exporter.get_finished_spans()
+        assert span.status.status_code == trace.StatusCode.ERROR
+        assert "embedding failure" in span.status.description
+        assert (
+            SpanAttributes.TRACELOOP_ENTITY_INPUT in span.attributes
+        ) is capture_content
+        assert SpanAttributes.TRACELOOP_ENTITY_OUTPUT not in span.attributes
+        assert AI_OPERATION_CONTENT not in str(span.attributes)
+    finally:
+        plugin.deactivate()
+
+
+@pytest.mark.parametrize("enabled_at_start", [False, True])
+async def test_deferred_content_requires_runtime_gate_at_both_boundaries(
+    setup, monkeypatch, enabled_at_start
+):
+    from respan_instrumentation_vercel._constants import AI_OPERATION_CONTENT
+
+    _, _, exporter = setup
+    monkeypatch.setenv("TRACELOOP_TRACE_CONTENT", str(enabled_at_start))
+
+    class SwitchingProvider(OperationProvider):
+        async def embed(self, model, values, *, params):
+            monkeypatch.setenv("TRACELOOP_TRACE_CONTENT", str(not enabled_at_start))
+            return await super().embed(model, values, params=params)
+
+    sink = telemetry.DictSink()
+    async with telemetry.use_sink(sink):
+        await ai.ops.embed(
+            ai.Model(id="private-test", provider=SwitchingProvider()), ["SECRET"]
+        )
+    payload = json.loads(
+        json.dumps([s.model_dump(mode="json") for s in sink.finished_spans])
+    )
+    assert "SECRET" not in json.dumps(payload)
+    assert AI_OPERATION_CONTENT not in payload[0]["trace_attrs"]
+    monkeypatch.setenv("TRACELOOP_TRACE_CONTENT", "true")
+    await telemetry.push_all(payload)
+    (span,) = exporter.get_finished_spans()
+    assert SpanAttributes.TRACELOOP_ENTITY_INPUT not in span.attributes
+    assert SpanAttributes.TRACELOOP_ENTITY_OUTPUT not in span.attributes
+
+
+async def test_replay_privacy_gate_suppresses_durable_operation_payload(
+    setup, monkeypatch
+):
+    _, _, exporter = setup
+    sink = telemetry.DictSink()
+    async with telemetry.use_sink(sink):
+        await ai.ops.embed(
+            ai.Model(id="private-test", provider=OperationProvider()), ["SECRET"]
+        )
+    payload = json.loads(
+        json.dumps([s.model_dump(mode="json") for s in sink.finished_spans])
+    )
+    monkeypatch.setenv("TRACELOOP_TRACE_CONTENT", "false")
+    await telemetry.push_all(payload)
+    (span,) = exporter.get_finished_spans()
+    assert "SECRET" not in str(span.attributes)
+    assert SpanAttributes.TRACELOOP_ENTITY_INPUT not in span.attributes
+    assert SpanAttributes.TRACELOOP_ENTITY_OUTPUT not in span.attributes
+
+
+async def test_deferred_sink_failures_do_not_change_operation_result(setup):
+    _, _, exporter = setup
+
+    class FailingSink:
+        async def on_push(self, span):
+            raise RuntimeError("sink unavailable")
+
+    async with telemetry.use_sink(FailingSink()):
+        result = await ai.ops.embed(
+            ai.Model(id="test", provider=OperationProvider()), ["hello"]
+        )
+    assert result.value == [[0.1, 0.2]]
+    assert exporter.get_finished_spans() == ()

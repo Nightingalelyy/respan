@@ -27,6 +27,7 @@ from respan_sdk.constants.span_attributes import (
 )
 from respan_tracing.constants.context_constants import ENABLE_CONTENT_TRACING_KEY
 
+from ._operation_sink import _OperationSink
 from ._translator import json_value, span_attributes, usage_attributes
 
 _operation: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -242,6 +243,34 @@ class VercelInstrumentor:
             try:
                 capture = capture_setting and _content_allowed()
                 bound = signature.bind(*args, **kwargs)
+                input_payload = None
+                if capture:
+                    inputs = {
+                        key: value
+                        for key, value in bound.arguments.items()
+                        if key != "model"
+                    }
+                    input_payload = json_value(
+                        inputs["values"] if kind == "embed" else inputs
+                    )
+                # No public current-sink accessor exists in this experimental
+                # SDK version. Only inspect it; routing stays on public use_sink.
+                sink = importlib.import_module(
+                    "ai.experimental_telemetry.span"
+                )._current_sink.get()
+                if sink is not None:
+                    deferred = _OperationSink(sink, kind)
+                    result = None
+                    try:
+                        async with telemetry.use_sink(deferred):
+                            result = await original(*args, **kwargs)
+                        return result
+                    finally:
+                        await deferred.finish(
+                            capture_content=capture and _content_allowed(),
+                            input_payload=input_payload,
+                            result=result,
+                        )
                 model = bound.arguments.get("model")
                 attrs = {
                     RESPAN_LOG_TYPE: log_type,
@@ -261,15 +290,6 @@ class VercelInstrumentor:
                     )
                 if log_type == LOG_TYPE_EMBEDDING:
                     attrs[SpanAttributes.LLM_REQUEST_TYPE] = "embedding"
-                if capture:
-                    inputs = {
-                        key: value
-                        for key, value in bound.arguments.items()
-                        if key != "model"
-                    }
-                    input_payload = json_value(
-                        inputs["values"] if kind == "embed" else inputs
-                    )
                 token = _operation.set(kind)
                 try:
                     with tracer.start_as_current_span(

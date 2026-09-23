@@ -13,13 +13,17 @@ from respan_sdk.constants.llm_logging import (
     LOG_TYPE_AGENT,
     LOG_TYPE_CHAT,
     LOG_TYPE_EMBEDDING,
-    LOG_TYPE_SPEECH,
     LOG_TYPE_TASK,
     LOG_TYPE_TOOL,
-    LOG_TYPE_TRANSCRIPTION,
 )
-from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE, RESPAN_METADATA
+from respan_sdk.constants.span_attributes import (
+    RESPAN_INTERNAL_SPAN_NAME_KIND,
+    RESPAN_LOG_TYPE,
+    RESPAN_METADATA,
+)
 from respan_sdk.utils.serialization import serialize_value
+
+from ._constants import AI_OPERATION_CONTENT
 
 _json_adapter = TypeAdapter(Any, config=ConfigDict(ser_json_bytes="base64"))
 
@@ -83,8 +87,16 @@ _KINDS = {
     "ai_generate": LOG_TYPE_CHAT,
     "tool_execution": LOG_TYPE_TOOL,
     "embed": LOG_TYPE_EMBEDDING,
-    "generate_audio": LOG_TYPE_SPEECH,
-    "transcribe": LOG_TYPE_TRANSCRIPTION,
+}
+
+_OPERATION_KINDS = {
+    "embed",
+    "evaluate",
+    "generate_audio",
+    "generate_image",
+    "generate_video",
+    "rerank",
+    "transcribe",
 }
 
 
@@ -97,8 +109,45 @@ def span_attributes(span: Any, capture_content: bool) -> dict[str, Any]:
         RESPAN_LOG_TYPE: log_type,
         SpanAttributes.TRACELOOP_ENTITY_NAME: name,
     }
-    if capture_content and span.trace_attrs:
-        attrs[RESPAN_METADATA] = json_value(span.trace_attrs)
+    metadata = (
+        {
+            key: value
+            for key, value in span.trace_attrs.items()
+            if key != AI_OPERATION_CONTENT
+        }
+        if capture_content
+        else {}
+    )
+    if kind in _OPERATION_KINDS:
+        metadata["operation"] = kind
+        if kind == "embed":
+            attrs[SpanAttributes.LLM_REQUEST_TYPE] = "embedding"
+            attrs[SpanAttributes.LLM_REQUEST_MODEL] = data.model
+            attrs[SpanAttributes.LLM_SYSTEM] = data.provider or "unknown"
+            attrs.update(usage_attributes(data.usage))
+        else:
+            metadata.update({"model": data.model, "provider": data.provider})
+            if data.usage is not None:
+                metadata["usage"] = data.usage.model_dump(exclude_none=True)
+        if kind in {"generate_audio", "transcribe"}:
+            attrs[RESPAN_INTERNAL_SPAN_NAME_KIND] = (
+                "speech" if kind == "generate_audio" else "transcribe"
+            )
+        content = span.trace_attrs.get(AI_OPERATION_CONTENT)
+        if (
+            capture_content
+            and isinstance(content, dict)
+            and content.get("span_id") == span.id
+            and content.get("kind") == kind
+        ):
+            for field, key in (
+                ("input", SpanAttributes.TRACELOOP_ENTITY_INPUT),
+                ("output", SpanAttributes.TRACELOOP_ENTITY_OUTPUT),
+            ):
+                if isinstance(content.get(field), str):
+                    attrs[key] = content[field]
+    if metadata:
+        attrs[RESPAN_METADATA] = json_value(metadata)
     if kind in {"ai_stream", "ai_generate"}:
         attrs.update(
             {

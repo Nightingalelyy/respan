@@ -358,7 +358,8 @@
       "ecosystem": "python",
       "name": "respan-instrumentation-vercel",
       "path": "python-sdks/instrumentations/respan-instrumentation-vercel",
-      "registry": "pypi"
+      "registry": "pypi",
+      "python_version": "3.12"
     },
     {
       "ecosystem": "python",
