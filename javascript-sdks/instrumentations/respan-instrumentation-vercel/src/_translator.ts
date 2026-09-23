@@ -36,6 +36,9 @@ import {
 } from "./_translator/messages.js";
 import {
   AI_AGENT_ID,
+  AI_DOCUMENTS,
+  AI_RANKING,
+  parseJsonish,
   AI_MODEL_ID,
   AI_PREFIX,
   AI_TELEMETRY_METADATA_PREFIX,
@@ -204,6 +207,19 @@ export class VercelAITranslator implements RespanSpanTransformer {
       if (embInput) setDefault(attrs, TraceloopSpanAttributes.TRACELOOP_ENTITY_INPUT, embInput);
       const embOutput = formatEmbeddingOutput(attrs);
       if (embOutput) setDefault(attrs, TraceloopSpanAttributes.TRACELOOP_ENTITY_OUTPUT, embOutput);
+    }
+
+    if (modernOperationName(name, attrs) === "rerank") {
+      const documents = attrs[AI_DOCUMENTS];
+      const ranking = attrs[AI_RANKING];
+      if (documents !== undefined) {
+        setDefault(attrs, TraceloopSpanAttributes.TRACELOOP_ENTITY_INPUT,
+          safeJsonStr({ documents: Array.isArray(documents) ? documents.map(parseJsonish) : parseJsonish(documents) }));
+      }
+      if (ranking !== undefined) {
+        setDefault(attrs, TraceloopSpanAttributes.TRACELOOP_ENTITY_OUTPUT,
+          safeJsonStr(Array.isArray(ranking) ? ranking.map(parseJsonish) : parseJsonish(ranking)));
+      }
     }
 
     const entityName =
