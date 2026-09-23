@@ -981,3 +981,43 @@ def test_hosted_tool_history_preserves_native_item_id():
     )
     assert messages[0]["tool_calls"][0]["id"] == "ws_123"
     assert messages[1]["tool_call_id"] == "ws_123"
+
+
+@pytest.mark.parametrize(
+    "payload, expected_input, expected_output",
+    [
+        (
+            {"type": "file_search_call", "id": "fs", "queries": ["hello"]},
+            {"queries": ["hello"]},
+            None,
+        ),
+        (
+            {
+                "type": "code_interpreter_call",
+                "id": "ci",
+                "code": "print(42)",
+                "container_id": "c",
+                "outputs": [{"type": "logs", "logs": "42"}],
+            },
+            {"code": "print(42)", "container_id": "c"},
+            [{"type": "logs", "logs": "42"}],
+        ),
+        (
+            {
+                "type": "image_generation_call",
+                "id": "img",
+                "revised_prompt": "cat",
+                "result": "BASE64",
+            },
+            {"revised_prompt": "cat"},
+            "BASE64",
+        ),
+    ],
+)
+def test_hosted_call_payloads_retain_native_arguments_and_results(
+    payload, expected_input, expected_output
+):
+    call = _otel_emitter._extract_tool_calls([payload])[0]
+    assert json.loads(call["function"]["arguments"]) == expected_input
+    if expected_output is not None:
+        assert call["output"] == expected_output

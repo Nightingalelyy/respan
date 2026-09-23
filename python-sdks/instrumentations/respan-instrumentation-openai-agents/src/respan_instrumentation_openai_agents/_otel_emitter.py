@@ -222,8 +222,23 @@ def _normalize_tool_call(value: Any) -> dict[str, Any] | None:
         name = dumped.get("name") or (
             item_type if item_type.endswith("_call") else None
         )
+        hosted_arguments = {
+            key: value
+            for key, value in dumped.items()
+            if key
+            not in {
+                "id",
+                "call_id",
+                "type",
+                "name",
+                "status",
+                "result",
+                "output",
+                "outputs",
+            }
+        }
         arguments = dumped.get(
-            "arguments", dumped.get("action", dumped.get("operation", {}))
+            "arguments", dumped.get("action", dumped.get("operation", hosted_arguments))
         )
     if not name:
         return None
@@ -236,6 +251,10 @@ def _normalize_tool_call(value: Any) -> dict[str, Any] | None:
             ),
         },
     }
+    for output_key in ("result", "output", "outputs"):
+        if output_key in dumped:
+            normalized["output"] = dumped[output_key]
+            break
     call_id = dumped.get("call_id") or dumped.get("id")
     if call_id:
         normalized["id"] = safe_text(call_id, limit=256)
