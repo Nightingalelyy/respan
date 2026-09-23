@@ -366,7 +366,7 @@ function extractToolCalls(output: any): Record<string, any>[] {
 
     const itemType = (item as any).type ?? "";
     if (
-      itemType === "function_call" ||
+      itemType.endsWith("_call") ||
       itemType === "function" ||
       itemType === "hosted_tool_call" ||
       itemType === "tool_search_call" ||
@@ -480,7 +480,7 @@ function responsesApiItemToMessage(rawItem: any): Record<string, any> | null {
   }
 
   if (
-    itemType === "function_call" ||
+    itemType.endsWith("_call") ||
     itemType === "hosted_tool_call" ||
     itemType === "tool_search_call" ||
     itemType === "computer_call" ||
@@ -497,7 +497,7 @@ function responsesApiItemToMessage(rawItem: any): Record<string, any> | null {
   }
 
   if (
-    itemType === "function_call_output" ||
+    itemType.endsWith("_call_output") ||
     itemType === "function_call_result" ||
     itemType === "tool_search_output" ||
     itemType === "computer_call_result" ||

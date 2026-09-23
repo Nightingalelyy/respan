@@ -863,3 +863,15 @@ test('Respan content opt-out removes MCP, audio and LLM payloads', () => {
     else process.env.RESPAN_TRACE_CONTENT=previous;
   }
 });
+
+test('raw Responses hosted calls survive output and conversation history', () => {
+  for(const type of ['web_search_call','file_search_call','image_generation_call','mcp_call']) {
+    const call={type,id:'hosted_123',action:{type:'search',query:'weather'}};
+    const attrs=emitAndCapture(makeBaseSpanData({type:'response',_input:[call],
+      _response:{model:'gpt-4o-mini',tools:[],output:[call]}}));
+    assert.equal(attrs['gen_ai.completion.0.content'],'');
+    const emitted=JSON.parse(attrs['gen_ai.completion.0.tool_calls'])[0];
+    assert.equal(emitted.id,'hosted_123');assert.equal(emitted.function.name,type);
+    assert.equal(JSON.parse(attrs['gen_ai.prompt.0.tool_calls'])[0].id,'hosted_123');
+  }
+});
