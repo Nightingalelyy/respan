@@ -1,0 +1,6 @@
+{
+  "summary": "@respan/instrumentation-pi: user messages delivered into a running turn (pi steer()/followUp()) become their own `steer` span under the turn, are appended to the turn span input, and are counted in `steer_count`; the in-tracer turn counter stays aligned with the session history when steers consume turn numbers.",
+  "packages": {
+    "@respan/instrumentation-pi": "patch"
+  }
+}
