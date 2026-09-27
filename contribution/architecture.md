@@ -234,9 +234,9 @@ Representative examples:
   - normalizes messages, tools, tool calls, and token usage
   - emits GenAI semantic-convention attributes
 - [JavaScript OpenAI instrumentation](../javascript-sdks/instrumentations/respan-instrumentation-openai/src/index.ts)
-  - wraps `@traceloop/instrumentation-openai`
-  - points it at the global tracer provider
-  - manually patches the OpenAI module
+  - patches OpenAI SDK resource methods while preserving native promise and stream helpers
+  - emits canonical chat, text, Responses, and embedding spans through the active tracer provider
+  - shares resource patches across plugin instances and restores them on final deactivation
 
 Instrumentation package contract:
 

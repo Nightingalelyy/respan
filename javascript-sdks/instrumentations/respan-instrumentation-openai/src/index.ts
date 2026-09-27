@@ -1,153 +1,140 @@
-/**
- * Respan instrumentation plugin for the OpenAI SDK.
- *
- * Wraps `@traceloop/instrumentation-openai` in the Respan plugin protocol.
- *
- * ```typescript
- * import { Respan } from "@respan/respan";
- * import { OpenAIInstrumentor } from "@respan/instrumentation-openai";
- *
- * const respan = new Respan({
- *   instrumentations: [new OpenAIInstrumentor()],
- * });
- * await respan.initialize();
- * ```
- */
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { context } from "@opentelemetry/api";
+import { isTracingSuppressed } from "@opentelemetry/core";
+import { observeRequest, type Operation } from "./request.js";
 
+export interface OpenAIInstrumentorOptions {
+  /** Capture input and output. The active trace-content context takes precedence. */
+  traceContent?: boolean;
+  /** Optional SDK constructor or module for applications with multiple SDK copies. */
+  openAI?: any;
+}
+
+interface Patch {
+  original: any;
+  wrapped: any;
+  owners: Set<OpenAIInstrumentor>;
+}
+
+/** Instruments the OpenAI 4–7 resource APIs without replacing SDK result objects. */
 export class OpenAIInstrumentor {
-  public readonly name = "openai";
-  private static readonly _sharedState = {
-    activeInstances: 0,
-    instrumentor: null as any,
-    openAI: null as any,
-  };
+  readonly name = "openai";
+  private static readonly patches = new Map<any, Patch>();
+  private readonly targets = new Set<any>();
+  private active = false;
+  private activation?: Promise<void>;
 
-  private _isInstrumented = false;
+  constructor(private readonly options: OpenAIInstrumentorOptions = {}) {}
 
-  async activate(): Promise<void> {
-    if (this._isInstrumented) return;
+  activate(): Promise<void> {
+    // A deactivate may cancel an in-flight install. Recheck after it settles.
+    if (this.activation) return this.activation.then(() => this.activate());
+    if (this.active) return Promise.resolve();
+    this.active = true;
+    this.activation = this.install()
+      .catch((error) => {
+        this.deactivate();
+        throw error;
+      })
+      .finally(() => {
+        this.activation = undefined;
+      });
+    return this.activation;
+  }
 
-    const sharedState = OpenAIInstrumentor._sharedState;
-
-    if (sharedState.activeInstances === 0) {
-      const { trace } = await import("@opentelemetry/api");
-      const { OpenAIInstrumentation } = await import(
-        "@traceloop/instrumentation-openai"
-      );
-
-      sharedState.instrumentor = new OpenAIInstrumentation();
-      sharedState.instrumentor.setTracerProvider(trace.getTracerProvider());
-      sharedState.openAI = (await importOpenAISdk()).default;
-      sharedState.instrumentor.manuallyInstrument(sharedState.openAI);
-      installAzureOpenAISkipGuard(sharedState.openAI);
+  private async install(): Promise<void> {
+    const modules = this.options.openAI
+      ? [this.options.openAI]
+      : await importOpenAISdks();
+    if (!this.active) return;
+    for (const module of modules) {
+      const OpenAI = module.OpenAI ?? module.default ?? module;
+      for (const [target, operation] of [
+        [OpenAI.Chat?.Completions?.prototype, "chat"],
+        [OpenAI.Completions?.prototype, "text"],
+        [OpenAI.Responses?.prototype, "responses"],
+        [OpenAI.Embeddings?.prototype, "embedding"],
+      ] as const) {
+        if (typeof target?.create !== "function" || this.targets.has(target))
+          continue;
+        let patch = OpenAIInstrumentor.patches.get(target);
+        if (!patch) {
+          const original = target.create;
+          const owners = new Set<OpenAIInstrumentor>();
+          const wrapped = function (this: any, ...args: any[]) {
+            const owner = owners.values().next().value;
+            if (
+              !owner ||
+              isAzureOpenAIResource(this) ||
+              isTracingSuppressed(context.active())
+            ) {
+              return original.apply(this, args);
+            }
+            return observeRequest(
+              original,
+              this,
+              args,
+              operation as Operation,
+              owner.options.traceContent,
+            );
+          };
+          patch = { original, wrapped, owners };
+          target.create = wrapped;
+          OpenAIInstrumentor.patches.set(target, patch);
+        }
+        patch.owners.add(this);
+        this.targets.add(target);
+      }
     }
-
-    sharedState.activeInstances += 1;
-    this._isInstrumented = true;
   }
 
   deactivate(): void {
-    if (!this._isInstrumented) return;
-
-    const sharedState = OpenAIInstrumentor._sharedState;
-    sharedState.activeInstances = Math.max(0, sharedState.activeInstances - 1);
-    this._isInstrumented = false;
-
-    if (sharedState.activeInstances > 0 || !sharedState.instrumentor) return;
-
-    try {
-      if (hasOpenAIUnwrapMarkers(sharedState.openAI)) {
-        sharedState.instrumentor.unpatch({ OpenAI: sharedState.openAI });
-      }
-    } catch {
-      /* ignore */
+    this.active = false;
+    for (const target of this.targets) {
+      const patch = OpenAIInstrumentor.patches.get(target);
+      if (!patch) continue;
+      patch.owners.delete(this);
+      if (patch.owners.size) continue;
+      // Do not overwrite a wrapper installed by another library after activation.
+      if (target.create === patch.wrapped) target.create = patch.original;
+      OpenAIInstrumentor.patches.delete(target);
     }
-
-    sharedState.instrumentor = null;
-    sharedState.openAI = null;
+    this.targets.clear();
   }
 }
 
-function hasOpenAIUnwrapMarkers(OpenAI: any): boolean {
-  return [
-    OpenAI?.Chat?.Completions?.prototype?.create,
-    OpenAI?.Completions?.prototype?.create,
-  ].some((method) => Boolean(method?.__original || method?.__wrapped));
-}
-
-const AZURE_OPENAI_SKIP_GUARD = Symbol.for("respan.instrumentation.openai.azureSkipGuard");
-
-function installAzureOpenAISkipGuard(OpenAI: any): void {
-  guardOpenAIMethod(OpenAI?.Chat?.Completions?.prototype, "create", OpenAI);
-  guardOpenAIMethod(OpenAI?.Completions?.prototype, "create", OpenAI);
-}
-
-function guardOpenAIMethod(target: any, methodName: string, OpenAI: any): void {
-  if (!target) return;
-
-  const tracedMethod = target[methodName];
-  if (typeof tracedMethod !== "function" || tracedMethod[AZURE_OPENAI_SKIP_GUARD]) {
-    return;
-  }
-
-  const original = tracedMethod.__original;
-  if (typeof original !== "function") {
-    return;
-  }
-
-  const guardedMethod = function respanOpenAIAzureSkipGuard(this: any, ...args: any[]) {
-    if (isAzureOpenAIResource(this, OpenAI)) {
-      return original.apply(this, args);
-    }
-    return tracedMethod.apply(this, args);
-  };
-
-  Object.defineProperty(guardedMethod, "__original", {
-    configurable: true,
-    value: original,
-  });
-  Object.defineProperty(guardedMethod, "__wrapped", {
-    configurable: true,
-    value: tracedMethod.__wrapped ?? true,
-  });
-  Object.defineProperty(guardedMethod, AZURE_OPENAI_SKIP_GUARD, {
-    configurable: true,
-    value: true,
-  });
-
-  target[methodName] = guardedMethod;
-}
-
-function isAzureOpenAIResource(receiver: any, OpenAI: any): boolean {
+function isAzureOpenAIResource(receiver: any): boolean {
   const client = receiver?._client ?? receiver;
-  if (!client) return false;
-
-  const AzureOpenAI = OpenAI?.AzureOpenAI;
-  if (typeof AzureOpenAI === "function" && client instanceof AzureOpenAI) {
-    return true;
+  for (
+    let prototype = client;
+    prototype;
+    prototype = Object.getPrototypeOf(prototype)
+  ) {
+    if (prototype.constructor?.name === "AzureOpenAI") return true;
   }
-
-  const constructorName = client.constructor?.name;
-  if (constructorName === "AzureOpenAI" || constructorName?.endsWith("AzureOpenAI")) {
-    return true;
-  }
-
-  const baseURL = typeof client.baseURL === "string" ? client.baseURL.toLowerCase() : "";
-  return typeof client.apiVersion === "string" && (baseURL.includes("azure") || Boolean(client.deploymentName));
+  const baseURL =
+    typeof client?.baseURL === "string" ? client.baseURL.toLowerCase() : "";
+  return (
+    typeof client?.apiVersion === "string" &&
+    (baseURL.includes("azure") || Boolean(client.deploymentName))
+  );
 }
 
-async function importOpenAISdk(): Promise<any> {
+async function importOpenAISdks(): Promise<any[]> {
+  let require = createRequire(`${process.cwd()}/package.json`);
+  let resolved: string;
   try {
-    const hostRequire = createRequire(`${process.cwd()}/package.json`);
-    const resolved = hostRequire.resolve("openai");
-    const esmEntry = join(dirname(resolved), "index.mjs");
-    const entry = existsSync(esmEntry) ? esmEntry : resolved;
-    return await import(pathToFileURL(entry).href);
+    resolved = require.resolve("openai");
   } catch {
-    return await import("openai");
+    require = createRequire(import.meta.url);
+    resolved = require.resolve("openai");
   }
+  const modules = [require(resolved)];
+  const esmEntry = join(dirname(resolved), "index.mjs");
+  if (existsSync(esmEntry))
+    modules.push(await import(pathToFileURL(esmEntry).href));
+  return modules;
 }
