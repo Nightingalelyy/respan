@@ -10,7 +10,6 @@ import pytest
 from openai import AsyncOpenAI, AuthenticationError, OpenAI
 from opentelemetry.trace import StatusCode
 from pydantic import BaseModel
-
 from respan_instrumentation_openai import _instrumentation as instrumentation
 from respan_instrumentation_openai import _otel_emitter as emitter
 from respan_instrumentation_openai._instrumentation import OpenAIInstrumentor
@@ -608,3 +607,375 @@ async def test_real_async_chat_stream_cancellation_closes_source(captured):
     assert len(captured) == 1
     assert captured[0].status.status_code is StatusCode.ERROR
     assert captured[0].attributes["status_code"] == 499
+
+
+def _events(kind):
+    if kind == "chat":
+        return [
+            {
+                "id": "chat_stream",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "gpt-4.1-nano",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": "Hello"},
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": "chat_stream",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "gpt-4.1-nano",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": " world"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 4,
+                    "completion_tokens": 2,
+                    "total_tokens": 6,
+                },
+            },
+        ]
+    final = _response_payload()
+    final["output"][0]["content"][0]["text"] = "Hello world"
+    initial = {**final, "status": "in_progress", "output": [], "usage": None}
+    message = {**final["output"][0], "status": "in_progress", "content": []}
+    part = {"type": "output_text", "text": "", "annotations": []}
+    return [
+        {"type": "response.created", "response": initial, "sequence_number": 0},
+        {
+            "type": "response.output_item.added",
+            "item": message,
+            "output_index": 0,
+            "sequence_number": 1,
+        },
+        {
+            "type": "response.content_part.added",
+            "part": part,
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 0,
+            "sequence_number": 2,
+        },
+        {
+            "type": "response.output_text.delta",
+            "delta": "Hello",
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 0,
+            "sequence_number": 3,
+        },
+        {
+            "type": "response.output_text.delta",
+            "delta": " world",
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 0,
+            "sequence_number": 4,
+        },
+        {"type": "response.completed", "response": final, "sequence_number": 5},
+    ]
+
+
+def _sse(events):
+    return (
+        "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+        + "data: [DONE]\n\n"
+    ).encode()
+
+
+@pytest.mark.parametrize("kind", ["chat", "response"])
+@pytest.mark.parametrize("helper", [False, True])
+@pytest.mark.parametrize("partial", [False, True])
+def test_current_sync_stream_surface_preserves_results_and_finalizes_on_close(
+    captured, kind, helper, partial
+):
+    class Source(httpx2.SyncByteStream):
+        close_count = 0
+
+        def __iter__(self):
+            yield _sse(_events(kind))
+
+        def close(self):
+            self.close_count += 1
+
+    source = Source()
+    client = _sync_client(
+        lambda request: httpx2.Response(
+            200, headers={"content-type": "text/event-stream"}, stream=source
+        )
+    )
+    instrumentor = OpenAIInstrumentor()
+    instrumentor.activate()
+    resource = client.chat.completions if kind == "chat" else client.responses
+    kwargs = {"model": "gpt-4.1-nano"}
+    if kind == "chat":
+        kwargs["messages"] = [{"role": "user", "content": "hello"}]
+    else:
+        kwargs["input"] = "hello"
+    manager = (
+        resource.stream(**kwargs) if helper else resource.create(**kwargs, stream=True)
+    )
+    try:
+        with manager as stream:
+            for event in stream:
+                event_type = getattr(event, "type", None)
+                if partial and (
+                    event_type in {"content.delta", "response.output_text.delta"}
+                    or (kind == "chat" and not helper)
+                ):
+                    break
+            if helper and not partial:
+                final = (
+                    stream.get_final_completion()
+                    if kind == "chat"
+                    else stream.get_final_response()
+                )
+                text = (
+                    final.choices[0].message.content
+                    if kind == "chat"
+                    else final.output_text
+                )
+                assert text == "Hello world"
+        stream.close()
+        assert source.close_count == 1
+        assert len(captured) == 1
+    finally:
+        client.close()
+        instrumentor.deactivate()
+    attrs = captured[0].attributes
+    assert attrs["gen_ai.completion.0.content"] == (
+        "Hello" if partial else "Hello world"
+    )
+    assert attrs["gen_ai.is_streaming"] is True
+    if not partial:
+        assert attrs["llm.usage.total_tokens"] == (6 if kind == "chat" else 8)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["chat", "response"])
+@pytest.mark.parametrize("helper", [False, True])
+@pytest.mark.parametrize("partial", [False, True])
+async def test_current_async_stream_surface_preserves_results_and_finalizes_on_close(
+    captured, kind, helper, partial
+):
+    class Source(httpx2.AsyncByteStream):
+        close_count = 0
+
+        async def __aiter__(self):
+            yield _sse(_events(kind))
+
+        async def aclose(self):
+            self.close_count += 1
+
+    source = Source()
+    client = _async_client(
+        lambda request: httpx2.Response(
+            200, headers={"content-type": "text/event-stream"}, stream=source
+        )
+    )
+    instrumentor = OpenAIInstrumentor()
+    instrumentor.activate()
+    resource = client.chat.completions if kind == "chat" else client.responses
+    kwargs = {"model": "gpt-4.1-nano"}
+    if kind == "chat":
+        kwargs["messages"] = [{"role": "user", "content": "hello"}]
+    else:
+        kwargs["input"] = "hello"
+    manager = (
+        resource.stream(**kwargs)
+        if helper
+        else await resource.create(**kwargs, stream=True)
+    )
+    try:
+        async with manager as stream:
+            async for event in stream:
+                event_type = getattr(event, "type", None)
+                if partial and (
+                    event_type in {"content.delta", "response.output_text.delta"}
+                    or (kind == "chat" and not helper)
+                ):
+                    break
+            if helper and not partial:
+                final = (
+                    await stream.get_final_completion()
+                    if kind == "chat"
+                    else await stream.get_final_response()
+                )
+                text = (
+                    final.choices[0].message.content
+                    if kind == "chat"
+                    else final.output_text
+                )
+                assert text == "Hello world"
+        await stream.close()
+        assert source.close_count == 1
+        assert len(captured) == 1
+    finally:
+        await client.close()
+        instrumentor.deactivate()
+    attrs = captured[0].attributes
+    assert attrs["gen_ai.completion.0.content"] == (
+        "Hello" if partial else "Hello world"
+    )
+    assert attrs["gen_ai.is_streaming"] is True
+    if not partial:
+        assert attrs["llm.usage.total_tokens"] == (6 if kind == "chat" else 8)
+
+
+def test_response_partial_tools_are_kept_separate_from_output_text(captured):
+    events = _events("response")[:1] + [
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "sequence_number": 1,
+            "item": {
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_weather",
+                "name": "get_weather",
+                "arguments": "",
+                "status": "in_progress",
+            },
+        },
+        {
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_1",
+            "output_index": 0,
+            "sequence_number": 2,
+            "delta": '{"city":"Paris"}',
+        },
+        {
+            "type": "response.reasoning_text.delta",
+            "item_id": "rs_1",
+            "output_index": 1,
+            "content_index": 0,
+            "sequence_number": 3,
+            "delta": "private reasoning",
+        },
+    ]
+    instrumentor = OpenAIInstrumentor()
+    instrumentor.activate()
+    with (
+        _sync_client(
+            lambda request: httpx2.Response(
+                200, headers={"content-type": "text/event-stream"}, content=_sse(events)
+            )
+        ) as client,
+        client.responses.create(
+            model="gpt-4.1-nano", input="weather", stream=True
+        ) as stream,
+    ):
+        list(stream)
+    assert len(captured) == 1
+    attrs = captured[0].attributes
+    assert not attrs.get("gen_ai.completion.0.content")
+    calls = json.loads(attrs["gen_ai.completion.0.tool_calls"])
+    assert calls[0]["id"] == "call_weather"
+    assert calls[0]["function"]["arguments"] == '{"city":"Paris"}'
+    assert attrs["gen_ai.response.id"] == "resp_1"
+
+
+def test_response_failed_event_marks_span_error_without_changing_sdk_events(captured):
+    failed = {
+        **_response_payload(),
+        "status": "failed",
+        "error": {
+            "code": "server_error",
+            "message": "test provider failure api_key=sk-private",
+        },
+    }
+    events = [{"type": "response.failed", "response": failed, "sequence_number": 1}]
+    instrumentor = OpenAIInstrumentor()
+    instrumentor.activate()
+    with (
+        _sync_client(
+            lambda request: httpx2.Response(
+                200, headers={"content-type": "text/event-stream"}, content=_sse(events)
+            )
+        ) as client,
+        client.responses.create(
+            model="gpt-4.1-nano", input="hello", stream=True
+        ) as stream,
+    ):
+        assert [event.type for event in stream] == ["response.failed"]
+    assert len(captured) == 1
+    assert captured[0].status.status_code is StatusCode.ERROR
+    assert (
+        captured[0].attributes["error.message"]
+        == "test provider failure api_key=[REDACTED]"
+    )
+    assert captured[0].attributes["error.type"] == "server_error"
+
+
+@pytest.mark.asyncio
+async def test_real_sync_and_async_completions_and_embeddings(captured):
+    def handler(request):
+        if request.url.path.endswith("/embeddings"):
+            return httpx2.Response(
+                200,
+                json={
+                    "object": "list",
+                    "model": "text-embedding-3-small",
+                    "data": [
+                        {"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}
+                    ],
+                    "usage": {"prompt_tokens": 2, "total_tokens": 2},
+                },
+            )
+        return httpx2.Response(
+            200,
+            json={
+                "id": "cmpl_1",
+                "object": "text_completion",
+                "created": 1,
+                "model": "davinci-002",
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": "completed",
+                        "finish_reason": "stop",
+                        "logprobs": None,
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 2,
+                    "completion_tokens": 1,
+                    "total_tokens": 3,
+                },
+            },
+        )
+
+    instrumentor = OpenAIInstrumentor()
+    instrumentor.activate()
+    with _sync_client(handler) as client:
+        assert (
+            client.completions.create(model="davinci-002", prompt="hello")
+            .choices[0]
+            .text
+            == "completed"
+        )
+        assert client.embeddings.create(
+            model="text-embedding-3-small", input="hello", encoding_format="float"
+        ).data[0].embedding == [0.1, 0.2]
+    async with _async_client(handler) as client:
+        assert (
+            await client.completions.create(model="davinci-002", prompt="hello")
+        ).choices[0].text == "completed"
+        assert (
+            await client.embeddings.create(
+                model="text-embedding-3-small", input="hello", encoding_format="float"
+            )
+        ).data[0].embedding == [0.1, 0.2]
+    assert len(captured) == 4
+    for span in captured[1::2]:
+        assert json.loads(span.attributes["traceloop.entity.output"]) == [[0.1, 0.2]]
+        assert span.attributes["gen_ai.usage.input_tokens"] == 2
