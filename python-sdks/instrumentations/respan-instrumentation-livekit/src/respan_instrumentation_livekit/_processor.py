@@ -7,7 +7,9 @@ from typing import Any
 
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 from opentelemetry.semconv_ai import SpanAttributes
+from respan_sdk.constants.llm_logging import LOG_TYPE_TASK
 from respan_sdk.constants.span_attributes import (
+    RESPAN_LOG_TYPE,
     RESPAN_SPAN_CUSTOM_ID,
     RESPAN_TRACE_GROUP_ID,
 )
@@ -15,6 +17,7 @@ from respan_sdk.utils.data_processing.id_processing import (
     format_span_id,
     format_trace_id,
 )
+from respan_tracing.utils.preprocessing.span_processing import is_processable_span
 
 from respan_instrumentation_livekit._constants import (
     ATTR_LLM_METRICS,
@@ -102,6 +105,17 @@ def _scope_name(span: ReadableSpan) -> str | None:
     return getattr(scope, "name", None)
 
 
+def _mark_framework_span_exportable(span: ReadableSpan, attrs: dict[str, Any]) -> None:
+    """Keep LiveKit's non-GenAI spans (``job_entrypoint``, ``user_turn``,
+    ``llm_node``, ``tts_node``, ...) from being dropped as auto-instrumentation
+    noise. Without them the exported LLM spans lose their parents and the
+    trace loses its root."""
+    if is_processable_span(span):
+        return
+    attrs[RESPAN_LOG_TYPE] = LOG_TYPE_TASK
+    span._attributes = attrs
+
+
 class LiveKitSpanProcessor(SpanProcessor):
     """Translate LiveKit ``llm_request`` spans before Respan export."""
 
@@ -120,6 +134,8 @@ class LiveKitSpanProcessor(SpanProcessor):
         ):
             return
         if not is_livekit_llm_span(span_name=span.name, attrs=attrs):
+            if scope_name == LIVEKIT_SCOPE_NAME:
+                _mark_framework_span_exportable(span=span, attrs=attrs)
             return
 
         translated = build_livekit_llm_attrs(

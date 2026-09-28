@@ -17,6 +17,7 @@ from opentelemetry.semconv_ai import SpanAttributes
 from respan_instrumentation_livekit import _instrumentation, _otel_emitter
 from respan_instrumentation_livekit._constants import (
     ATTR_LLM_METRICS,
+    LIVEKIT_SCOPE_NAME,
     EVENT_GEN_AI_CHOICE,
     EVENT_GEN_AI_USER_MESSAGE,
     LIVEKIT_RESPAN_PROVIDER_NAME_ATTR,
@@ -33,6 +34,7 @@ from respan_sdk.constants.span_attributes import (
     RESPAN_TRACE_GROUP_ID,
 )
 from respan_tracing.exporters.respan import _convert_attributes
+from respan_tracing.processors.base import FilteringSpanProcessor
 
 _OFF_CONTRACT_ALIASES = {
     "completion_tokens",
@@ -517,4 +519,51 @@ def test_real_livekit_stream_exports_translated_stream_and_provider():
     finally:
         _instrumentation._restore_llm_stream_main_task()
         telemetry.tracer.set_provider(previous_provider)
+        provider.shutdown()
+
+
+def test_livekit_framework_spans_survive_respan_export_filter():
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(LiveKitSpanProcessor())
+    provider.add_span_processor(
+        FilteringSpanProcessor(exporter=exporter, is_batching_enabled=False)
+    )
+    livekit_tracer = provider.get_tracer(LIVEKIT_SCOPE_NAME)
+    other_tracer = provider.get_tracer("opentelemetry.instrumentation.httpx")
+    try:
+        with livekit_tracer.start_as_current_span("job_entrypoint"):
+            with livekit_tracer.start_as_current_span(
+                "agent_turn",
+                attributes={GenAIAttributes.GEN_AI_OPERATION_NAME: "invoke_agent"},
+            ):
+                with (
+                    livekit_tracer.start_as_current_span("llm_node"),
+                    other_tracer.start_as_current_span("POST"),
+                ):
+                    pass
+                with livekit_tracer.start_as_current_span("tts_node"):
+                    pass
+            with livekit_tracer.start_as_current_span("user_turn"):
+                pass
+        provider.force_flush()
+
+        spans = {span.name: span for span in exporter.get_finished_spans()}
+        assert set(spans) == {
+            "job_entrypoint",
+            "agent_turn",
+            "llm_node",
+            "tts_node",
+            "user_turn",
+        }
+        for name in ("job_entrypoint", "llm_node", "tts_node", "user_turn"):
+            assert spans[name].attributes[RESPAN_LOG_TYPE] == "task"
+        assert RESPAN_LOG_TYPE not in spans["agent_turn"].attributes
+        assert spans["llm_node"].parent.span_id == spans["agent_turn"].context.span_id
+        assert (
+            spans["agent_turn"].parent.span_id
+            == spans["job_entrypoint"].context.span_id
+        )
+        assert spans["job_entrypoint"].parent is None
+    finally:
         provider.shutdown()

@@ -1,0 +1,6 @@
+{
+  "summary": "Export LiveKit framework spans (job_entrypoint, user_turn, llm_node, tts_node) so LLM spans keep their parents and traces keep their root",
+  "packages": {
+    "respan-instrumentation-livekit": "patch"
+  }
+}
