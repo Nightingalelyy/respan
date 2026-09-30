@@ -1,0 +1,54 @@
+name: Python OpenAI SDK compatibility
+
+on:
+  pull_request:
+    paths:
+      - "python-sdks/instrumentations/respan-instrumentation-openai/**"
+      - ".github/workflows/openai-python-compatibility.yml"
+  push:
+    branches: [main]
+    paths:
+      - "python-sdks/instrumentations/respan-instrumentation-openai/**"
+      - ".github/workflows/openai-python-compatibility.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compatibility:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        openai: ["==3.0.0", ">=3.0.0,<4.0.0"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build instrumentation wheel
+        run: |
+          python -m pip install build
+          python -m build python-sdks/instrumentations/respan-instrumentation-openai --outdir dist
+      - name: Install with released runtime dependencies
+        env:
+          OPENAI_REQUIREMENT: openai${{ matrix.openai }}
+        run: |
+          python -m pip install dist/*.whl "$OPENAI_REQUIREMENT" pytest pytest-asyncio
+          python -m pip check
+      - name: Check installed plugin entry point
+        run: |
+          python - <<'PY'
+          from importlib.metadata import distribution, version
+          from respan_instrumentation_openai import OpenAIInstrumentor
+
+          plugin = next(
+              ep for ep in distribution("respan-instrumentation-openai").entry_points
+              if ep.group == "respan.instrumentations" and ep.name == "openai"
+          )
+          assert plugin.load() is OpenAIInstrumentor
+          print("OpenAI SDK:", version("openai"))
+          PY
+      - name: Test real SDK requests, streams, and instrumentation lifecycle
+        run: python -m pytest -q python-sdks/instrumentations/respan-instrumentation-openai/tests

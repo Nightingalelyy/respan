@@ -1,70 +1,79 @@
 # respan-instrumentation-openai
 
-Respan instrumentation plugin for direct OpenAI 3.x SDK usage. The native,
-Traceloop-free integration patches sync and async Chat Completions, Responses,
-Completions, and Embeddings resources. Chat and Responses structured-output
-`parse` methods, streaming, tools, usage, and provider failures are included.
+Respan instrumentation for direct OpenAI Python SDK usage. The native
+integration captures typed sync and async Chat Completions, Responses,
+Completions, and Embeddings calls, including Chat and Responses `parse`
+methods, tools, usage, and provider failures.
+
+## SDK compatibility
+
+Supports `openai>=3.0.0,<4.0.0` on Python 3.11–3.13. Verified against OpenAI
+**3.0.0** and **3.19.2** (September 27, 2026); CI runs the real SDK tests
+against the minimum and newest available 3.x release with released Respan
+runtime dependencies.
+
+Chat Completions and Responses support both `create(stream=True)` and the
+`.stream()` context manager helpers. Consuming a stream or explicitly closing
+it emits one span. An early close retains the text and function arguments
+received so far; token usage is included only when the provider has supplied
+it. Async streams must be consumed or closed with `await stream.close()` or
+an async context manager. Responses `response.failed` events mark the span
+as an error while leaving the SDK event stream unchanged.
+
+Content capture applies to these typed methods. Raw HTTP response wrappers
+(`with_raw_response` and `with_streaming_response`), existing-response
+retrieval, Realtime, and other OpenAI resources are outside this capture
+support.
+
+## Install
+
+```bash
+pip install respan-ai 'respan-instrumentation-openai[instruments]'
+```
+
+The base instrumentation package keeps OpenAI optional. Use the `instruments`
+extra above to install a compatible SDK, or manage `openai` yourself.
 
 ## Configuration
 
-### 1. Install
-
-```bash
-pip install respan-instrumentation-openai
-```
-
-### 2. Set Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `RESPAN_API_KEY` | Yes | Your Respan API key. Authenticates both proxy and tracing. |
-| `RESPAN_BASE_URL` | No | Defaults to `https://api.respan.ai/api`. |
-
-Use `OPENAI_API_KEY` and optionally `OPENAI_BASE_URL` when calling OpenAI
-directly. A Respan gateway deployment may instead use its gateway credential
-and OpenAI-compatible base URL.
-
-## Quickstart
-
-### 3. Run Script
+Set `RESPAN_API_KEY` for trace export and `OPENAI_API_KEY` for model requests.
+`RESPAN_BASE_URL` optionally changes the Respan export endpoint;
+`OPENAI_BASE_URL` optionally changes the OpenAI client endpoint.
 
 ```python
 import os
+
 from openai import OpenAI
 from respan import Respan
 from respan_instrumentation_openai import OpenAIInstrumentor
 
-respan_api_key = os.environ["RESPAN_API_KEY"]
-respan_base_url = os.getenv("RESPAN_BASE_URL", "https://api.respan.ai")
-
 respan = Respan(
-    api_key=respan_api_key,
-    base_url=respan_base_url,
+    api_key=os.environ["RESPAN_API_KEY"],
     instrumentations=[OpenAIInstrumentor()],
 )
 
-client = OpenAI(
-    api_key=respan_api_key,
-    base_url=f"{respan_base_url}/api/openai",
-)
-
-response = client.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[{"role": "user", "content": "Hello!"}],
-)
-print(response.choices[0].message.content)
+with OpenAI() as client:
+    response = client.responses.create(
+        model="gpt-4.1-nano",
+        input="Hello!",
+    )
+    print(response.output_text)
 
 respan.flush()
 respan.shutdown()
 ```
 
-### 4. View Dashboard
+View exported traces on the [Respan dashboard](https://platform.respan.ai).
 
-After running the script, traces appear on your [Respan dashboard](https://platform.respan.ai).
-
-## Further Reading
+## Examples and validation
 
 See `respan-example-projects/python/tracing/openai-sdk` for deterministic
-OpenAI 3.x examples. Set `RESPAN_OPENAI_LIVE=1` to opt into a configured live
-provider; deterministic mode still executes the real OpenAI SDK request and
-response parsing layers through an in-process HTTP transport.
+examples that execute the real SDK request and response parsing layers
+through an in-process HTTP transport, plus an opt-in live-provider example.
+
+Run the package regressions locally with:
+
+```bash
+pip install -e '.[instruments]' pytest pytest-asyncio
+pytest -q tests
+```

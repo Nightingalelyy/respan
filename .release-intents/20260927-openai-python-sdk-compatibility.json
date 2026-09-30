@@ -1,0 +1,6 @@
+{
+  "summary": "Validate current OpenAI Python 3.x SDK support and preserve partial Responses and stream helper lifecycle spans",
+  "packages": {
+    "respan-instrumentation-openai": "patch"
+  }
+}

@@ -9,7 +9,6 @@ from types import SimpleNamespace
 
 import pytest
 from opentelemetry.trace import StatusCode
-
 from respan_instrumentation_openai import _instrumentation as instrumentation
 from respan_instrumentation_openai import _otel_emitter as emitter
 from respan_instrumentation_openai import _translator as translator
@@ -289,9 +288,23 @@ def test_suppression_context_prevents_duplicate_emission(monkeypatch):
 
 
 def test_lifecycle_is_reference_counted_and_patches_parse_surfaces():
+    from openai.lib.streaming.chat import (
+        AsyncChatCompletionStream,
+        ChatCompletionStream,
+    )
+    from openai.lib.streaming.responses import AsyncResponseStream, ResponseStream
     from openai.resources.chat.completions import Completions
     from openai.resources.responses.responses import Responses
 
+    original_closes = {
+        cls: cls.close
+        for cls in (
+            ChatCompletionStream,
+            AsyncChatCompletionStream,
+            ResponseStream,
+            AsyncResponseStream,
+        )
+    }
     original_chat_create = Completions.create
     original_chat_parse = Completions.parse
     original_response_parse = Responses.parse
@@ -305,6 +318,7 @@ def test_lifecycle_is_reference_counted_and_patches_parse_surfaces():
     assert Completions.create is not original_chat_create
     assert Completions.parse is not original_chat_parse
     assert Responses.parse is not original_response_parse
+    assert all(cls.close is not original for cls, original in original_closes.items())
 
     first.deactivate()
     first.deactivate()
@@ -315,6 +329,7 @@ def test_lifecycle_is_reference_counted_and_patches_parse_surfaces():
     assert Completions.create is original_chat_create
     assert Completions.parse is original_chat_parse
     assert Responses.parse is original_response_parse
+    assert all(cls.close is original for cls, original in original_closes.items())
     assert instrumentation._INSTALLED_METHODS == {}
 
 

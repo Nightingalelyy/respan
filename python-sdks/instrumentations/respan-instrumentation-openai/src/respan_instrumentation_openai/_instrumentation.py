@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from functools import wraps
 from typing import Any, Self
 
 from respan_tracing.core.tracer import RespanTracer
@@ -32,7 +33,11 @@ from respan_instrumentation_openai._constants import (
     SYNC_EMBEDDINGS_CLASS,
     SYNC_RESPONSES_CLASS,
 )
-from respan_instrumentation_openai._serialization import error_message
+from respan_instrumentation_openai._serialization import (
+    MAX_ERROR_LENGTH,
+    error_message,
+    redact_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +126,7 @@ class _StreamAccumulator:
         self.model = None
         self.response_id = None
         self.final_response = None
+        self.error_kwargs: dict[str, Any] = {}
 
     def _append_text(self, value: Any) -> None:
         if (
@@ -146,9 +152,52 @@ class _StreamAccumulator:
 
         if self.kind == "response":
             response = getattr(item, "response", None)
+            event_type = getattr(item, "type", None)
             if response is not None:
-                self.final_response = response
-            self._append_text(getattr(item, "delta", None))
+                self.model = getattr(response, "model", None) or self.model
+                self.response_id = getattr(response, "id", None) or self.response_id
+                self.usage = getattr(response, "usage", None) or self.usage
+                if event_type in {
+                    "response.completed",
+                    "response.failed",
+                    "response.incomplete",
+                }:
+                    self.final_response = response
+                if event_type == "response.failed":
+                    error = getattr(response, "error", None)
+                    self.error_kwargs = {
+                        "error_message": redact_text(
+                            getattr(error, "message", None) or "OpenAI response failed",
+                            limit=MAX_ERROR_LENGTH,
+                        ),
+                        "error_type": getattr(error, "code", None) or event_type,
+                        "status_code": 500,
+                    }
+            if event_type == "response.output_text.delta":
+                self._append_text(getattr(item, "delta", None))
+            elif event_type == "response.output_item.added":
+                output = getattr(item, "item", None)
+                index = getattr(item, "output_index", 0)
+                if (
+                    getattr(output, "type", None) == "function_call"
+                    and len(self.tool_calls) < self._TOOL_LIMIT
+                ):
+                    self.tool_calls[index] = {
+                        "type": "function_call",
+                        "id": getattr(output, "id", None),
+                        "call_id": getattr(output, "call_id", None),
+                        "name": getattr(output, "name", None),
+                        "arguments": (getattr(output, "arguments", None) or "")[
+                            : self._ARGUMENT_LIMIT
+                        ],
+                    }
+            elif event_type == "response.function_call_arguments.delta":
+                slot = self.tool_calls.get(getattr(item, "output_index", 0))
+                delta = getattr(item, "delta", None)
+                if slot is not None and isinstance(delta, str):
+                    slot["arguments"] = (slot["arguments"] + delta)[
+                        : self._ARGUMENT_LIMIT
+                    ]
             return
 
         choices = getattr(item, "choices", None) or []
@@ -201,7 +250,7 @@ class _StreamAccumulator:
                 "id": self.response_id,
                 "usage": self.usage,
                 "output_text": text,
-                "output": [],
+                "output": list(self.tool_calls.values()),
             }
         if self.kind == "completion":
             return {
@@ -305,7 +354,7 @@ class _SyncStreamWrapper:
             return
         self._finished = True
         emit_fn, _ = _KINDS[self._kind]
-        kwargs: dict[str, Any] = {}
+        kwargs = dict(self._accumulator.error_kwargs)
         if exc is not None and not isinstance(exc, GeneratorExit):
             kwargs.update(_error_kwargs(exc))
         emit_fn(
@@ -402,7 +451,7 @@ class _AsyncStreamWrapper:
             return
         self._finished = True
         emit_fn, _ = _KINDS[self._kind]
-        kwargs: dict[str, Any] = {}
+        kwargs = dict(self._accumulator.error_kwargs)
         if exc is not None and not isinstance(exc, GeneratorExit):
             kwargs.update(_error_kwargs(exc))
         emit_fn(
@@ -460,6 +509,7 @@ class _AsyncStreamWrapper:
 def _make_sync_wrapper(original: Any, *, kind: str) -> Any:
     emit_fn, _ = _KINDS[kind]
 
+    @wraps(original)
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
         if _is_openai_instrumentation_suppressed():
             return original(self, *args, **kwargs)
@@ -502,6 +552,7 @@ def _make_sync_wrapper(original: Any, *, kind: str) -> Any:
 def _make_async_wrapper(original: Any, *, kind: str) -> Any:
     emit_fn, _ = _KINDS[kind]
 
+    @wraps(original)
     async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
         if _is_openai_instrumentation_suppressed():
             pending = original(self, *args, **kwargs)
@@ -543,6 +594,49 @@ def _make_async_wrapper(original: Any, *, kind: str) -> Any:
     return wrapper
 
 
+def _make_sync_close_wrapper(original: Any, **_kwargs: Any) -> Any:
+    @wraps(original)
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        raw = getattr(self, "_raw_stream", None)
+        if not isinstance(raw, _SyncStreamWrapper):
+            return original(self, *args, **kwargs)
+        # SDK stream helpers close the HTTP response directly, bypassing the
+        # raw stream's close(). Finalize at that same boundary without closing
+        # the underlying response twice or retaining a callback cycle.
+        if raw._source_closed:
+            return None
+        raw._source_closed = True
+        try:
+            result = original(self, *args, **kwargs)
+        except BaseException as exc:
+            raw._finish(exc)
+            raise
+        raw._finish()
+        return result
+
+    return wrapper
+
+
+def _make_async_close_wrapper(original: Any, **_kwargs: Any) -> Any:
+    @wraps(original)
+    async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        raw = getattr(self, "_raw_stream", None)
+        if not isinstance(raw, _AsyncStreamWrapper):
+            return await original(self, *args, **kwargs)
+        if raw._source_closed:
+            return None
+        raw._source_closed = True
+        try:
+            result = await original(self, *args, **kwargs)
+        except BaseException as exc:
+            raw._finish(exc)
+            raise
+        raw._finish()
+        return result
+
+    return wrapper
+
+
 def _load_class(module_path: str, class_name: str) -> type[Any] | None:
     try:
         module = importlib.import_module(module_path)
@@ -568,7 +662,10 @@ def _patch(
     if key in _ORIGINAL_METHODS:
         return True
     _ORIGINAL_METHODS[key] = original
-    factory = _make_async_wrapper if is_async else _make_sync_wrapper
+    if kind == "stream_close":
+        factory = _make_async_close_wrapper if is_async else _make_sync_close_wrapper
+    else:
+        factory = _make_async_wrapper if is_async else _make_sync_wrapper
     try:
         wrapper = factory(original, kind=kind)
         setattr(target_class, method_name, wrapper)
@@ -593,6 +690,34 @@ _TARGETS = [
     (RESPONSES_MODULE, ASYNC_RESPONSES_CLASS, PARSE_METHOD, "response", True),
     (EMBEDDINGS_MODULE, SYNC_EMBEDDINGS_CLASS, CREATE_METHOD, "embedding", False),
     (EMBEDDINGS_MODULE, ASYNC_EMBEDDINGS_CLASS, CREATE_METHOD, "embedding", True),
+    (
+        "openai.lib.streaming.chat",
+        "ChatCompletionStream",
+        "close",
+        "stream_close",
+        False,
+    ),
+    (
+        "openai.lib.streaming.chat",
+        "AsyncChatCompletionStream",
+        "close",
+        "stream_close",
+        True,
+    ),
+    (
+        "openai.lib.streaming.responses",
+        "ResponseStream",
+        "close",
+        "stream_close",
+        False,
+    ),
+    (
+        "openai.lib.streaming.responses",
+        "AsyncResponseStream",
+        "close",
+        "stream_close",
+        True,
+    ),
 ]
 
 
