@@ -1,0 +1,6 @@
+{
+  "summary": "Support OpenAI JavaScript SDK 4 through 7 with canonical resource tracing, Responses streams, embeddings, and preserved SDK helpers",
+  "packages": {
+    "@respan/instrumentation-openai": "minor"
+  }
+}
