@@ -11,10 +11,15 @@ Only the selected active SDK packages are included in automation. Packages under
 - it fails if a release-managed package changed without a matching release intent
 - it runs only affected release-managed packages, plus internal dependents that are impacted by those changes
 - it builds every affected publishable Python package
-- it installs the JavaScript workspace once per job and then builds or tests each affected publishable JavaScript package through Yarn workspaces
+- it installs the JavaScript workspace per job and then builds or tests each affected publishable JavaScript package through Yarn workspaces
 - it runs lightweight packaging smoke checks:
   - JavaScript: `npm pack --dry-run`
   - Python: install the built wheel into a clean venv and import the package
+
+JavaScript CI retries installation only for Yarn's internal `onCancel` handler
+crash, with at most three attempts and 5/10-second delays. Other installation
+errors fail immediately; builds and tests are not retried. The helper leaves
+Yarn's hardened-mode and integrity settings unchanged.
 
 ## What Publishes On `main`
 
