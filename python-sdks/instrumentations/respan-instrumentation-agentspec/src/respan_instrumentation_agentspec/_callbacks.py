@@ -143,6 +143,7 @@ def install():
                     response_id = None
                 return {
                     "usage": usage(response),
+                    "completion": messages([message])[0] if message is not None else {},
                     "response_id": response_id,
                     "finish_reason": metadata.get("finish_reason")
                     or info.get("finish_reason"),

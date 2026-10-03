@@ -6,20 +6,32 @@ from unittest.mock import patch
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from pyagentspec.adapters.langgraph import AgentSpecLoader
 from pyagentspec.agent import Agent
 from pyagentspec.llms import OpenAiConfig
 from pyagentspec.property import FloatProperty
 from pyagentspec.tools import ServerTool
+from pydantic import Field
 
 
 class FixtureModel(BaseChatModel):
+    bound_tools: list[dict] = Field(default_factory=list)
+
     @property
     def _llm_type(self):
         return "fixture"
 
     def bind_tools(self, tools, **kwargs):
-        return self
+        return self.model_copy(
+            update={"bound_tools": [convert_to_openai_tool(tool) for tool in tools]}
+        )
+
+    def _get_invocation_params(self, **kwargs):
+        parameters = super()._get_invocation_params(**kwargs)
+        if self.bound_tools:
+            parameters["tools"] = self.bound_tools
+        return parameters
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         question = str(messages[-1].content)

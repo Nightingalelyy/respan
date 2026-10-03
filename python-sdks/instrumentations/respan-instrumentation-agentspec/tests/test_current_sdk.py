@@ -84,12 +84,18 @@ def test_tool_zero_output_current_history_and_correlation(runtime, asynchronous)
     chats = kind(exporter, "chat")
     tool = kind(exporter, "tool")[0]
     assert len(chats) == 2
+    definitions = json.loads(chats[0].attributes[A.LLM_REQUEST_FUNCTIONS])
+    definition = definitions[0].get("function", definitions[0])
+    assert definition["name"] == "subtract"
+    assert set(definition["parameters"]["properties"]) == {"left", "right"}
     assert tool.attributes["gen_ai.tool.call.id"] == "fixture-call-1"
     assert list(json.loads(tool.attributes[A.TRACELOOP_ENTITY_OUTPUT]).values()) == [0]
     assert (
         json.loads(chats[0].attributes["gen_ai.completion.0.tool_calls"])[0]["id"]
         == "fixture-call-1"
     )
+    call = json.loads(chats[0].attributes["gen_ai.completion.0.tool_calls"])[0]
+    assert json.loads(call["function"]["arguments"]) == {"left": 3.0, "right": 3.0}
     assert "gen_ai.completion.0.tool_calls" not in chats[1].attributes
     assert "fixture-call-1" in str(
         {k: v for k, v in chats[1].attributes.items() if k.startswith("gen_ai.prompt.")}

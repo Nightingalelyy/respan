@@ -125,6 +125,11 @@ def make_processor(base, *, provider, **kwargs):
                     provider_name = "openai"
                 if isinstance(provider_name, str) and provider_name:
                     extra[SpanAttributes.LLM_SYSTEM] = provider_name
+                completion = callback.get("completion", {})
+                if policy["capture"] and completion.get("tool_calls"):
+                    extra[f"{SpanAttributes.LLM_COMPLETIONS}.0.tool_calls"] = safe_json(
+                        completion["tool_calls"]
+                    )
                 usage = callback.get("usage", {})
                 if callback.get("response_id"):
                     extra[GEN_AI_RESPONSE_ID] = callback["response_id"]
