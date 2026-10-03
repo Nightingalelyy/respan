@@ -175,7 +175,11 @@ def test_native_tool_error_retains_original_failure(runtime, asynchronous):
             assert "controlled tool failure" in result["messages"][-1].content
         else:
             with pytest.raises(ValueError, match="controlled tool failure"):
-                graph.invoke({"messages": [{"role": "user", "content": "tool-call"}]})
+                request = {"messages": [{"role": "user", "content": "tool-call"}]}
+                if asynchronous:
+                    asyncio.run(graph.ainvoke(request))
+                else:
+                    graph.invoke(request)
     assert kind(exporter, "tool")[0].status.status_code.name == "ERROR"
     assert all(s.status.status_code.name == "ERROR" for s in kind(exporter, "agent"))
 
