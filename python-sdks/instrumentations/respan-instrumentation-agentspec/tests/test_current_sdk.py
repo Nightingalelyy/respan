@@ -60,6 +60,7 @@ def test_sequential_agents_have_separate_inputs_usage_and_safe_config(runtime):
         assert "first" not in agents[1].attributes[A.TRACELOOP_ENTITY_INPUT]
     for span in chats:
         assert span.attributes["gen_ai.usage.input_tokens"] == 0
+        assert span.attributes[A.LLM_SYSTEM] == "openai"
         assert span.attributes["gen_ai.response.id"] == "fixture-response"
         assert list(span.attributes["gen_ai.response.finish_reasons"]) == ["stop"]
         assert span.attributes[A.LLM_USAGE_REASONING_TOKENS] == 2
@@ -181,6 +182,7 @@ def test_native_tool_error_retains_original_failure(runtime, asynchronous):
                 else:
                     graph.invoke(request)
     assert kind(exporter, "tool")[0].status.status_code.name == "ERROR"
+    assert A.TRACELOOP_ENTITY_OUTPUT not in kind(exporter, "tool")[0].attributes
     assert all(s.status.status_code.name == "ERROR" for s in kind(exporter, "agent"))
 
 
@@ -237,7 +239,18 @@ def test_current_flow_builder_with_local_tool(runtime, asynchronous):
         else graph.invoke({"inputs": {"left": 5.0, "right": 2.0}})
     )
     assert result
-    assert kind(exporter, "workflow")
+    flow_span = next(
+        s
+        for s in kind(exporter, "workflow")
+        if "FlowExecution" in s.attributes.get(A.TRACELOOP_ENTITY_NAME, "")
+    )
+    assert json.loads(flow_span.attributes[A.TRACELOOP_ENTITY_INPUT]) == {
+        "left": 5.0,
+        "right": 2.0,
+    }
+    assert json.loads(flow_span.attributes[A.TRACELOOP_ENTITY_OUTPUT]) == {
+        "difference": 3.0
+    }
     assert kind(exporter, "task")
     assert any(
         "3.0" in s.attributes.get(A.TRACELOOP_ENTITY_OUTPUT, "")

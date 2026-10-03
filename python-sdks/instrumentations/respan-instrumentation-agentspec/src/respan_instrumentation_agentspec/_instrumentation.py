@@ -280,7 +280,7 @@ class _TranslatedProcessorChain(SpanProcessor):
             if key.startswith(f"{RESPAN_METADATA}."):
                 propagation[key] = value
 
-        if log_type == "agent" or is_root:
+        if log_type in {"agent", "workflow"} or is_root:
             if not _has_content(input_value) and "input" in state:
                 attrs[TLSpanAttributes.TRACELOOP_ENTITY_INPUT] = state["input"]
             if not _has_content(output_value) and "output" in state:

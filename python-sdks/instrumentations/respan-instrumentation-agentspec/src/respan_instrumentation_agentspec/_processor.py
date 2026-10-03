@@ -8,6 +8,7 @@ import sys
 from asyncio import CancelledError
 from uuid import UUID
 
+from openinference.semconv.trace import SpanAttributes as OISpanAttributes
 from opentelemetry import context, trace
 from opentelemetry.semconv._incubating.attributes.error_attributes import ERROR_MESSAGE
 from opentelemetry.semconv._incubating.attributes.gen_ai_attributes import (
@@ -118,6 +119,12 @@ def make_processor(base, *, provider, **kwargs):
 
                 extra[RESPAN_LOG_TYPE] = LOG_TYPE_TASK
             if type(span).__name__ == "LlmGenerationSpan":
+                config = getattr(span, "llm_config", None)
+                provider_name = getattr(config, "provider", None)
+                if provider_name is None and type(config).__name__ == "OpenAiConfig":
+                    provider_name = "openai"
+                if isinstance(provider_name, str) and provider_name:
+                    extra[SpanAttributes.LLM_SYSTEM] = provider_name
                 usage = callback.get("usage", {})
                 if callback.get("response_id"):
                     extra[GEN_AI_RESPONSE_ID] = callback["response_id"]
@@ -199,6 +206,11 @@ def make_processor(base, *, provider, **kwargs):
                 otel.set_status(trace.Status(trace.StatusCode.ERROR, detail))
                 extra[ERROR_TYPE] = type(error).__name__
                 extra[ERROR_MESSAGE] = detail
+            if error is not None and type(span).__name__ == "ToolExecutionSpan":
+                # The native error handler calls on_tool_end(output=None) while
+                # unwinding. That is not a returned tool result.
+                otel._attributes.pop(OISpanAttributes.OUTPUT_VALUE, None)
+                otel._attributes.pop(OISpanAttributes.OUTPUT_MIME_TYPE, None)
             status = getattr(error, "status_code", None)
             if (
                 isinstance(status, int)
