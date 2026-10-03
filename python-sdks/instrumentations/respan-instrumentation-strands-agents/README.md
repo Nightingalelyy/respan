@@ -9,7 +9,7 @@ require OpenInference at runtime.
 ## Install
 
 ```bash
-pip install respan-instrumentation-strands-agents
+pip install respan-ai respan-instrumentation-strands-agents
 ```
 
 Strands Agents `1.20.0` or newer is required because that release includes the
