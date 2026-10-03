@@ -155,23 +155,29 @@ def test_native_model_error_ends_span_without_manufactured_output(
     )
     assert A.TRACELOOP_ENTITY_OUTPUT not in chats[0].attributes
     assert len(owner._processor._span_registry) == 1  # root remains active
+    assert all(s.status.status_code.name == "ERROR" for s in kind(exporter, "agent"))
 
 
-def test_native_tool_error_retains_original_failure(runtime):
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_native_tool_error_retains_original_failure(runtime, asynchronous):
     _, exporter, _ = runtime
     with fixture_model():
         graph = build_agent(with_tool=True, tool_fails=True)
         from importlib.metadata import version
 
         if version("pyagentspec") == "26.1.0":
-            result = graph.invoke(
-                {"messages": [{"role": "user", "content": "tool-call"}]}
+            request = {"messages": [{"role": "user", "content": "tool-call"}]}
+            result = (
+                asyncio.run(graph.ainvoke(request))
+                if asynchronous
+                else graph.invoke(request)
             )
             assert "controlled tool failure" in result["messages"][-1].content
         else:
             with pytest.raises(ValueError, match="controlled tool failure"):
                 graph.invoke({"messages": [{"role": "user", "content": "tool-call"}]})
     assert kind(exporter, "tool")[0].status.status_code.name == "ERROR"
+    assert all(s.status.status_code.name == "ERROR" for s in kind(exporter, "agent"))
 
 
 def test_always_off_sampler_has_no_spans_or_retained_payload(monkeypatch):

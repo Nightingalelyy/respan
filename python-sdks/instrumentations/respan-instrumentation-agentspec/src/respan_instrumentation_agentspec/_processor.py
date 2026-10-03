@@ -230,12 +230,14 @@ def make_processor(base, *, provider, **kwargs):
             policy = self._policies.get(span.id)
             if policy is not None:
                 policy["capture"] = policy["capture"] and _should_send_prompts()
-                if isinstance(sys.exception(), CancelledError) and not any(
+                if isinstance(sys.exception(), (Exception, CancelledError)) and not any(
                     type(event).__name__
                     in {
                         "LlmGenerationResponse",
                         "AgentExecutionEnd",
                         "FlowExecutionEnd",
+                        "ToolExecutionResponse",
+                        "NodeExecutionEnd",
                     }
                     for event in span.events
                 ):
