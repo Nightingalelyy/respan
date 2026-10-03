@@ -248,8 +248,9 @@ def install_compatibility(delegate: Any) -> list[tuple[Any, str, Any, Any]]:
                     and vectors
                 ):
                     captured[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = _json(vectors)
-                context = trace.get_current_span().get_span_context()
-                if context.is_valid and captured and _should_send_prompts():
+                current_span = trace.get_current_span()
+                context = current_span.get_span_context()
+                if current_span.is_recording() and captured and _should_send_prompts():
                     _EMBEDDINGS[(context.trace_id, context.span_id)] = captured
                 metadata = result.get("meta")
                 usage = metadata.get("usage", {}) if isinstance(metadata, dict) else {}

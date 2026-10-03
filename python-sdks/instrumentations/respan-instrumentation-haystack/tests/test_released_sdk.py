@@ -449,3 +449,16 @@ def test_released_partial_compatibility_install_rolls_back(runtime, monkeypatch)
     assert _wrappers._set_component_runner_response_attributes is response
     assert _wrappers._ComponentRunWrapper.__call__ is sync
     assert HaystackInstrumentor._owner is None
+
+
+def test_released_unsampled_embeddings_do_not_retain_vector_cache(runtime):
+    from opentelemetry.sdk.trace.sampling import ALWAYS_OFF
+    from respan_instrumentation_haystack._compat import _EMBEDDINGS
+
+    activate, exporter = runtime
+    trace.get_tracer_provider().sampler = ALWAYS_OFF
+    activate()
+    for _ in range(3):
+        assert len(LocalTextEmbedder().run("dropped fixture")["embedding"]) == 128
+    assert not exporter.get_finished_spans()
+    assert not _EMBEDDINGS
