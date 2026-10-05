@@ -105,10 +105,9 @@ def response_attributes(response, *, embedding=False):
         return attrs
     messages = response_messages(response)
     attrs = {}
-    if messages:
-        attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = json_dumps(
-            response_values(response)
-        )
+    values = response_values(response)
+    if values:
+        attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = json_dumps(values)
     for index, message in enumerate(messages):
         for key in ("role", "content", "tool_calls"):
             if key in message:

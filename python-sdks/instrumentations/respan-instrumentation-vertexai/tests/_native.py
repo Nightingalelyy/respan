@@ -102,6 +102,10 @@ class NativeRuntime:
         text = self.text(request)
         if "failure" in text:
             ctx.abort(grpc.StatusCode.UNAVAILABLE, "controlled provider failure")
+        if "blocked" in text:
+            return GenerateContentResponse(
+                {"prompt_feedback": {"block_reason": "SAFETY"}}
+            )
         return self.response(
             tool="weather" in text
             and not any(

@@ -777,3 +777,18 @@ def test_full_native_request_config_safety_tools_and_labels(runtime):
     assert value["safety_settings"][0]["threshold"] == "BLOCK_NONE"
     assert value["labels"] == {"controlled": "value"}
     assert len(r.requests) == 1 and r.requests[0].generation_config.top_p == 0.25
+
+
+def test_native_blocked_prompt_feedback_is_preserved_without_invented_completion(
+    runtime,
+):
+    r, _, e, _ = runtime
+    response = r.model().generate_content("blocked")
+    assert not response.candidates and len(r.requests) == 1
+    span = e.get_finished_spans()[0]
+    assert (
+        json.loads(span.attributes[OUTPUT])[0]["prompt_feedback"]["block_reason"]
+        == "SAFETY"
+    )
+    assert "gen_ai.completion.0.content" not in span.attributes
+    assert "gen_ai.usage.input_tokens" not in span.attributes
