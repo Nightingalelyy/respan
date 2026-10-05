@@ -248,7 +248,8 @@ def test_ambient_and_supplied_privacy_are_combined_and_late_denial_scrubs(pipeli
         span.capture_output("later private output")
     finished = exporter.get_finished_spans()[0]
     assert "private" not in finished.to_json()
-    assert finished.status.description == "RuntimeError"
+    assert finished.status.description is None
+    assert "error.message" not in finished.attributes
     assert not finished.events
 
 
@@ -400,7 +401,8 @@ def test_late_environment_veto_scrubs_metadata_and_diagnostics(pipeline, monkeyp
         monkeypatch.setenv("TRACELOOP_TRACE_CONTENT", "false")
     finished = exporter.get_finished_spans()[0]
     assert "private" not in finished.to_json()
-    assert finished.status.description == "RuntimeError"
+    assert finished.status.description is None
+    assert "error.message" not in finished.attributes
     assert not finished.events
 
 
@@ -559,3 +561,103 @@ def test_baggage_does_not_invoke_numeric_subclass_hooks():
             raise AssertionError("customer hook invoked")
 
     assert safe_baggage_value("respan.metadata.value", Number(1)) == '{"type":"Number"}'
+
+
+@pytest.mark.asyncio
+async def test_released_native_failure_has_diagnostics_without_result(pipeline):
+    from opentelemetry.semconv._incubating.attributes.error_attributes import (
+        ERROR_MESSAGE,
+    )
+    from opentelemetry.semconv.attributes.error_attributes import ERROR_TYPE
+
+    provider, exporter = pipeline
+    error = RuntimeError("native failure")
+    with pytest.raises(RuntimeError) as caught:
+        await (
+            interceptor(provider)
+            .intercept_client(Transport(error=error))
+            .query_workflow(query())
+        )
+    assert caught.value is error
+    span = exporter.get_finished_spans()[0]
+    assert OUTPUT not in span.attributes
+    assert span.status.status_code is trace.StatusCode.ERROR
+    assert span.attributes[ERROR_TYPE] == "RuntimeError"
+    assert span.attributes[ERROR_MESSAGE] == "native failure"
+
+
+def test_error_keeps_only_previously_captured_native_result(pipeline):
+    provider, exporter = pipeline
+    span = interceptor(provider).tracer.start_span("RunActivity:actual")
+    span.capture_output({"native": [False, 0]})
+    span.record_exception(RuntimeError("native diagnostic"))
+    span.end()
+    assert json.loads(exporter.get_finished_spans()[0].attributes[OUTPUT]) == {
+        "native": [False, 0]
+    }
+
+
+@pytest.mark.asyncio
+async def test_native_private_error_has_type_without_message_or_result(pipeline):
+    from opentelemetry.semconv._incubating.attributes.error_attributes import (
+        ERROR_MESSAGE,
+    )
+    from opentelemetry.semconv.attributes.error_attributes import ERROR_TYPE
+
+    provider, exporter = pipeline
+    error = RuntimeError("private error message")
+    native = interceptor(provider, capture_content=False)
+    active = native.tracer.start_span("RunActivity:private")
+    active.record_exception(error)
+    assert active.status.description is None
+    assert ERROR_MESSAGE not in active.attributes
+    assert OUTPUT not in active.attributes
+    assert active.attributes[ERROR_TYPE] == "RuntimeError"
+    active.end()
+    with pytest.raises(RuntimeError) as caught:
+        await native.intercept_client(Transport(error=error)).query_workflow(query())
+    assert caught.value is error
+    span = exporter.get_finished_spans()[-1]
+    assert OUTPUT not in span.attributes
+    assert ERROR_MESSAGE not in span.attributes
+    assert span.status.description is None
+    assert span.status.status_code is trace.StatusCode.ERROR
+    assert span.attributes[ERROR_TYPE] == "RuntimeError"
+
+
+def test_direct_owned_error_message_is_scrubbed_on_late_veto(pipeline):
+    from opentelemetry.semconv._incubating.attributes.error_attributes import (
+        ERROR_MESSAGE,
+    )
+
+    provider, exporter = pipeline
+    span = interceptor(provider).tracer.start_span("RunActivity:actual")
+    span.set_attribute(ERROR_MESSAGE, "private direct diagnostic")
+    token = context.attach(context.set_value(ENABLE_CONTENT_TRACING_KEY, False))
+    try:
+        span.end()
+    finally:
+        context.detach(token)
+    assert ERROR_MESSAGE not in exporter.get_finished_spans()[0].attributes
+
+
+def test_bare_native_error_status_has_no_invented_message_type_or_output(pipeline):
+    from opentelemetry.semconv._incubating.attributes.error_attributes import (
+        ERROR_MESSAGE,
+    )
+    from opentelemetry.semconv.attributes.error_attributes import ERROR_TYPE
+
+    provider, exporter = pipeline
+    span = interceptor(provider).tracer.start_span("RunActivity:actual")
+    span.set_status(trace.Status(trace.StatusCode.ERROR))
+    assert span.status.description is None
+    assert ERROR_MESSAGE not in span.attributes
+    assert ERROR_TYPE not in span.attributes
+    assert OUTPUT not in span.attributes
+    span.end()
+    finished = exporter.get_finished_spans()[0]
+    assert finished.status.status_code is trace.StatusCode.ERROR
+    assert finished.status.description is None
+    assert ERROR_MESSAGE not in finished.attributes
+    assert ERROR_TYPE not in finished.attributes
+    assert OUTPUT not in finished.attributes

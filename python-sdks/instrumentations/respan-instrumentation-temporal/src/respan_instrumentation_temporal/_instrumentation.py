@@ -17,6 +17,8 @@ from weakref import WeakKeyDictionary
 from opentelemetry import baggage, trace
 from opentelemetry import context as otel_context
 from opentelemetry.sdk.trace import SpanProcessor
+from opentelemetry.semconv._incubating.attributes.error_attributes import ERROR_MESSAGE
+from opentelemetry.semconv.attributes.error_attributes import ERROR_TYPE
 from opentelemetry.semconv_ai import (
     SUPPRESS_LANGUAGE_MODEL_INSTRUMENTATION_KEY,
     SpanAttributes,
@@ -364,6 +366,7 @@ class _CanonicalSpanProxy(trace.Span):
         self._scrubbed = False
         self._owned_content: set[str] = set()
         self._error_type = None
+        self._error_message: str | None = None
         self._decision = _attempt(lambda: _decision(span)) or _PrivacyDecision(
             capture_content, contexts, self._parents
         )
@@ -408,14 +411,7 @@ class _CanonicalSpanProxy(trace.Span):
                     lambda key=key, value=value: self._span.set_attribute(key, value)
                 )
         if self._has_error:
-            self._error(self._error_type or "Exception")
-        else:
-            _attempt(
-                lambda: self._span.set_attribute(
-                    SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
-                    _json_dumps({"content_captured": False}),
-                )
-            )
+            self._error(None)
 
     def capture_baggage(self, attrs: dict[str, Any]) -> None:
         if self.is_recording() and self.allowed():
@@ -436,6 +432,7 @@ class _CanonicalSpanProxy(trace.Span):
 
     def capture_output(self, value: Any) -> None:
         if self.is_recording() and self.allowed():
+            self._owned_content.add(SpanAttributes.TRACELOOP_ENTITY_OUTPUT)
             _attempt(
                 lambda: self._span.set_attribute(
                     SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
@@ -443,22 +440,30 @@ class _CanonicalSpanProxy(trace.Span):
                 )
             )
 
-    def _error(self, message: str) -> None:
-        _attempt(lambda: self._span.set_status(Status(StatusCode.ERROR, message)))
-        _attempt(lambda: self._span.set_attribute("error.message", message))
-        _attempt(
-            lambda: self._span.set_attribute(
-                SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
-                _json_dumps(
-                    {
-                        "error": self._error_type,
-                        "message": message,
-                        "content_captured": not self._denied,
-                    },
-                    max_chars=self._max_attribute_chars,
-                ),
+    def _error(self, message: str | None) -> None:
+        if self._denied:
+            self._error_message = None
+            _attempt(lambda: self._span.set_status(Status(StatusCode.ERROR)))
+            attributes = getattr(self._span, "_attributes", None)
+            if attributes is not None:
+                _attempt(lambda: attributes.pop(ERROR_MESSAGE, None))
+        else:
+            if message is not None:
+                self._error_message = message
+            _attempt(
+                lambda: self._span.set_status(
+                    Status(StatusCode.ERROR, self._error_message)
+                )
             )
-        )
+            if self._error_message is not None:
+                self._owned_content.add(ERROR_MESSAGE)
+                _attempt(
+                    lambda: self._span.set_attribute(ERROR_MESSAGE, self._error_message)
+                )
+        if self._error_type:
+            _attempt(lambda: self._span.set_attribute(ERROR_TYPE, self._error_type))
+        # Exceptions are diagnostics, never a successful native operation result.
+        # Preserve a previously captured actual result only while privacy permits.
 
     def record_exception(
         self, exception: BaseException, *args: Any, **kwargs: Any
@@ -474,13 +479,17 @@ class _CanonicalSpanProxy(trace.Span):
         code = getattr(status, "status_code", status)
         if code == StatusCode.ERROR:
             self._has_error = True
-            self._error_type = self._error_type or "Exception"
-            message = getattr(status, "description", description) or self._error_type
-            self._error(
-                safe_error_message(
-                    RuntimeError(message), capture_content=self.allowed()
+            native_description = getattr(status, "description", description)
+            message = None
+            if self.allowed() and type(native_description) is str:
+                message = (
+                    safe_error_message(
+                        RuntimeError(native_description), capture_content=True
+                    )
+                    if native_description
+                    else ""
                 )
-            )
+            self._error(message)
         else:
             _attempt(lambda: self._span.set_status(status, description))
 
@@ -494,8 +503,11 @@ class _CanonicalSpanProxy(trace.Span):
                 _attempt(
                     lambda key=key, value=value: self._span.set_attribute(key, value)
                 )
-        elif key == "error.message":
+        elif key == ERROR_MESSAGE:
+            self._owned_content.add(ERROR_MESSAGE)
             if self.allowed():
+                if type(value) is str:
+                    self._error_message = value
                 _attempt(
                     lambda key=key, value=value: self._span.set_attribute(key, value)
                 )

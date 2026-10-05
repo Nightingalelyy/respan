@@ -123,6 +123,16 @@ async def test_native_sandbox_activity_signal_query_cancel_and_replay(mode):
                     == payload
                     for s in echo_spans
                 )
+                failures = [
+                    s
+                    for s in spans
+                    if s.name in ("RunActivity:fail", "CompleteWorkflow:Failure")
+                ]
+                assert len(failures) == 2
+                assert all(
+                    SpanAttributes.TRACELOOP_ENTITY_OUTPUT not in s.attributes
+                    for s in failures
+                )
                 by_name = {s.name: s for s in spans}
                 assert (
                     by_name["RunActivity:echo"].parent.span_id
