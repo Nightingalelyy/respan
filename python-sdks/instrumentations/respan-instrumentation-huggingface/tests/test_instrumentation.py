@@ -805,3 +805,19 @@ def test_native_success_and_unconsumed_abandonment_status(pipeline, recorded):
     assert span.status.status_code.name == "UNSET"
     assert AI.TRACELOOP_ENTITY_INPUT not in span.attributes
     assert AI.TRACELOOP_ENTITY_OUTPUT not in span.attributes
+
+
+@pytest.mark.parametrize(
+    "authorization",
+    [
+        'Bearer "P13_CONTROLLED_QUOTED_CREDENTIAL"',
+        "Basic 'P13_CONTROLLED_QUOTED_CREDENTIAL'",
+    ],
+)
+def test_native_quoted_authorization_credentials(pipeline, recorded, authorization):
+    prompt = json.dumps({"note": "Authorization: " + authorization})
+    response = invoke(pipeline, prompt)
+    assert response[0]["generated_text"].startswith(prompt)
+    value = attrs(recorded[1])
+    assert "P13_CONTROLLED_QUOTED_CREDENTIAL" not in json.dumps(value)
+    assert redact_text(redact_text(prompt)) == redact_text(prompt)
