@@ -47,31 +47,31 @@
             {
               "description": "Find recent traces",
               "prompt": "Show my 5 most recent traces in Respan from the last 30 days.",
-              "tools_triggered": "list_traces",
+              "tools_triggered": "trace_list",
               "expected_behavior": "Lists up to five recent traces from the test workspace with each trace's name, duration, span count and cost."
             },
             {
               "description": "Explain a trace step by step",
               "prompt": "Find my most recent demo.northwind trace in Respan from the last 30 days and explain what each agent did.",
-              "tools_triggered": "list_traces, get_trace_tree",
+              "tools_triggered": "trace_list, trace_get",
               "expected_behavior": "Opens a demo.northwind trace and walks through the triage, identity, knowledge and notification agents in order, naming the tool each one called (classify_ticket, reset_access, rag_search, send_notification)."
             },
             {
               "description": "List prompts",
               "prompt": "List the prompts in my Respan workspace.",
-              "tools_triggered": "list_prompts",
+              "tools_triggered": "prompt_list",
               "expected_behavior": "Lists the workspace's prompts, including the three 'Demo prompt' entries, without inventing prompts that are not there."
             },
             {
               "description": "Read a dataset",
               "prompt": "What's in my Respan dataset 'Demo dataset 1: support messages'? Show me three entries.",
-              "tools_triggered": "list_datasets, list_dataset_logs",
+              "tools_triggered": "dataset_list, dataset_logs_list",
               "expected_behavior": "Finds the dataset by name and shows three of its entries with their input and output."
             },
             {
               "description": "Create a prompt after confirmation",
               "prompt": "Create a new Respan prompt called 'Reviewer greeting' that greets a customer by their first name.",
-              "tools_triggered": "create_prompt, create_prompt_version",
+              "tools_triggered": "prompt_create, prompt_draft_init",
               "expected_behavior": "Asks the user to confirm, then creates the prompt with a draft version that uses a first-name variable, and returns the new prompt's name and ID."
             }
           ],

@@ -41,8 +41,9 @@ Before the first submission:
 1. **OpenAI org.** The submitter needs the Owner role (or a role with
    *Apps Management: Write*), and the organization must be verified in
    platform.openai.com → Settings → Organization.
-2. **MCP server.** `respanai/respan-mcp#24` must be deployed. It adds the tool
-   annotations OpenAI requires and the domain-verification endpoint.
+2. **MCP server.** `respanai/respan-mcp#25` must be deployed, so the tool names
+   in the test cases exist (#24, already deployed, added the tool annotations
+   OpenAI requires and the domain-verification endpoint).
 3. **Reviewer account.** Create an email-and-password Respan login in the
    *Respan Demo* organization with no MFA. It goes in the dashboard's
    **Review details**, never in this package.
@@ -72,7 +73,8 @@ resubmitting. Listing, skill, or test-case changes need a new ZIP and review.
 
 ## Keeping the test cases current
 
-The positive test cases name the MCP tools they expect (`tools_triggered`).
-If the server's tools are renamed — for example when `respanai/respan-mcp#23`
-replaces `list_traces` / `get_trace_tree` with `trace_list` / `trace_get` —
-update those names here before the next submission.
+The positive test cases name the MCP tools they expect (`tools_triggered`),
+using the server's current names (the same `noun_verb` names the in-product
+agent uses, such as `trace_list` and `prompt_create`). If a tool is renamed or
+removed on `mcp.respan.ai`, update those names here before the next
+submission.
