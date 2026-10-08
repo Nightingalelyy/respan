@@ -100,6 +100,72 @@ def test_full_vectors_and_history_native_result(runtime):
     )  # native options did not request it
 
 
+def test_actual_native_query_uuid_value(runtime):
+    from weaviate.util import _WeaviateUUIDInt
+
+    result = runtime[2].query.fetch_objects(include_vector=True, limit=3)
+    assert type(result.objects[0].uuid) is _WeaviateUUIDInt
+    expected = uuid.UUID.__str__(
+        uuid.UUID(int=uuid.UUID.int.__get__(result.objects[0].uuid, uuid.UUID))
+    )
+    output = json.loads(last(runtime).attributes[OUTPUT])
+    assert output["objects"][0]["uuid"] == expected
+    assert expected == "00000000-0000-0000-0000-000000000000"
+
+
+def test_native_uuid_and_opaque_subclass_metadata_no_customer_hooks(
+    runtime, monkeypatch
+):
+    from respan_tracing.utils.span_factory import _PROPAGATED_ATTRIBUTES
+    from weaviate.util import _WeaviateUUIDInt
+
+    hooks = []
+
+    def getter(self, name):
+        hooks.append("native-getter")
+        return object.__getattribute__(self, name)
+
+    def stringify(self):
+        hooks.append("native-str")
+        return "unexpected customer string"
+
+    class OpaqueUUID(uuid.UUID):
+        def __getattribute__(self, name):
+            hooks.append("opaque-getter")
+            raise AssertionError(name)
+
+        def __str__(self):
+            hooks.append("opaque-str")
+            raise AssertionError("str")
+
+    native_value = _WeaviateUUIDInt(0)
+    opaque_value = OpaqueUUID(int=1)
+    monkeypatch.setattr(_WeaviateUUIDInt, "__getattribute__", getter)
+    monkeypatch.setattr(_WeaviateUUIDInt, "__str__", stringify)
+    runtime[5].deactivate()
+    bare = runtime[2].query.fetch_objects(include_vector=True, limit=3)
+    assert type(bare.objects[0].uuid) is _WeaviateUUIDInt and not hooks
+    runtime[5].activate(tracer_provider=runtime[3])
+    token = _PROPAGATED_ATTRIBUTES.set(
+        {"metadata": {"native_uuid": native_value, "opaque_uuid": opaque_value}}
+    )
+    try:
+        actual = runtime[2].query.fetch_objects(include_vector=True, limit=3)
+    finally:
+        _PROPAGATED_ATTRIBUTES.reset(token)
+    assert type(actual.objects[0].uuid) is _WeaviateUUIDInt and not hooks
+    output = json.loads(last(runtime).attributes[OUTPUT])
+    assert output["objects"][0]["uuid"] == "00000000-0000-0000-0000-000000000000"
+    assert (
+        last(runtime).attributes["respan.metadata.native_uuid"]
+        == "00000000-0000-0000-0000-000000000000"
+    )
+    assert json.loads(last(runtime).attributes["respan.metadata.opaque_uuid"]) == {
+        "type": "OpaqueUUID"
+    }
+    assert to_jsonable(opaque_value) == {"type": "OpaqueUUID"} and not hooks
+
+
 @pytest.mark.parametrize(
     "method",
     ["insert", "insert_many", "update", "replace", "delete_by_id", "exists", "ingest"],

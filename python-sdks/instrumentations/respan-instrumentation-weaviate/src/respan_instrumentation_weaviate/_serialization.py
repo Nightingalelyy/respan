@@ -14,6 +14,8 @@ import uuid
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from weaviate.util import _WeaviateUUIDInt
+
 MAX_DEPTH = 64
 MAX_STRING_BYTES = 4_000
 REDACTED = "[REDACTED]"
@@ -145,6 +147,7 @@ def sensitive_key(value):
 
 
 _NATIVE_TYPES = ()
+_UUID_INT = uuid.UUID.__dict__["int"]
 
 
 def register_native_types():
@@ -184,6 +187,18 @@ def to_jsonable(
     kind = type(value)
     if kind is uuid.UUID:
         return uuid.UUID.__str__(value)
+    if kind is _WeaviateUUIDInt:
+        lineage = type.__dict__["__mro__"].__get__(kind)
+        if (
+            len(lineage) == 3
+            and lineage[0] is _WeaviateUUIDInt
+            and lineage[1] is uuid.UUID
+            and lineage[2] is object
+        ):
+            raw = _UUID_INT.__get__(value, uuid.UUID)
+            if type(raw) is int and 0 <= raw < 1 << 128:
+                return uuid.UUID.__str__(uuid.UUID(int=raw))
+        return {"type": _type_name(value)}
     if kind is datetime.datetime:
         return datetime.datetime.isoformat(value)
     if kind is datetime.date:
