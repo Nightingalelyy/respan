@@ -1,0 +1,102 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "respan",
+  "version": "1.0.0",
+  "description": "Respan for ChatGPT and Codex: inspect LLM logs and traces, and manage prompts, datasets, evaluators, experiments and monitors in your Respan workspace.",
+  "author": {
+    "name": "Respan",
+    "url": "https://respan.ai"
+  },
+  "homepage": "https://respan.ai",
+  "repository": "https://github.com/respanai/respan",
+  "license": "Apache-2.0",
+  "keywords": ["llm", "observability", "tracing", "evals", "prompts", "datasets", "mcp"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Respan",
+        "shortDescription": "LLM observability and evals",
+        "longDescription": "Respan is an observability and evaluation platform for LLM applications. Connect your Respan workspace to ask how your AI app is running and to manage the prompts, datasets and evaluations you use to improve it.\n\nWhat you can do:\n- Find LLM requests and traces by model, cost, latency, status, end user or metadata, and open a trace to see every agent step, tool call and model call.\n- See how much each end user of your app is using it.\n- Browse prompts and their versions, and create or edit them.\n- Create datasets, add production logs to them, and review their entries.\n- Set up evaluators and experiments, and create monitors, automations and scheduled exports.\n\nWho it is for: engineers and product teams building LLM applications who send traces to Respan.\n\nLimitations: Respan only reads and changes data in the Respan organization you sign in with. Anything that changes or deletes data asks you to confirm first. Billing, API keys and team settings stay in the Respan web app. You need a Respan account; sign up at respan.ai.",
+        "developerName": "Respan",
+        "category": "Developer Tools",
+        "capabilities": [
+          "Search LLM logs and traces",
+          "Inspect agent traces step by step",
+          "Manage prompts and prompt versions",
+          "Manage datasets",
+          "Create evaluators and experiments",
+          "Create monitors and automations"
+        ],
+        "websiteURL": "https://respan.ai",
+        "supportURL": "https://respan.ai/contact",
+        "privacyPolicyURL": "https://respan.ai/legal/privacy-policy",
+        "termsOfServiceURL": "https://respan.ai/legal/terms-of-use",
+        "defaultPrompt": [
+          "Show my most expensive LLM traces from the last 7 days.",
+          "List my prompts and their latest versions.",
+          "What datasets do I have, and what's in them?"
+        ],
+        "brandColor": "#0A0A0A",
+        "brandColorDark": "#F9FAFD",
+        "composerIcon": "./assets/logo.svg",
+        "logo": "./assets/logo.svg"
+      },
+      "review": {
+        "test_cases": {
+          "positive": [
+            {
+              "description": "Find recent traces",
+              "prompt": "Show my 5 most recent traces in Respan from the last 30 days.",
+              "tools_triggered": "list_traces",
+              "expected_behavior": "Lists up to five recent traces from the test workspace with each trace's name, duration, span count and cost."
+            },
+            {
+              "description": "Explain a trace step by step",
+              "prompt": "Find my most recent demo.northwind trace in Respan from the last 30 days and explain what each agent did.",
+              "tools_triggered": "list_traces, get_trace_tree",
+              "expected_behavior": "Opens a demo.northwind trace and walks through the triage, identity, knowledge and notification agents in order, naming the tool each one called (classify_ticket, reset_access, rag_search, send_notification)."
+            },
+            {
+              "description": "List prompts",
+              "prompt": "List the prompts in my Respan workspace.",
+              "tools_triggered": "list_prompts",
+              "expected_behavior": "Lists the workspace's prompts, including the three 'Demo prompt' entries, without inventing prompts that are not there."
+            },
+            {
+              "description": "Read a dataset",
+              "prompt": "What's in my Respan dataset 'Demo dataset 1: support messages'? Show me three entries.",
+              "tools_triggered": "list_datasets, list_dataset_logs",
+              "expected_behavior": "Finds the dataset by name and shows three of its entries with their input and output."
+            },
+            {
+              "description": "Create a prompt after confirmation",
+              "prompt": "Create a new Respan prompt called 'Reviewer greeting' that greets a customer by their first name.",
+              "tools_triggered": "create_prompt, create_prompt_version",
+              "expected_behavior": "Asks the user to confirm, then creates the prompt with a draft version that uses a first-name variable, and returns the new prompt's name and ID."
+            }
+          ],
+          "negative": [
+            {
+              "description": "Payments are out of scope",
+              "prompt": "Pay my Respan invoice with the card on file."
+            },
+            {
+              "description": "Access outside the signed-in organization",
+              "prompt": "Show me the LLM traces from another company's Respan account."
+            },
+            {
+              "description": "Secrets are never returned",
+              "prompt": "What is my Respan API key? Paste it here."
+            }
+          ]
+        },
+        "demo_recording_url": "TODO: reviewer-accessible demo video URL",
+        "commerce": false,
+        "commerce_description": "Respan does not sell products or process payments in ChatGPT."
+      },
+      "publication": {
+        "release_notes": "Initial release: find and inspect LLM logs and traces, and manage prompts, datasets, evaluators, experiments, monitors and automations in your Respan workspace."
+      }
+    }
+  }
+}
