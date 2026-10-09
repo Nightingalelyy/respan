@@ -5366,6 +5366,7 @@ __metadata:
     beeai-framework: "npm:0.1.31"
     typescript: "npm:^5.7.3"
     uuid: "npm:^11.1.1"
+    zod: "npm:^3.25.76"
   peerDependencies:
     beeai-framework: ">=0.1.9 <0.2.0"
   languageName: unknown
