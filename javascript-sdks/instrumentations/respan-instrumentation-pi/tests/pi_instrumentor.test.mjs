@@ -11,7 +11,10 @@ import {
 } from "@opentelemetry/semantic-conventions/incubating";
 import { propagateAttributes } from "@respan/tracing";
 // Internal module on purpose: asserts the name the platform actually displays.
-import { semanticSpanNameForSpan } from "@respan/tracing/dist/processor/spanName.js";
+import {
+  semanticSpanNameForSpan,
+  transformReadableSpanName,
+} from "@respan/tracing/dist/processor/spanName.js";
 
 import {
   PiInstrumentor,
@@ -403,8 +406,16 @@ test("steers: user messages delivered into a running turn become steer spans and
   assert.equal(steers[0].name, "pi.turn-2.steer");
   // What the platform shows after the exporter's semantic renaming.
   assert.equal(semanticSpanNameForSpan(agent), "agent.turn-1");
-  assert.equal(semanticSpanNameForSpan(steers[0]), "steer.turn-2");
-  assert.equal(semanticSpanNameForSpan(steers[1]), "steer.turn-3");
+  assert.equal(semanticSpanNameForSpan(steers[0]), "task");
+  assert.equal(
+    transformReadableSpanName(steers[0], "legacy").name,
+    "pi.turn-2.steer",
+  );
+  assert.equal(semanticSpanNameForSpan(steers[1]), "task");
+  assert.equal(
+    transformReadableSpanName(steers[1], "legacy").name,
+    "pi.turn-3.steer",
+  );
   assert.equal(metadata(steers[0])["turn_number"], 2);
   assert.equal(metadata(steers[0])["delivered_after"], "tool_results");
   assert.deepEqual(JSON.parse(steers[0].attributes["traceloop.entity.input"]), [
