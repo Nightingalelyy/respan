@@ -184,7 +184,13 @@ export function translateOpenInferenceSpan(span: ReadableSpan): void {
   const lanes = captureLanes(span);
   const canonical: Attributes = {};
   const put = (key: string, value: unknown) => {
-    if (value !== undefined) canonical[key] = value;
+    if (value === undefined) return;
+    // A native adapter may already have normalized richer canonical values.
+    const existing = safeDescriptorValue(span.attributes, key);
+    canonical[key] =
+      existing !== undefined && key !== RespanSpanAttributes.RESPAN_METADATA
+        ? existing
+        : value;
   };
   put(
     RespanSpanAttributes.RESPAN_LOG_TYPE,
@@ -369,8 +375,8 @@ export function translateOpenInferenceSpan(span: ReadableSpan): void {
   }
   if (lanes.inputs && lanes.outputs) {
     const metadata = {
-      ...record(raw[RespanSpanAttributes.RESPAN_METADATA]),
       ...record(raw[SemanticConventions.METADATA]),
+      ...record(raw[RespanSpanAttributes.RESPAN_METADATA]),
     };
     if (!llm && definitions !== undefined) metadata.tools = definitions;
     const tokenDetails: Attributes = {};
@@ -407,9 +413,11 @@ export function translateOpenInferenceSpan(span: ReadableSpan): void {
     [ATTR_GEN_AI_COMPLETION, outputMessages],
   ] as const)
     values.forEach((message, index) => {
-      for (const [key, value] of Object.entries(message))
-        attrs[`${prefix}.${index}.${key}`] =
-          typeof value === "object" ? json(value) : value;
+      for (const [key, value] of Object.entries(message)) {
+        const target = `${prefix}.${index}.${key}`;
+        if (safeDescriptorValue(attrs, target) === undefined)
+          attrs[target] = typeof value === "object" ? json(value) : value;
+      }
     });
 }
 function vendorKey(key: string): boolean {

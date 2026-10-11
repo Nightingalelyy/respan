@@ -1,13 +1,11 @@
 import assert from "node:assert/strict";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createRequire } from "node:module";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import { context, ROOT_CONTEXT, trace } from "@opentelemetry/api";
-import {
-  BasicTracerProvider,
-  InMemorySpanExporter,
-  SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+import { InMemorySpanExporter } from "@opentelemetry/sdk-trace-base";
 import { BeeAIInstrumentation as OpenInferenceBeeAIInstrumentation } from "@arizeai/openinference-instrumentation-beeai";
 import * as beeaiFramework from "beeai-framework";
 import { ToolCallingAgent } from "beeai-framework/agents/toolCalling/agent";
@@ -18,6 +16,14 @@ import { UnconstrainedMemory } from "beeai-framework/memory/unconstrainedMemory"
 import { CalculatorTool } from "beeai-framework/tools/calculator";
 
 import { BeeAIInstrumentor } from "../dist/index.js";
+
+const require = createRequire(import.meta.url);
+const requireOpenInference = createRequire(
+  require.resolve("@respan/instrumentation-openinference"),
+);
+const { RespanTelemetry, registerSpanTransformer } = await import(
+  pathToFileURL(requireOpenInference.resolve("@respan/tracing")).href
+);
 
 class TestAsyncLocalContextManager {
   storage = new AsyncLocalStorage();
@@ -67,27 +73,33 @@ function getParentSpanId(span) {
 test("real Arize BeeAI spans retain chat data and one complete ToolCallingAgent tree", async () => {
   const exporter = new InMemorySpanExporter();
   const onStartSnapshots = [];
-  const startAuditProcessor = {
+  const nativeSpans = [];
+  const contextManager = new TestAsyncLocalContextManager();
+  resetGlobalTelemetry();
+  const telemetry = new RespanTelemetry({
+    apiKey: "local-fixture-only",
+    exporter,
+    contextManager,
+    disableBatch: true,
+    spanNameStyle: "legacy",
+    silenceInitializationMessage: true,
+  });
+  await telemetry.initialize();
+  assert.equal(telemetry.isInitialized(), true);
+  const nativeAudit = registerSpanTransformer("test:beeai-native-audit", {
     onStart(span) {
       onStartSnapshots.push({
         name: span.name,
         attributes: { ...span.attributes },
       });
     },
-    onEnd() {},
-    async forceFlush() {},
-    async shutdown() {},
-  };
-  const provider = new BasicTracerProvider({
-    spanProcessors: [
-      startAuditProcessor,
-      new SimpleSpanProcessor(exporter),
-    ],
+    onEnd(span) {
+      nativeSpans.push(span);
+    },
   });
+  const provider = trace.getTracerProvider().getDelegate();
   const activeSpanProcessor = provider._activeSpanProcessor;
   const originalProcessorOnEnd = activeSpanProcessor.onEnd;
-  const contextManager = new TestAsyncLocalContextManager();
-  resetGlobalTelemetry(provider, contextManager);
 
   const instrumentor = new BeeAIInstrumentor({
     sdkModule: beeaiFramework,
@@ -100,18 +112,19 @@ test("real Arize BeeAI spans retain chat data and one complete ToolCallingAgent 
     const prompt = "Explain why tracing helps debugging.";
     const answer = "Tracing preserves each step and value.";
     const model = new DummyChatModel("gpt-4o-mini");
-    model._create = async () => new ChatModelOutput(
-      [new AssistantMessage(answer)],
-      { promptTokens: 11, completionTokens: 7, totalTokens: 18 },
-      "stop",
-    );
+    model._create = async () =>
+      new ChatModelOutput(
+        [new AssistantMessage(answer)],
+        { promptTokens: 11, completionTokens: 7, totalTokens: 18 },
+        "stop",
+      );
 
     const response = await model.create({
       messages: [new UserMessage(prompt)],
     });
     assert.equal(response.getTextContent(), answer);
 
-    await provider.forceFlush();
+    await telemetry.flush();
 
     const startSnapshot = onStartSnapshots.find((span) =>
       span.name.startsWith("backend.dummy.chat.start"),
@@ -120,10 +133,14 @@ test("real Arize BeeAI spans retain chat data and one complete ToolCallingAgent 
     assert.equal(startSnapshot.attributes.target, undefined);
     assert.equal(startSnapshot.attributes["input.value"], undefined);
 
-    const successSpan = exporter.getFinishedSpans().find((span) =>
-      span.attributes["respan.entity.log_type"] === "chat" &&
-      span.attributes["traceloop.entity.name"] === "backend.dummy.chat.success",
-    );
+    const successSpan = exporter
+      .getFinishedSpans()
+      .find(
+        (span) =>
+          span.attributes["respan.entity.log_type"] === "chat" &&
+          span.attributes["traceloop.entity.name"] ===
+            "backend.dummy.chat.success",
+      );
     assert.ok(successSpan, "expected the translated BeeAI chat success span");
 
     const attrs = successSpan.attributes;
@@ -161,26 +178,31 @@ test("real Arize BeeAI spans retain chat data and one complete ToolCallingAgent 
       "llm.token_count.total",
       "metadata.model_name",
     ]) {
-      assert.equal(attrs[rawAttribute], undefined, `exported raw ${rawAttribute}`);
+      assert.equal(
+        attrs[rawAttribute],
+        undefined,
+        `exported raw ${rawAttribute}`,
+      );
     }
 
     let agentModelCall = 0;
     const agentModel = new DummyChatModel("gpt-4o-mini");
     agentModel._create = async () => {
       agentModelCall += 1;
-      const message = agentModelCall === 1
-        ? new AssistantMessage({
-            type: "tool-call",
-            toolCallId: "call-calculator",
-            toolName: "Calculator",
-            args: { expression: "(19 + 23) * 2" },
-          })
-        : new AssistantMessage({
-            type: "tool-call",
-            toolCallId: "call-final-answer",
-            toolName: "final_answer",
-            args: { response: "84" },
-          });
+      const message =
+        agentModelCall === 1
+          ? new AssistantMessage({
+              type: "tool-call",
+              toolCallId: "call-calculator",
+              toolName: "Calculator",
+              args: { expression: "(19 + 23) * 2" },
+            })
+          : new AssistantMessage({
+              type: "tool-call",
+              toolCallId: "call-final-answer",
+              toolName: "final_answer",
+              args: { response: "84" },
+            });
       return new ChatModelOutput(
         [message],
         {
@@ -212,14 +234,15 @@ test("real Arize BeeAI spans retain chat data and one complete ToolCallingAgent 
     );
     assert.equal(agentResult.result.text, "84");
 
-    await provider.forceFlush();
+    await telemetry.flush();
 
     const finishedSpans = exporter.getFinishedSpans();
     const visibleSpans = finishedSpans.filter(
-      (span) => !(
-        Array.isArray(span.attributes["respan.processors"]) &&
-        span.attributes["respan.processors"].length === 0
-      ),
+      (span) =>
+        !(
+          Array.isArray(span.attributes["respan.processors"]) &&
+          span.attributes["respan.processors"].length === 0
+        ),
     );
     const workflowSpan = visibleSpans.find(
       (span) => span.name === "beeai_tool_calling_agent.workflow.workflow",
@@ -227,7 +250,7 @@ test("real Arize BeeAI spans retain chat data and one complete ToolCallingAgent 
     assert.ok(workflowSpan, "expected the enclosing workflow span");
 
     const agentTraceId = workflowSpan.spanContext().traceId;
-    const allAgentTraceSpans = finishedSpans.filter(
+    const allAgentTraceSpans = nativeSpans.filter(
       (span) => span.spanContext().traceId === agentTraceId,
     );
     const agentTraceSpans = visibleSpans.filter(
@@ -241,7 +264,10 @@ test("real Arize BeeAI spans retain chat data and one complete ToolCallingAgent 
     const agentSpan = agentSpans[0];
     assert.equal(agentSpan.name, "beeai-framework-main");
     assert.equal(getParentSpanId(agentSpan), workflowSpan.spanContext().spanId);
-    assert.equal(agentSpan.attributes["traceloop.entity.name"], "ToolCallingAgent");
+    assert.equal(
+      agentSpan.attributes["traceloop.entity.name"],
+      "ToolCallingAgent",
+    );
     const canonicalAgentInput = JSON.parse(
       agentSpan.attributes["traceloop.entity.input"],
     );
@@ -271,18 +297,26 @@ test("real Arize BeeAI spans retain chat data and one complete ToolCallingAgent 
       "beeai.version",
       "traceId",
     ]) {
-      assert.equal(agentSpan.attributes[rawAttribute], undefined, `exported raw ${rawAttribute}`);
+      assert.equal(
+        agentSpan.attributes[rawAttribute],
+        undefined,
+        `exported raw ${rawAttribute}`,
+      );
     }
 
     const agentChildren = agentTraceSpans.filter((span) =>
       ["chat", "tool"].includes(span.attributes["respan.entity.log_type"]),
     );
     assert.equal(
-      agentChildren.filter((span) => span.attributes["respan.entity.log_type"] === "chat").length,
+      agentChildren.filter(
+        (span) => span.attributes["respan.entity.log_type"] === "chat",
+      ).length,
       2,
     );
     assert.equal(
-      agentChildren.filter((span) => span.attributes["respan.entity.log_type"] === "tool").length,
+      agentChildren.filter(
+        (span) => span.attributes["respan.entity.log_type"] === "tool",
+      ).length,
       2,
     );
     for (const child of agentChildren) {
@@ -293,17 +327,20 @@ test("real Arize BeeAI spans retain chat data and one complete ToolCallingAgent 
       );
     }
     assert.equal(
-      agentTraceSpans.filter((span) => span.name.startsWith("agent.toolCalling.")).length,
+      agentTraceSpans.filter((span) =>
+        span.name.startsWith("agent.toolCalling."),
+      ).length,
       0,
       "iteration callbacks must not create duplicate agent spans",
     );
     assert.equal(
-      agentTraceSpans.filter((span) => span.name === "beeai-framework-main").length,
+      agentTraceSpans.filter((span) => span.name === "beeai-framework-main")
+        .length,
       1,
       "the promoted wrapper must be the sole agent boundary",
     );
-    const upstreamSuccessCallbacks = allAgentTraceSpans.filter(
-      (span) => span.name.startsWith("agent.toolCalling.success"),
+    const upstreamSuccessCallbacks = allAgentTraceSpans.filter((span) =>
+      span.name.startsWith("agent.toolCalling.success"),
     );
     assert.equal(
       upstreamSuccessCallbacks.length,
@@ -312,8 +349,14 @@ test("real Arize BeeAI spans retain chat data and one complete ToolCallingAgent 
     );
     for (const callbackSpan of upstreamSuccessCallbacks) {
       assert.deepEqual(callbackSpan.attributes["respan.processors"], []);
-      assert.equal(callbackSpan.attributes["traceloop.entity.input"], undefined);
-      assert.equal(callbackSpan.attributes["traceloop.entity.output"], undefined);
+      assert.equal(
+        callbackSpan.attributes["traceloop.entity.input"],
+        undefined,
+      );
+      assert.equal(
+        callbackSpan.attributes["traceloop.entity.output"],
+        undefined,
+      );
     }
   } finally {
     instrumentor.deactivate();
@@ -324,7 +367,8 @@ test("real Arize BeeAI spans retain chat data and one complete ToolCallingAgent 
         "deactivation must fully restore the pre-instrumentation processor hook",
       );
     } finally {
-      await provider.shutdown();
+      nativeAudit.unregister();
+      await telemetry.shutdown();
       contextManager.disable();
       resetGlobalTelemetry();
     }

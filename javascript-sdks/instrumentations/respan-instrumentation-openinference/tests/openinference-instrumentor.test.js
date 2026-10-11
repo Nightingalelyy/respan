@@ -135,6 +135,55 @@ test("real released helper retains 80 messages, 75 tools, output and zero usage 
   await env.provider.shutdown();
 });
 
+test("released helpers fill absent fields and preserve native adapter canonical values, including falsy values", async () => {
+  const env = setup();
+  const input = JSON.stringify({ prompt: "question", history: ["earlier"] });
+  const output = JSON.stringify({ role: "assistant", content: "answer" });
+  for (const value of [output, "false", "0", "null", ""]) {
+    withSpan(() => false, {
+      name: "native-llm",
+      kind: OpenInferenceSpanKind.LLM,
+      attributes: {
+        "respan.entity.log_type": "agent",
+        "traceloop.entity.name": "NativeAgent",
+        "traceloop.entity.path": "",
+        "traceloop.entity.input": input,
+        "traceloop.entity.output": value,
+        "gen_ai.request.model": "canonical-model",
+        "gen_ai.usage.input_tokens": 0,
+        "gen_ai.prompt.0.content": false,
+        "respan.metadata": '{"collision":"canonical"}',
+      },
+      processOutput: () => ({
+        ...getLLMAttributes({
+          modelName: "raw-model",
+          provider: "openai",
+          inputMessages: [{ role: "user", content: "raw input" }],
+          outputMessages: [{ role: "assistant", content: "raw output" }],
+          tokenCount: { prompt: 9, completion: 7 },
+        }),
+        [OI.METADATA]: '{"collision":"raw","upstream":true}',
+      }),
+    })();
+    const attrs = env.exported.at(-1).attributes;
+    assert.equal(attrs["respan.entity.log_type"], "agent");
+    assert.equal(attrs["traceloop.entity.name"], "NativeAgent");
+    assert.equal(attrs["traceloop.entity.path"], "");
+    assert.equal(attrs["traceloop.entity.input"], input);
+    assert.equal(attrs["traceloop.entity.output"], value);
+    assert.equal(attrs["gen_ai.request.model"], "canonical-model");
+    assert.equal(attrs["gen_ai.usage.input_tokens"], 0);
+    assert.equal(attrs["gen_ai.prompt.0.content"], false);
+    assert.equal(attrs["gen_ai.prompt.0.role"], "user");
+    assert.equal(attrs["gen_ai.usage.output_tokens"], 7);
+    assert.deepEqual(JSON.parse(attrs["respan.metadata"]), {
+      collision: "canonical",
+      upstream: true,
+    });
+  }
+  await env.provider.shutdown();
+});
+
 test("real embedding builder preserves its model and 5001-dimensional vector", async () => {
   const env = setup();
   const vector = Array.from({ length: 5001 }, (_, i) => i / 5001);

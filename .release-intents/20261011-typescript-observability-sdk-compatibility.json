@@ -4,6 +4,7 @@
     "@respan/instrumentation-braintrust": "minor",
     "@respan/instrumentation-openinference": "minor",
     "@respan/instrumentation-livekit": "minor",
-    "@respan/instrumentation-arize": "none"
+    "@respan/instrumentation-arize": "none",
+    "@respan/instrumentation-beeai": "none"
   }
 }
