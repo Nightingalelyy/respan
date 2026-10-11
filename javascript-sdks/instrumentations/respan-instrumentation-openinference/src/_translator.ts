@@ -1,188 +1,62 @@
-/**
- * Translate OpenInference spans → OpenLLMetry/Traceloop format.
- *
- * This SpanProcessor converts spans produced by OpenInference instrumentors
- * (Haystack, CrewAI, LangChain, Google ADK, etc.) into the Traceloop/OpenLLMetry
- * semantic conventions that the Respan backend expects.
- *
- * The mapping is the exact reverse of Arize's `openinference-instrumentation-openllmetry`
- * package which converts OpenLLMetry → OpenInference.
- * Translation stays additive on the live span; cleanup is reserved for export clones.
- * This keeps source attributes available to downstream processors until export time.
- *
- * Arize direction (OpenLLMetry → OI)          | Our reverse (OI → OpenLLMetry)
- * ---------------------------------------------|------------------------------------------
- * traceloop.span.kind → openinference.span.kind | openinference.span.kind → respan.log_type
- * traceloop.entity.input → input.value          | input.value → traceloop.entity.input
- * traceloop.entity.output → output.value        | output.value → traceloop.entity.output
- * gen_ai.prompt.N.* → llm.input_messages.N.*    | llm.input_messages.N.* → gen_ai.prompt.N.*
- * gen_ai.completion.N.* → llm.output_messages.N.*| llm.output_messages.N.* → gen_ai.completion.N.*
- * gen_ai.usage.input_tokens → llm.token_count.prompt     | llm.token_count.prompt → gen_ai.usage.input_tokens
- * gen_ai.usage.output_tokens → llm.token_count.completion | llm.token_count.completion → gen_ai.usage.output_tokens
- * llm.usage.total_tokens → llm.token_count.total         | llm.token_count.total → llm.usage.total_tokens
- * llm.usage.cache_read_input_tokens → llm.token_count.prompt_details.cache_read | (reverse)
- * gen_ai.request.model → llm.invocation_parameters.model | llm.invocation_parameters → gen_ai.request.*
- * gen_ai.request.temperature → llm.invocation_parameters.temperature | (reverse)
- * llm.request.functions → llm.tools             | llm.tools → llm.request.functions
- * gen_ai.system → llm.system                    | llm.system → gen_ai.system
- * gen_ai.provider.name → llm.provider           | llm.provider → gen_ai.provider.name
- */
-
-import type { Context } from "@opentelemetry/api";
-import type { SpanProcessor, ReadableSpan, Span } from "@opentelemetry/sdk-trace-base";
+import type { Context, Span } from "@opentelemetry/api";
+import type {
+  ReadableSpan,
+  SpanProcessor,
+} from "@opentelemetry/sdk-trace-base";
 import {
+  ATTR_GEN_AI_PROMPT,
+  ATTR_GEN_AI_COMPLETION,
   ATTR_GEN_AI_PROVIDER_NAME,
-  ATTR_GEN_AI_REQUEST_MAX_TOKENS,
   ATTR_GEN_AI_REQUEST_MODEL,
+  ATTR_GEN_AI_RESPONSE_MODEL,
+  ATTR_GEN_AI_REQUEST_MAX_TOKENS,
   ATTR_GEN_AI_REQUEST_TEMPERATURE,
   ATTR_GEN_AI_REQUEST_TOP_P,
+  ATTR_GEN_AI_REQUEST_TOP_K,
   ATTR_GEN_AI_SYSTEM,
-  ATTR_GEN_AI_USAGE_COMPLETION_TOKENS,
+  ATTR_GEN_AI_TOOL_CALL_ID,
   ATTR_GEN_AI_USAGE_INPUT_TOKENS,
   ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
   ATTR_GEN_AI_USAGE_PROMPT_TOKENS,
+  ATTR_GEN_AI_USAGE_COMPLETION_TOKENS,
+  ATTR_GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
+  ATTR_GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
+  ATTR_GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
 } from "@opentelemetry/semantic-conventions/incubating";
 import {
-  AGENT_NAME,
-  INPUT_VALUE,
-  LLM_INVOCATION_PARAMETERS,
-  LLM_MODEL_NAME,
-  LLM_PROVIDER,
-  LLM_SYSTEM,
-  LLM_TOKEN_COUNT_COMPLETION,
-  LLM_TOKEN_COUNT_PROMPT,
-  LLM_TOKEN_COUNT_PROMPT_DETAILS_CACHE_READ,
-  LLM_TOKEN_COUNT_TOTAL,
-  LLM_TOOLS,
-  OUTPUT_VALUE,
-  SemanticConventions as OpenInferenceSemanticConventions,
+  SemanticConventions,
+  OpenInferenceSpanKind,
 } from "@arizeai/openinference-semantic-conventions";
 import { RespanSpanAttributes, RespanLogType } from "@respan/respan-sdk";
+import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
+import {
+  capturedAttributes,
+  captureBlocked,
+  captureLanes,
+  guardSpan,
+  guardExportClone,
+  safeDescriptorValue,
+  type CaptureOptions,
+} from "./_capture.js";
 
-// ---------------------------------------------------------------------------
-// Attribute keys imported from owning semantic-convention packages
-// ---------------------------------------------------------------------------
-const OI_SPAN_KIND = OpenInferenceSemanticConventions.OPENINFERENCE_SPAN_KIND;
-const OI_LLM_MODEL_NAME = LLM_MODEL_NAME;
-const OI_LLM_TOKEN_COUNT_PROMPT = LLM_TOKEN_COUNT_PROMPT;
-const OI_LLM_TOKEN_COUNT_COMPLETION = LLM_TOKEN_COUNT_COMPLETION;
-const RESPAN_LOG_TYPE = RespanSpanAttributes.RESPAN_LOG_TYPE;
-const GEN_AI_SYSTEM = ATTR_GEN_AI_SYSTEM;
-const GEN_AI_REQUEST_MODEL = ATTR_GEN_AI_REQUEST_MODEL;
-const GEN_AI_USAGE_PROMPT_TOKENS = ATTR_GEN_AI_USAGE_PROMPT_TOKENS;
-const GEN_AI_USAGE_COMPLETION_TOKENS = ATTR_GEN_AI_USAGE_COMPLETION_TOKENS;
-const LLM_REQUEST_TYPE = RespanSpanAttributes.LLM_REQUEST_TYPE;
-
-// ---------------------------------------------------------------------------
-// OpenInference attribute keys (not in SDK — OI-specific, used only here)
-// ---------------------------------------------------------------------------
-const OI_INPUT_VALUE = INPUT_VALUE;
-const OI_OUTPUT_VALUE = OUTPUT_VALUE;
-const OI_LLM_PROVIDER = LLM_PROVIDER;
-const OI_LLM_SYSTEM = LLM_SYSTEM;
-const OI_LLM_INVOCATION_PARAMETERS = LLM_INVOCATION_PARAMETERS;
-const OI_LLM_TOKEN_COUNT_TOTAL = LLM_TOKEN_COUNT_TOTAL;
-const OI_LLM_TOKEN_COUNT_CACHE_READ = LLM_TOKEN_COUNT_PROMPT_DETAILS_CACHE_READ;
-const OI_LLM_TOOLS = LLM_TOOLS;
-const OI_AGENT_NAME = AGENT_NAME;
-
-// ---------------------------------------------------------------------------
-// OpenLLMetry wire-format attribute keys (not in SDK — mapping targets only)
-// ---------------------------------------------------------------------------
-const TL_ENTITY_NAME = "traceloop.entity.name";
-const TL_ENTITY_INPUT = "traceloop.entity.input";
-const TL_ENTITY_OUTPUT = "traceloop.entity.output";
-const TL_ENTITY_PATH = "traceloop.entity.path";
-const TL_USAGE_INPUT_TOKENS = ATTR_GEN_AI_USAGE_INPUT_TOKENS;
-const TL_USAGE_OUTPUT_TOKENS = ATTR_GEN_AI_USAGE_OUTPUT_TOKENS;
-const TL_USAGE_TOTAL_TOKENS = "llm.usage.total_tokens";
-const TL_USAGE_CACHE_READ = "llm.usage.cache_read_input_tokens";
-const TL_REQUEST_TEMPERATURE = ATTR_GEN_AI_REQUEST_TEMPERATURE;
-const TL_REQUEST_TOP_P = ATTR_GEN_AI_REQUEST_TOP_P;
-const TL_REQUEST_MAX_TOKENS = ATTR_GEN_AI_REQUEST_MAX_TOKENS;
-const TL_TOP_K = "llm.top_k";
-const TL_STOP_SEQUENCES = "llm.chat.stop_sequences";
-const TL_REPETITION_PENALTY = "llm.request.repetition_penalty";
-const TL_FREQUENCY_PENALTY = "llm.frequency_penalty";
-const TL_PRESENCE_PENALTY = "llm.presence_penalty";
-const TL_PROVIDER_NAME = ATTR_GEN_AI_PROVIDER_NAME;
-const TL_REQUEST_FUNCTIONS = "llm.request.functions";
-const CLAUDE_AGENT_SDK_SCOPE_NAME =
-  "@arizeai/openinference-instrumentation-claude-agent-sdk";
-const EMPTY_SCOPE_NAME = "";
-const DIRECT_MODEL = "model";
-const DIRECT_PROMPT_TOKENS = "prompt_tokens";
-const DIRECT_COMPLETION_TOKENS = "completion_tokens";
-const DIRECT_TOTAL_REQUEST_TOKENS = "total_request_tokens";
-
-// ---------------------------------------------------------------------------
-// Span kind mapping: OpenInference → Traceloop (reverse of Arize)
-// ---------------------------------------------------------------------------
-const OI_KIND_TO_TRACELOOP: Record<string, string> = {
-  LLM: RespanLogType.TASK,
-  CHAIN: RespanLogType.WORKFLOW,
-  TOOL: RespanLogType.TOOL,
-  AGENT: RespanLogType.AGENT,
-  EMBEDDING: RespanLogType.TASK,
-  RETRIEVER: RespanLogType.TASK,
-  RERANKER: RespanLogType.TASK,
-  GUARDRAIL: RespanLogType.TASK,
-  EVALUATOR: RespanLogType.TASK,
-  PROMPT: RespanLogType.TASK,
-  UNKNOWN: RespanLogType.TASK,
+type Attributes = Record<string, any>;
+const LOG_TYPES: Record<string, string> = {
+  [OpenInferenceSpanKind.LLM]: RespanLogType.CHAT,
+  [OpenInferenceSpanKind.CHAIN]: RespanLogType.WORKFLOW,
+  [OpenInferenceSpanKind.AGENT]: RespanLogType.AGENT,
+  [OpenInferenceSpanKind.TOOL]: RespanLogType.TOOL,
+  [OpenInferenceSpanKind.EMBEDDING]: RespanLogType.EMBEDDING,
+  [OpenInferenceSpanKind.GUARDRAIL]: RespanLogType.GUARDRAIL,
 };
-
-const OI_KIND_TO_LOG_TYPE: Record<string, string> = {
-  LLM: RespanLogType.CHAT,
-  CHAIN: RespanLogType.WORKFLOW,
-  TOOL: RespanLogType.TOOL,
-  AGENT: RespanLogType.AGENT,
-  EMBEDDING: RespanLogType.EMBEDDING,
-  RETRIEVER: RespanLogType.TASK,
-  RERANKER: RespanLogType.TASK,
-  GUARDRAIL: RespanLogType.GUARDRAIL,
-  EVALUATOR: RespanLogType.TASK,
-  PROMPT: RespanLogType.TASK,
-  UNKNOWN: RespanLogType.TASK,
-};
-
-const OI_LLM_REQUEST_KINDS: Record<string, string> = {
-  LLM: RespanLogType.CHAT,
-  EMBEDDING: RespanLogType.EMBEDDING,
-};
-
-const LLM_KINDS = new Set(["LLM", "EMBEDDING"]);
-
-// Invocation parameter key → OpenLLMetry target attribute
-const INVOCATION_PARAM_MAP: Record<string, string> = {
-  model: GEN_AI_REQUEST_MODEL,
-  temperature: TL_REQUEST_TEMPERATURE,
-  top_p: TL_REQUEST_TOP_P,
-  max_tokens: TL_REQUEST_MAX_TOKENS,
-  max_output_tokens: TL_REQUEST_MAX_TOKENS,
-  top_k: TL_TOP_K,
-  stop_sequences: TL_STOP_SEQUENCES,
-  stop: TL_STOP_SEQUENCES,
-  repetition_penalty: TL_REPETITION_PENALTY,
-  frequency_penalty: TL_FREQUENCY_PENALTY,
-  presence_penalty: TL_PRESENCE_PENALTY,
-};
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function safeJsonStr(value: unknown): string {
-  if (value === undefined || value === null) return "";
-  if (typeof value === "string") return value;
+function json(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
   try {
     return JSON.stringify(value);
   } catch {
-    return String(value);
+    return undefined;
   }
 }
-
-function parseJson(value: unknown): unknown {
+function parse(value: unknown): any {
   if (typeof value !== "string") return value;
   try {
     return JSON.parse(value);
@@ -190,464 +64,462 @@ function parseJson(value: unknown): unknown {
     return value;
   }
 }
-
-/**
- * Convert OI indexed messages to OpenLLMetry gen_ai.prompt.N / gen_ai.completion.N.
- *
- * OI format:
- *   llm.input_messages.0.message.role = "user"
- *   llm.input_messages.0.message.content = "hello"
- *   llm.input_messages.0.message.tool_calls.0.tool_call.function.name = "get_weather"
- *
- * OpenLLMetry format:
- *   gen_ai.prompt.0.role = "user"
- *   gen_ai.prompt.0.content = "hello"
- *   gen_ai.prompt.0.tool_calls.0.function.name = "get_weather"
- */
-function oiMessagesToOpenLLMetry(
-  attrs: Record<string, any>,
-  oiPrefix: string,
-  genAiPrefix: string,
-): void {
-  const buckets = new Map<number, Map<string, any>>();
-
-  for (const [key, val] of Object.entries(attrs)) {
-    if (!key.startsWith(oiPrefix)) continue;
-    const rest = key.slice(oiPrefix.length);
-    const dotIdx = rest.indexOf(".");
-    const idxStr = dotIdx === -1 ? rest : rest.slice(0, dotIdx);
-    if (!/^\d+$/.test(idxStr)) continue;
-    const idx = parseInt(idxStr, 10);
-    const field = dotIdx === -1 ? "" : rest.slice(dotIdx + 1);
-    if (!buckets.has(idx)) buckets.set(idx, new Map());
-    buckets.get(idx)!.set(field, val);
+function asInput(value: unknown): string | undefined {
+  return typeof value === "string" ? value : json(value);
+}
+function record(value: unknown): Attributes {
+  const result = parse(value);
+  return result && typeof result === "object" && !Array.isArray(result)
+    ? result
+    : {};
+}
+function indexed(attrs: Attributes, prefix: string): Map<number, Attributes> {
+  const result = new Map<number, Attributes>();
+  for (const key of Object.keys(attrs)) {
+    if (!key.startsWith(`${prefix}.`)) continue;
+    const rest = key.slice(prefix.length + 1);
+    const dot = rest.indexOf(".");
+    if (dot < 0 || !/^\d+$/.test(rest.slice(0, dot))) continue;
+    const index = Number(rest.slice(0, dot));
+    const item = result.get(index) ?? {};
+    item[rest.slice(dot + 1)] = attrs[key];
+    result.set(index, item);
   }
-
-  const sortedIndices = [...buckets.keys()].sort((a, b) => a - b);
-
-  for (const idx of sortedIndices) {
-    const raw = buckets.get(idx)!;
-    const target = `${genAiPrefix}.${idx}`;
-
-    const role = raw.get("message.role");
-    if (role) attrs[`${target}.role`] = role;
-
-    const content = raw.get("message.content");
-    if (content !== undefined) attrs[`${target}.content`] = content;
-    else {
-      const contentBlocks = new Map<number, Map<string, any>>();
-
-      for (const [fieldKey, fieldVal] of raw) {
-        if (!fieldKey.startsWith("message.contents.")) continue;
-        const blockRest = fieldKey.slice("message.contents.".length);
-        const blockDotIdx = blockRest.indexOf(".");
-        if (blockDotIdx === -1) continue;
-
-        const blockIdxStr = blockRest.slice(0, blockDotIdx);
-        if (!/^\d+$/.test(blockIdxStr)) continue;
-
-        const blockIdx = parseInt(blockIdxStr, 10);
-        let blockField = blockRest.slice(blockDotIdx + 1);
-        if (blockField.startsWith("message_content.")) {
-          blockField = blockField.slice("message_content.".length);
-        }
-
-        if (!contentBlocks.has(blockIdx)) {
-          contentBlocks.set(blockIdx, new Map());
-        }
-        contentBlocks.get(blockIdx)!.set(blockField, fieldVal);
+  return new Map([...result].sort(([left], [right]) => left - right));
+}
+function messages(attrs: Attributes, prefix: string): Attributes[] {
+  return [...indexed(attrs, prefix).values()].map((raw) => {
+    const message: Attributes = {};
+    for (const [source, target] of [
+      [SemanticConventions.MESSAGE_ROLE, "role"],
+      [SemanticConventions.MESSAGE_NAME, "name"],
+      [SemanticConventions.MESSAGE_CONTENT, "content"],
+      [SemanticConventions.MESSAGE_TOOL_CALL_ID, "tool_call_id"],
+    ])
+      if (raw[source] !== undefined) message[target] = raw[source];
+    const blocks = [
+      ...indexed(raw, SemanticConventions.MESSAGE_CONTENTS).values(),
+    ].map((block) => {
+      const result: Attributes = {};
+      for (const [key, value] of Object.entries(block)) {
+        const field = key.startsWith("message_content.")
+          ? key.slice("message_content.".length)
+          : key;
+        if (
+          key ===
+            `${SemanticConventions.MESSAGE_CONTENT_IMAGE}.${SemanticConventions.IMAGE_URL}` ||
+          field === "image.url"
+        ) {
+          result.type = "image_url";
+          result.image_url = { url: value };
+        } else result[field] = value;
       }
-
-      if (contentBlocks.size > 0) {
-        const orderedBlocks = [...contentBlocks.keys()]
-          .sort((a, b) => a - b)
-          .map((blockIdx) => Object.fromEntries(contentBlocks.get(blockIdx)!));
-
-        const textParts = orderedBlocks
-          .map((block) =>
-            typeof block.text === "string" ? block.text : undefined
-          )
-          .filter((part): part is string => part !== undefined);
-
-        attrs[`${target}.content`] =
-          textParts.length > 0 && textParts.length === orderedBlocks.length
-            ? textParts.join("\n")
-            : safeJsonStr(orderedBlocks);
-      }
+      return result;
+    });
+    if (message.content === undefined && blocks.length) {
+      message.content = blocks.every(
+        (block) => block.type === "text" && typeof block.text === "string",
+      )
+        ? blocks.map((block) => block.text).join("\n")
+        : blocks;
     }
-
-    // Tool calls
-    for (const [fieldKey, fieldVal] of raw) {
-      if (fieldKey.startsWith("message.tool_calls.")) {
-        const tcRest = fieldKey.slice("message.tool_calls.".length);
-        const tcDotIdx = tcRest.indexOf(".");
-        if (tcDotIdx === -1) continue;
-        const tcIdx = tcRest.slice(0, tcDotIdx);
-        if (!/^\d+$/.test(tcIdx)) continue;
-        let tcField = tcRest.slice(tcDotIdx + 1);
-        if (tcField.startsWith("tool_call.")) tcField = tcField.slice("tool_call.".length);
-        attrs[`${target}.tool_calls.${tcIdx}.${tcField}`] = fieldVal;
-      }
-    }
-
-    // Function call fields
-    const funcName = raw.get("message.function_call_name");
-    if (funcName) attrs[`${target}.function_call.name`] = funcName;
-    const funcArgs = raw.get("message.function_call_arguments_json");
-    if (funcArgs) attrs[`${target}.function_call.arguments`] = funcArgs;
-
-    // Finish reason
-    const finishReason = raw.get("message.finish_reason");
-    if (finishReason) attrs[`${target}.finish_reason`] = finishReason;
-  }
+    const calls = [
+      ...indexed(raw, SemanticConventions.MESSAGE_TOOL_CALLS).values(),
+    ].map((call) => {
+      const invocation: Attributes = { type: "function", function: {} };
+      if (call[SemanticConventions.TOOL_CALL_ID] !== undefined)
+        invocation.id = call[SemanticConventions.TOOL_CALL_ID];
+      if (call[SemanticConventions.TOOL_CALL_FUNCTION_NAME] !== undefined)
+        invocation.function.name =
+          call[SemanticConventions.TOOL_CALL_FUNCTION_NAME];
+      if (
+        call[SemanticConventions.TOOL_CALL_FUNCTION_ARGUMENTS_JSON] !==
+        undefined
+      )
+        invocation.function.arguments =
+          call[SemanticConventions.TOOL_CALL_FUNCTION_ARGUMENTS_JSON];
+      if (call[SemanticConventions.TOOL_CALL_REASONING_SIGNATURE] !== undefined)
+        invocation.reasoning_signature =
+          call[SemanticConventions.TOOL_CALL_REASONING_SIGNATURE];
+      return invocation;
+    });
+    if (calls.length) message.tool_calls = calls;
+    if (raw[SemanticConventions.MESSAGE_FUNCTION_CALL_NAME] !== undefined)
+      message.function_call = {
+        name: raw[SemanticConventions.MESSAGE_FUNCTION_CALL_NAME],
+        arguments:
+          raw[SemanticConventions.MESSAGE_FUNCTION_CALL_ARGUMENTS_JSON],
+      };
+    return message;
+  });
 }
-
-function setDefault(attrs: Record<string, any>, key: string, value: any): void {
-  if (attrs[key] === undefined) attrs[key] = value;
+function tools(attrs: Attributes): unknown[] | undefined {
+  const indexedTools = [
+    ...indexed(attrs, SemanticConventions.LLM_TOOLS).values(),
+  ]
+    .map((tool) => parse(tool[SemanticConventions.TOOL_JSON_SCHEMA]))
+    .filter((tool) => tool !== undefined);
+  if (indexedTools.length) return indexedTools;
+  const direct = parse(attrs[SemanticConventions.LLM_TOOLS]);
+  return Array.isArray(direct) ? direct : undefined;
 }
-
-function firstDefined<T>(...values: Array<T | undefined>): T | undefined {
-  for (const value of values) {
-    if (value !== undefined) return value;
-  }
-  return undefined;
-}
-
-function getInstrumentationScopeName(span: ReadableSpan): string {
-  return (
-    ((span as any).instrumentationScope?.name as string | undefined) ??
-    ((span as any).instrumentationLibrary?.name as string | undefined) ??
-    ""
-  );
-}
-
-function buildCleanedAttrs(
-  attrs: Record<string, any>,
-  exactKeys: Set<string>,
-  prefixes: string[],
-): Record<string, any> {
-  return Object.fromEntries(
-    Object.entries(attrs).filter(
-      ([key]) =>
-        !exactKeys.has(key) &&
-        !prefixes.some((prefix) => key.startsWith(prefix)),
-    ),
-  );
-}
-
-const REDUNDANT_OI_EXACT_KEYS = new Set([
-  OI_SPAN_KIND,
-  OI_INPUT_VALUE,
-  "input.mime_type",
-  OI_OUTPUT_VALUE,
-  "output.mime_type",
-  OI_LLM_MODEL_NAME,
-  OI_LLM_PROVIDER,
-  OI_LLM_SYSTEM,
-  OI_LLM_TOKEN_COUNT_PROMPT,
-  OI_LLM_TOKEN_COUNT_COMPLETION,
-  OI_LLM_TOKEN_COUNT_TOTAL,
-  OI_LLM_TOKEN_COUNT_CACHE_READ,
-  OI_AGENT_NAME,
-]);
-
-const REDUNDANT_OI_LLM_EXACT_KEYS = new Set([
-  OI_LLM_INVOCATION_PARAMETERS,
-  OI_LLM_TOOLS,
-]);
-
-const REDUNDANT_OI_LLM_PREFIXES = [
-  "llm.input_messages.",
-  "llm.output_messages.",
-];
-
-const REDUNDANT_OI_PREFIXES = [
-  "llm.token_count.",
-];
-
-const REDUNDANT_OTEL_EXACT_KEYS = new Set([
-  "otel.scope.name",
-  "otel.scope.version",
-]);
-
-const REDUNDANT_OTEL_PREFIXES = [
-  "process.",
-  "host.",
-  "telemetry.sdk.",
-];
-
-const OTEL_RESOURCE_NOISE_PREFIXES = [
-  "process.",
-  "host.",
-  "telemetry.sdk.",
-];
-
-type CloneableReadableSpan = ReadableSpan & {
-  _attributes?: Record<string, any>;
-  resource?: { attributes?: Record<string, any> };
-  instrumentationLibrary?: { name?: string; version?: string };
-  instrumentationScope?: { name?: string; version?: string };
-};
-
-function getOpenInferenceKindUpper(
-  attrs: Record<string, any> | undefined,
-): string | null {
-  const oiKind = attrs?.[OI_SPAN_KIND];
-  if (oiKind === undefined) return null;
-  return String(oiKind).toUpperCase();
-}
-
-function filterResourceAttributes(
-  attrs: Record<string, any> | undefined,
-): Record<string, any> | undefined {
-  if (!attrs) return attrs;
-
-  return Object.fromEntries(
-    Object.entries(attrs).filter(
-      ([key]) =>
-        !OTEL_RESOURCE_NOISE_PREFIXES.some((prefix) => key.startsWith(prefix)),
-    ),
-  );
-}
-
-function buildExportAttrs(
-  attrs: Record<string, any>,
-  oiKindUpper: string,
-): Record<string, any> {
-  const oiExactKeys = new Set(REDUNDANT_OI_EXACT_KEYS);
-  const oiPrefixes = [...REDUNDANT_OI_PREFIXES];
-
-  if (LLM_KINDS.has(oiKindUpper)) {
-    for (const key of REDUNDANT_OI_LLM_EXACT_KEYS) {
-      oiExactKeys.add(key);
-    }
-    oiPrefixes.push(...REDUNDANT_OI_LLM_PREFIXES);
-  }
-
-  const withoutOiAttrs = buildCleanedAttrs(attrs, oiExactKeys, oiPrefixes);
-
-  return buildCleanedAttrs(
-    withoutOiAttrs,
-    REDUNDANT_OTEL_EXACT_KEYS,
-    REDUNDANT_OTEL_PREFIXES,
-  );
-}
-
-function cloneSpan(span: ReadableSpan): CloneableReadableSpan {
-  return Object.assign(
-    Object.create(Object.getPrototypeOf(span)),
-    span,
-  ) as CloneableReadableSpan;
-}
-
 export function isOpenInferenceSpan(span: ReadableSpan): boolean {
-  return getOpenInferenceKindUpper((span as any).attributes) !== null;
+  return (
+    typeof safeDescriptorValue(
+      span.attributes,
+      SemanticConventions.OPENINFERENCE_SPAN_KIND,
+    ) === "string"
+  );
 }
-
+/** Add canonical fields while retaining the original producer attributes. */
+export function translateOpenInferenceSpan(span: ReadableSpan): void {
+  if (captureBlocked(span)) return;
+  const raw = (capturedAttributes(span) ?? span.attributes) as Attributes;
+  const kindValue = safeDescriptorValue(
+    raw,
+    SemanticConventions.OPENINFERENCE_SPAN_KIND,
+  );
+  if (typeof kindValue !== "string") return;
+  const kind = kindValue.toUpperCase();
+  const lanes = captureLanes(span);
+  const canonical: Attributes = {};
+  const put = (key: string, value: unknown) => {
+    if (value !== undefined) canonical[key] = value;
+  };
+  put(
+    RespanSpanAttributes.RESPAN_LOG_TYPE,
+    LOG_TYPES[kind] ?? RespanLogType.TASK,
+  );
+  put(RespanSpanAttributes.RESPAN_LOG_METHOD, "ts_tracing");
+  put(
+    SpanAttributes.TRACELOOP_ENTITY_NAME,
+    raw[SemanticConventions.AGENT_NAME] ??
+      raw[SemanticConventions.TOOL_NAME] ??
+      span.name,
+  );
+  put(
+    SpanAttributes.TRACELOOP_ENTITY_PATH,
+    raw[SpanAttributes.TRACELOOP_ENTITY_PATH] ?? span.name,
+  );
+  const llm = kind === OpenInferenceSpanKind.LLM;
+  const embedding = kind === OpenInferenceSpanKind.EMBEDDING;
+  if (llm || embedding) {
+    put(SpanAttributes.LLM_REQUEST_TYPE, embedding ? "embedding" : "chat");
+    put(
+      ATTR_GEN_AI_REQUEST_MODEL,
+      raw[SemanticConventions.LLM_REQUEST_MODEL_NAME] ??
+        raw[SemanticConventions.LLM_MODEL_NAME] ??
+        raw[SemanticConventions.EMBEDDING_MODEL_NAME],
+    );
+    put(
+      ATTR_GEN_AI_RESPONSE_MODEL,
+      raw[SemanticConventions.LLM_RESPONSE_MODEL_NAME],
+    );
+    if (typeof raw[SemanticConventions.LLM_PROVIDER] === "string")
+      put(
+        ATTR_GEN_AI_PROVIDER_NAME,
+        raw[SemanticConventions.LLM_PROVIDER].toLowerCase(),
+      );
+    if (
+      typeof (
+        raw[SemanticConventions.LLM_SYSTEM] ??
+        raw[SemanticConventions.LLM_PROVIDER]
+      ) === "string"
+    )
+      put(
+        ATTR_GEN_AI_SYSTEM,
+        (
+          raw[SemanticConventions.LLM_SYSTEM] ??
+          raw[SemanticConventions.LLM_PROVIDER]
+        ).toLowerCase(),
+      );
+    for (const [source, targets] of [
+      [
+        SemanticConventions.LLM_TOKEN_COUNT_PROMPT,
+        [ATTR_GEN_AI_USAGE_INPUT_TOKENS, ATTR_GEN_AI_USAGE_PROMPT_TOKENS],
+      ],
+      [
+        SemanticConventions.LLM_TOKEN_COUNT_COMPLETION,
+        [ATTR_GEN_AI_USAGE_OUTPUT_TOKENS, ATTR_GEN_AI_USAGE_COMPLETION_TOKENS],
+      ],
+      [
+        SemanticConventions.LLM_TOKEN_COUNT_TOTAL,
+        [SpanAttributes.LLM_USAGE_TOTAL_TOKENS],
+      ],
+      [
+        SemanticConventions.LLM_TOKEN_COUNT_PROMPT_DETAILS_CACHE_READ,
+        [ATTR_GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS],
+      ],
+      [
+        SemanticConventions.LLM_TOKEN_COUNT_PROMPT_DETAILS_CACHE_WRITE,
+        [ATTR_GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS],
+      ],
+      [
+        SemanticConventions.LLM_TOKEN_COUNT_COMPLETION_DETAILS_REASONING,
+        [ATTR_GEN_AI_USAGE_REASONING_OUTPUT_TOKENS],
+      ],
+    ] as const) {
+      const value = raw[source];
+      if (typeof value === "number" && Number.isFinite(value))
+        for (const target of targets) put(target, value);
+    }
+  }
+  const inputMessages =
+    llm && lanes.inputs
+      ? messages(raw, SemanticConventions.LLM_INPUT_MESSAGES)
+      : [];
+  const outputMessages =
+    llm && lanes.outputs
+      ? messages(raw, SemanticConventions.LLM_OUTPUT_MESSAGES)
+      : [];
+  const definitions = lanes.inputs ? tools(raw) : undefined;
+  if (lanes.inputs) {
+    const source = raw[SemanticConventions.INPUT_VALUE];
+    if (kind === OpenInferenceSpanKind.TOOL && source !== undefined)
+      put(
+        SpanAttributes.TRACELOOP_ENTITY_INPUT,
+        json({
+          name: canonical[SpanAttributes.TRACELOOP_ENTITY_NAME],
+          arguments: parse(source),
+        }),
+      );
+    else
+      put(
+        SpanAttributes.TRACELOOP_ENTITY_INPUT,
+        inputMessages.length ? json(inputMessages) : asInput(source),
+      );
+    if (llm && definitions !== undefined)
+      put(SpanAttributes.LLM_REQUEST_FUNCTIONS, json(definitions));
+    if (llm) {
+      const parameters = record(
+        raw[SemanticConventions.LLM_INVOCATION_PARAMETERS],
+      );
+      for (const [sourceKey, target] of [
+        ["model", ATTR_GEN_AI_REQUEST_MODEL],
+        ["temperature", ATTR_GEN_AI_REQUEST_TEMPERATURE],
+        ["top_p", ATTR_GEN_AI_REQUEST_TOP_P],
+        ["max_tokens", ATTR_GEN_AI_REQUEST_MAX_TOKENS],
+        ["max_output_tokens", ATTR_GEN_AI_REQUEST_MAX_TOKENS],
+        ["top_k", ATTR_GEN_AI_REQUEST_TOP_K],
+        ["stop", SpanAttributes.LLM_CHAT_STOP_SEQUENCES],
+        ["stop_sequences", SpanAttributes.LLM_CHAT_STOP_SEQUENCES],
+        ["frequency_penalty", SpanAttributes.LLM_FREQUENCY_PENALTY],
+        ["presence_penalty", SpanAttributes.LLM_PRESENCE_PENALTY],
+      ])
+        if (
+          parameters[sourceKey] !== undefined &&
+          canonical[target] === undefined
+        )
+          put(target, parameters[sourceKey]);
+    }
+  }
+  if (lanes.outputs)
+    put(
+      SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
+      outputMessages.length
+        ? json(outputMessages)
+        : asInput(raw[SemanticConventions.OUTPUT_VALUE]),
+    );
+  if (kind === OpenInferenceSpanKind.TOOL)
+    put(
+      ATTR_GEN_AI_TOOL_CALL_ID,
+      raw[SemanticConventions.TOOL_CALL_ID] ?? raw[SemanticConventions.TOOL_ID],
+    );
+  if (embedding) {
+    const values = [
+      ...indexed(raw, SemanticConventions.EMBEDDING_EMBEDDINGS).values(),
+    ];
+    const texts = values
+      .filter(
+        (value) => value[SemanticConventions.EMBEDDING_TEXT] !== undefined,
+      )
+      .map((value) => value[SemanticConventions.EMBEDDING_TEXT]);
+    const vectors = values
+      .filter(
+        (value) => value[SemanticConventions.EMBEDDING_VECTOR] !== undefined,
+      )
+      .map((value) => value[SemanticConventions.EMBEDDING_VECTOR]);
+    if (
+      lanes.inputs &&
+      texts.length &&
+      canonical[SpanAttributes.TRACELOOP_ENTITY_INPUT] === undefined
+    )
+      put(SpanAttributes.TRACELOOP_ENTITY_INPUT, json(texts));
+    if (lanes.outputs && vectors.length)
+      put(SpanAttributes.TRACELOOP_ENTITY_OUTPUT, json(vectors));
+  }
+  if (
+    kind === OpenInferenceSpanKind.RETRIEVER &&
+    lanes.outputs &&
+    canonical[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] === undefined
+  ) {
+    const documents = [
+      ...indexed(raw, SemanticConventions.RETRIEVAL_DOCUMENTS).values(),
+    ].map((document) => {
+      const result: Attributes = {};
+      for (const [key, value] of Object.entries(document))
+        result[
+          key.startsWith("document.") ? key.slice("document.".length) : key
+        ] =
+          key === SemanticConventions.DOCUMENT_METADATA ? parse(value) : value;
+      return result;
+    });
+    if (documents.length)
+      put(SpanAttributes.TRACELOOP_ENTITY_OUTPUT, json(documents));
+  }
+  if (lanes.inputs && lanes.outputs) {
+    const metadata = {
+      ...record(raw[RespanSpanAttributes.RESPAN_METADATA]),
+      ...record(raw[SemanticConventions.METADATA]),
+    };
+    if (!llm && definitions !== undefined) metadata.tools = definitions;
+    const tokenDetails: Attributes = {};
+    for (const key of [
+      SemanticConventions.LLM_TOKEN_COUNT_PROMPT_DETAILS_AUDIO,
+      SemanticConventions.LLM_TOKEN_COUNT_COMPLETION_DETAILS_AUDIO,
+    ])
+      if (typeof raw[key] === "number") tokenDetails[key] = raw[key];
+    if (Object.keys(tokenDetails).length) metadata.token_details = tokenDetails;
+    for (const key of [
+      SemanticConventions.TAG_TAGS,
+      SemanticConventions.PROMPT_TEMPLATE_TEMPLATE,
+      SemanticConventions.PROMPT_TEMPLATE_VARIABLES,
+      SemanticConventions.PROMPT_TEMPLATE_VERSION,
+    ])
+      if (raw[key] !== undefined) metadata[key] = parse(raw[key]);
+    if (Object.keys(metadata).length)
+      put(RespanSpanAttributes.RESPAN_METADATA, json(metadata));
+    put(
+      RespanSpanAttributes.RESPAN_SESSION_ID,
+      raw[SemanticConventions.SESSION_ID],
+    );
+    put(
+      RespanSpanAttributes.RESPAN_CUSTOMER_PARAMS_ID,
+      raw[SemanticConventions.USER_ID],
+    );
+  }
+  // Aggregates and status/usage survive the native 128-attribute budget. Optional
+  // indexed projections follow those canonical fields, without arbitrary caps.
+  const attrs = span.attributes as Attributes;
+  for (const [key, value] of Object.entries(canonical)) attrs[key] = value;
+  for (const [prefix, values] of [
+    [ATTR_GEN_AI_PROMPT, inputMessages],
+    [ATTR_GEN_AI_COMPLETION, outputMessages],
+  ] as const)
+    values.forEach((message, index) => {
+      for (const [key, value] of Object.entries(message))
+        attrs[`${prefix}.${index}.${key}`] =
+          typeof value === "object" ? json(value) : value;
+    });
+}
+function vendorKey(key: string): boolean {
+  return (
+    key === SemanticConventions.OPENINFERENCE_SPAN_KIND ||
+    key === SemanticConventions.INPUT_VALUE ||
+    key === SemanticConventions.INPUT_MIME_TYPE ||
+    key === SemanticConventions.OUTPUT_VALUE ||
+    key === SemanticConventions.OUTPUT_MIME_TYPE ||
+    key === SemanticConventions.METADATA ||
+    key === SemanticConventions.SESSION_ID ||
+    key === SemanticConventions.USER_ID ||
+    key === SemanticConventions.TAG_TAGS ||
+    key === SemanticConventions.AGENT_NAME ||
+    key.startsWith("embedding.") ||
+    key.startsWith("retrieval.") ||
+    key.startsWith("reranker.") ||
+    key.startsWith("tool.") ||
+    key.startsWith(`${SemanticConventions.LLM_INPUT_MESSAGES}.`) ||
+    key.startsWith(`${SemanticConventions.LLM_OUTPUT_MESSAGES}.`) ||
+    key.startsWith("llm.token_count.") ||
+    key.startsWith(`${SemanticConventions.LLM_TOOLS}.`) ||
+    key === SemanticConventions.LLM_TOOLS ||
+    key === SemanticConventions.LLM_INVOCATION_PARAMETERS ||
+    key === SemanticConventions.LLM_MODEL_NAME ||
+    key === SemanticConventions.LLM_REQUEST_MODEL_NAME ||
+    key === SemanticConventions.LLM_RESPONSE_MODEL_NAME ||
+    key === SemanticConventions.LLM_PROVIDER ||
+    key === SemanticConventions.LLM_SYSTEM ||
+    key.startsWith("llm.prompt_template")
+  );
+}
+/** Export cleanup clones the native span; producer-readable attributes remain. */
 export function prepareOpenInferenceSpanForExport(
   span: ReadableSpan,
 ): ReadableSpan {
-  const attrs = (span as any).attributes as Record<string, any> | undefined;
-  const oiKindUpper = getOpenInferenceKindUpper(attrs);
-  if (!attrs || !oiKindUpper) return span;
-
-  const clonedSpan = cloneSpan(span);
-  const cleanedAttrs = buildExportAttrs(attrs, oiKindUpper);
-  (clonedSpan as any).attributes = cleanedAttrs;
-
-  if ((span as any)._attributes && typeof (span as any)._attributes === "object") {
-    clonedSpan._attributes = cleanedAttrs;
+  if (!isOpenInferenceSpan(span) && !captureBlocked(span)) return span;
+  const attrs: Attributes = {};
+  const lanes = captureLanes(span);
+  for (const key of Object.keys(span.attributes)) {
+    if (
+      vendorKey(key) ||
+      [
+        "model",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_request_tokens",
+        "tools",
+        "tool_calls",
+      ].includes(key)
+    )
+      continue;
+    const value = safeDescriptorValue(span.attributes, key);
+    if (value !== undefined) attrs[key] = value;
   }
-
-  const resource = (span as CloneableReadableSpan).resource;
-  if (resource) {
-    clonedSpan.resource = {
-      ...resource,
-      attributes: filterResourceAttributes(resource.attributes) ?? {},
-    };
+  const clone = Object.create(Object.getPrototypeOf(span));
+  for (const key of Object.keys(span)) {
+    if (["attributes", "status", "events"].includes(key)) continue;
+    const descriptor = Object.getOwnPropertyDescriptor(span, key);
+    if (descriptor) Object.defineProperty(clone, key, descriptor);
   }
-
-  const instrumentationLibrary = (span as CloneableReadableSpan).instrumentationLibrary;
-  if (instrumentationLibrary) {
-    clonedSpan.instrumentationLibrary = {
-      ...instrumentationLibrary,
-      name: EMPTY_SCOPE_NAME,
-      version: EMPTY_SCOPE_NAME,
-    };
+  Object.defineProperties(clone, {
+    attributes: {
+      value: attrs,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    },
+    status: {
+      writable: true,
+      configurable: true,
+      value:
+        lanes.inputs && lanes.outputs
+          ? span.status
+          : { code: span.status.code },
+      enumerable: true,
+    },
+    events: {
+      writable: true,
+      configurable: true,
+      value: lanes.inputs && lanes.outputs ? span.events : [],
+      enumerable: true,
+    },
+  });
+  if (captureBlocked(span)) {
+    Object.defineProperty(clone, "attributes", {
+      value: { [RespanSpanAttributes.RESPAN_INTERNAL_DROP_SPAN]: true },
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
   }
-
-  const instrumentationScope = (span as CloneableReadableSpan).instrumentationScope;
-  if (instrumentationScope) {
-    clonedSpan.instrumentationScope = {
-      ...instrumentationScope,
-      name: EMPTY_SCOPE_NAME,
-      version: EMPTY_SCOPE_NAME,
-    };
-  }
-
-  return clonedSpan;
+  guardExportClone(clone, span);
+  return clone;
 }
-
-export function translateOpenInferenceSpan(span: ReadableSpan): void {
-  const attrs = (span as any).attributes as Record<string, any> | undefined;
-  if (!attrs) return;
-
-  const oiKindUpper = getOpenInferenceKindUpper(attrs);
-  if (!oiKindUpper) return;
-
-  const instrumentationScopeName = getInstrumentationScopeName(span);
-
-  // Do not set traceloop.span.kind for translated OpenInference spans.
-  // In Respan's composite processor that attribute is reserved for
-  // user-decorated spans and would incorrectly force auto spans to root.
-  setDefault(attrs, RESPAN_LOG_TYPE, OI_KIND_TO_LOG_TYPE[oiKindUpper] ?? "task");
-
-  if (OI_LLM_REQUEST_KINDS[oiKindUpper]) {
-    setDefault(attrs, LLM_REQUEST_TYPE, OI_LLM_REQUEST_KINDS[oiKindUpper]);
-  }
-
-  // Claude Agent SDK currently emits AGENT spans with exact token counts but the
-  // current backend only preserves those typed token fields for chat/completion-
-  // shaped spans. Mark these specific Claude Agent SDK spans as chat requests for
-  // ingestion so token/model fields survive without affecting other agent SDKs.
-  if (
-    oiKindUpper === "AGENT" &&
-    instrumentationScopeName === CLAUDE_AGENT_SDK_SCOPE_NAME
-  ) {
-    setDefault(attrs, LLM_REQUEST_TYPE, RespanLogType.CHAT);
-  }
-
-  // --- Entity name ---
-  const entityName = attrs[OI_AGENT_NAME] ?? span.name;
-  setDefault(attrs, TL_ENTITY_NAME, entityName);
-
-  // --- Entity path ---
-  setDefault(attrs, TL_ENTITY_PATH, OI_KIND_TO_TRACELOOP[oiKindUpper] !== "workflow" ? span.name : "");
-
-  // --- Input / output ---
-  if (attrs[OI_INPUT_VALUE] !== undefined) {
-    setDefault(attrs, TL_ENTITY_INPUT, safeJsonStr(attrs[OI_INPUT_VALUE]));
-  }
-  if (attrs[OI_OUTPUT_VALUE] !== undefined) {
-    setDefault(attrs, TL_ENTITY_OUTPUT, safeJsonStr(attrs[OI_OUTPUT_VALUE]));
-  }
-
-  // --- Model name ---
-  if (attrs[OI_LLM_MODEL_NAME] !== undefined) {
-    setDefault(attrs, GEN_AI_REQUEST_MODEL, attrs[OI_LLM_MODEL_NAME]);
-  }
-
-  // --- System / provider ---
-  if (attrs[OI_LLM_SYSTEM] !== undefined) {
-    setDefault(attrs, GEN_AI_SYSTEM, String(attrs[OI_LLM_SYSTEM]).toLowerCase());
-  }
-  if (attrs[OI_LLM_PROVIDER] !== undefined) {
-    setDefault(attrs, TL_PROVIDER_NAME, String(attrs[OI_LLM_PROVIDER]).toLowerCase());
-    setDefault(attrs, GEN_AI_SYSTEM, String(attrs[OI_LLM_PROVIDER]).toLowerCase());
-  }
-
-  // --- Token counts ---
-  if (attrs[OI_LLM_TOKEN_COUNT_PROMPT] !== undefined) {
-    setDefault(attrs, GEN_AI_USAGE_PROMPT_TOKENS, attrs[OI_LLM_TOKEN_COUNT_PROMPT]);
-    setDefault(attrs, TL_USAGE_INPUT_TOKENS, attrs[OI_LLM_TOKEN_COUNT_PROMPT]);
-  }
-  if (attrs[OI_LLM_TOKEN_COUNT_COMPLETION] !== undefined) {
-    setDefault(attrs, GEN_AI_USAGE_COMPLETION_TOKENS, attrs[OI_LLM_TOKEN_COUNT_COMPLETION]);
-    setDefault(attrs, TL_USAGE_OUTPUT_TOKENS, attrs[OI_LLM_TOKEN_COUNT_COMPLETION]);
-  }
-  if (attrs[OI_LLM_TOKEN_COUNT_TOTAL] !== undefined) {
-    setDefault(attrs, TL_USAGE_TOTAL_TOKENS, attrs[OI_LLM_TOKEN_COUNT_TOTAL]);
-  }
-  if (attrs[OI_LLM_TOKEN_COUNT_CACHE_READ] !== undefined) {
-    setDefault(attrs, TL_USAGE_CACHE_READ, attrs[OI_LLM_TOKEN_COUNT_CACHE_READ]);
-  }
-
-  // Direct overrides for Respan ingestion. These ensure non-chat OpenInference
-  // spans like AGENT still populate typed model/token columns even though the
-  // backend's generic span path only auto-promotes input/output.
-  const directModel = firstDefined(
-    attrs[GEN_AI_REQUEST_MODEL],
-    attrs[OI_LLM_MODEL_NAME],
-  );
-  if (directModel !== undefined) {
-    setDefault(attrs, DIRECT_MODEL, directModel);
-  }
-
-  const directPromptTokens = firstDefined(
-    attrs[GEN_AI_USAGE_PROMPT_TOKENS],
-    attrs[TL_USAGE_INPUT_TOKENS],
-    attrs[OI_LLM_TOKEN_COUNT_PROMPT],
-  );
-  if (directPromptTokens !== undefined) {
-    setDefault(attrs, DIRECT_PROMPT_TOKENS, directPromptTokens);
-  }
-
-  const directCompletionTokens = firstDefined(
-    attrs[GEN_AI_USAGE_COMPLETION_TOKENS],
-    attrs[TL_USAGE_OUTPUT_TOKENS],
-    attrs[OI_LLM_TOKEN_COUNT_COMPLETION],
-  );
-  if (directCompletionTokens !== undefined) {
-    setDefault(attrs, DIRECT_COMPLETION_TOKENS, directCompletionTokens);
-  }
-
-  const directTotalRequestTokens = firstDefined(
-    attrs[TL_USAGE_TOTAL_TOKENS],
-    attrs[OI_LLM_TOKEN_COUNT_TOTAL],
-    directPromptTokens !== undefined && directCompletionTokens !== undefined
-      ? Number(directPromptTokens) + Number(directCompletionTokens)
-      : undefined,
-  );
-  if (directTotalRequestTokens !== undefined) {
-    setDefault(attrs, DIRECT_TOTAL_REQUEST_TOKENS, directTotalRequestTokens);
-  }
-
-  // --- LLM-specific: messages, invocation params, tools ---
-  if (LLM_KINDS.has(oiKindUpper)) {
-    oiMessagesToOpenLLMetry(attrs, "llm.input_messages.", "gen_ai.prompt");
-    oiMessagesToOpenLLMetry(attrs, "llm.output_messages.", "gen_ai.completion");
-
-    const invParamsRaw = attrs[OI_LLM_INVOCATION_PARAMETERS];
-    if (invParamsRaw) {
-      const params = parseJson(invParamsRaw);
-      if (params && typeof params === "object" && !Array.isArray(params)) {
-        for (const [key, val] of Object.entries(params as Record<string, any>)) {
-          const targetAttr = INVOCATION_PARAM_MAP[key];
-          if (targetAttr) setDefault(attrs, targetAttr, val);
-        }
-      }
-    }
-
-    if (attrs[OI_LLM_TOOLS] !== undefined) {
-      setDefault(attrs, TL_REQUEST_FUNCTIONS, attrs[OI_LLM_TOOLS]);
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Main processor
-// ---------------------------------------------------------------------------
-
-/**
- * SpanProcessor that translates OpenInference attributes to OpenLLMetry/Traceloop.
- *
- * Detects OI spans by `openinference.span.kind` and enriches them with the
- * Traceloop attributes the Respan backend expects. All mappings are the exact
- * reverse of Arize's openinference-instrumentation-openllmetry.
- *
- * Translation is additive on the live span. Export-only cleanup happens in
- * `prepareOpenInferenceSpanForExport()` so downstream callbacks can still
- * inspect the original OpenInference attributes when needed.
- */
+/** Use directly as an OTel SpanProcessor, or through the Respan plugin. */
 export class OpenInferenceTranslator implements SpanProcessor {
-  onStart(_span: Span, _parentContext: Context): void {
-    // no-op
+  private readonly options: CaptureOptions;
+  constructor(options: CaptureOptions = {}) {
+    this.options = { ...options };
   }
-
+  onStart(span: Span, parentContext: Context): void {
+    guardSpan(span, parentContext, this.options);
+  }
   onEnd(span: ReadableSpan): void {
     translateOpenInferenceSpan(span);
   }
-
+  prepareForExport(span: ReadableSpan): ReadableSpan {
+    return prepareOpenInferenceSpanForExport(span);
+  }
   async shutdown(): Promise<void> {}
   async forceFlush(): Promise<void> {}
 }

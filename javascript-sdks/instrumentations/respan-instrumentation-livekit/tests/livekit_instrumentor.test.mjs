@@ -54,7 +54,11 @@ function findSpan(exporter, liveKitName) {
 
 function assertNoRawLiveKitAttributes(span) {
   for (const key of Object.keys(span.attributes)) {
-    assert.equal(key.startsWith("lk."), false, `raw LiveKit attr exported: ${key}`);
+    assert.equal(
+      key.startsWith("lk."),
+      false,
+      `raw LiveKit attr exported: ${key}`,
+    );
   }
   assert.equal(span.attributes["livekit.span.name"], undefined);
   assert.equal(
@@ -105,7 +109,7 @@ test("deactivate during module resolution prevents late transformer registration
   const harness = createOTel2Harness();
   const instrumentor = createInstrumentor();
   let resolveTelemetryModule;
-  const telemetryModule = new Promise(resolve => {
+  const telemetryModule = new Promise((resolve) => {
     resolveTelemetryModule = resolve;
   });
   instrumentor._resolveTelemetryModule = () => telemetryModule;
@@ -128,9 +132,10 @@ test("a fresh activate can supersede a cancelled pending activation", async () =
   const harness = createOTel2Harness();
   const instrumentor = createInstrumentor();
   const resolvers = [];
-  instrumentor._resolveTelemetryModule = () => new Promise(resolve => {
-    resolvers.push(resolve);
-  });
+  instrumentor._resolveTelemetryModule = () =>
+    new Promise((resolve) => {
+      resolvers.push(resolve);
+    });
 
   try {
     const cancelledActivation = instrumentor.activate();
@@ -235,7 +240,11 @@ test("real OTel 2 merges a direct llm_request into llm_node and preserves retry 
     node.end();
 
     const exported = harness.exporter.getFinishedSpans();
-    assert.equal(exported.length, 2, "the correlated request wrapper is dropped");
+    assert.equal(
+      exported.length,
+      2,
+      "the correlated request wrapper is dropped",
+    );
 
     const chat = findSpan(harness.exporter, "llm_node");
     assert.ok(chat);
@@ -247,7 +256,7 @@ test("real OTel 2 merges a direct llm_request into llm_node and preserves retry 
     assert.equal(chat.attributes["gen_ai.usage.prompt_tokens"], 12);
     assert.equal(chat.attributes["gen_ai.usage.completion_tokens"], 4);
     assert.equal(chat.attributes["llm.usage.total_tokens"], 16);
-    assert.equal(chat.attributes["llm.usage.cache_read_input_tokens"], 2);
+    assert.equal(chat.attributes["gen_ai.usage.cache_read.input_tokens"], 2);
     const chatMetadata = JSON.parse(
       chat.attributes[RespanSpanAttributes.RESPAN_METADATA],
     );
@@ -277,12 +286,16 @@ test("real OTel 2 merges a direct llm_request into llm_node and preserves retry 
 
     const retry = findSpan(harness.exporter, "llm_request_run");
     assert.ok(retry);
-    assert.equal(retry.attributes[RespanSpanAttributes.RESPAN_LOG_TYPE], "task");
+    assert.equal(
+      retry.attributes[RespanSpanAttributes.RESPAN_LOG_TYPE],
+      "task",
+    );
     assert.deepEqual(JSON.parse(retry.attributes["traceloop.entity.input"]), {
       retry_count: 1,
     });
     assert.equal(
-      JSON.parse(retry.attributes[RespanSpanAttributes.RESPAN_METADATA]).retry_count,
+      JSON.parse(retry.attributes[RespanSpanAttributes.RESPAN_METADATA])
+        .retry_count,
       1,
     );
     assert.equal(retry.status.code, SpanStatusCode.ERROR);
@@ -322,8 +335,14 @@ test("standalone llm_request remains a chat without metrics-as-output or empty c
 
     const exported = findSpan(harness.exporter, "llm_request");
     assert.ok(exported);
-    assert.equal(exported.attributes[RespanSpanAttributes.RESPAN_LOG_TYPE], "chat");
-    assert.equal(exported.attributes["gen_ai.request.model"], "standalone-model");
+    assert.equal(
+      exported.attributes[RespanSpanAttributes.RESPAN_LOG_TYPE],
+      "chat",
+    );
+    assert.equal(
+      exported.attributes["gen_ai.request.model"],
+      "standalone-model",
+    );
     assert.equal(exported.attributes["llm.usage.total_tokens"], 3);
     assert.equal(exported.attributes["traceloop.entity.input"], undefined);
     assert.equal(exported.attributes["traceloop.entity.output"], undefined);
@@ -372,7 +391,9 @@ test("interleaved LiveKit nodes keep correlation state isolated by trace and spa
 
     const chats = harness.exporter
       .getFinishedSpans()
-      .filter((span) => span.attributes["traceloop.entity.path"] === "llm_node");
+      .filter(
+        (span) => span.attributes["traceloop.entity.path"] === "llm_node",
+      );
     assert.equal(chats.length, 2);
     const modelsByOutput = Object.fromEntries(
       chats.map((span) => [
@@ -384,9 +405,7 @@ test("interleaved LiveKit nodes keep correlation state isolated by trace and spa
       "response A": "model-a",
       "response B": "model-b",
     });
-    harness.exporter
-      .getFinishedSpans()
-      .forEach(assertNoRawLiveKitAttributes);
+    harness.exporter.getFinishedSpans().forEach(assertNoRawLiveKitAttributes);
 
     first.deactivate();
     assert.deepEqual(getRegisteredSpanTransformerKeys(), [
@@ -438,14 +457,20 @@ test("tool, user-turn, and TTS spans keep their span-contract mappings", async (
     tts.end();
 
     const exportedTool = findSpan(harness.exporter, "function_tool");
-    assert.deepEqual(JSON.parse(exportedTool.attributes["traceloop.entity.input"]), {
-      name: "get_weather",
-      arguments: { city: "Tokyo" },
-    });
-    assert.deepEqual(JSON.parse(exportedTool.attributes["traceloop.entity.output"]), {
-      output: { forecast: "sunny" },
-      is_error: false,
-    });
+    assert.deepEqual(
+      JSON.parse(exportedTool.attributes["traceloop.entity.input"]),
+      {
+        name: "get_weather",
+        arguments: { city: "Tokyo" },
+      },
+    );
+    assert.deepEqual(
+      JSON.parse(exportedTool.attributes["traceloop.entity.output"]),
+      {
+        output: { forecast: "sunny" },
+        is_error: false,
+      },
+    );
     assert.equal(exportedTool.attributes.tool_calls, undefined);
     assertNoRawLiveKitAttributes(exportedTool);
 

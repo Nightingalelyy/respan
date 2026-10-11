@@ -7,7 +7,14 @@ import { LiveKitSpanTransformer } from "./_transformer.js";
 
 type AnyFunction = (...args: any[]) => any;
 const LIVEKIT_TRANSFORMER_KEY = "@respan/instrumentation-livekit";
-const SHARED_LIVEKIT_TRANSFORMER = new LiveKitSpanTransformer();
+const transformerSymbol = Symbol.for(
+  "respan.instrumentation.livekit.transformer.v1",
+);
+const registry = globalThis as typeof globalThis & {
+  [transformerSymbol]?: LiveKitSpanTransformer;
+};
+const SHARED_LIVEKIT_TRANSFORMER = (registry[transformerSymbol] ??=
+  new LiveKitSpanTransformer());
 
 export interface LiveKitTelemetryModule {
   tracer?: {
@@ -24,6 +31,9 @@ export interface LiveKitAgentsModule {
 }
 
 export interface LiveKitInstrumentorOptions {
+  traceContent?: boolean;
+  recordInputs?: boolean;
+  recordOutputs?: boolean;
   livekitModule?: LiveKitAgentsModule;
   telemetryModule?: LiveKitTelemetryModule;
   syncTracerProvider?: boolean;
@@ -32,6 +42,8 @@ export interface LiveKitInstrumentorOptions {
 export class LiveKitInstrumentor {
   public readonly name = LIVEKIT_INSTRUMENTATION_NAME;
 
+  private readonly _captureOptions: LiveKitInstrumentorOptions;
+  private _releaseOptions?: () => void;
   private readonly _livekitModule?: LiveKitAgentsModule;
   private readonly _telemetryModule?: LiveKitTelemetryModule;
   private readonly _syncTracerProvider: boolean;
@@ -41,6 +53,11 @@ export class LiveKitInstrumentor {
   private _isInstrumented = false;
 
   constructor(options: LiveKitInstrumentorOptions = {}) {
+    this._captureOptions = {
+      traceContent: options.traceContent,
+      recordInputs: options.recordInputs,
+      recordOutputs: options.recordOutputs,
+    };
     this._livekitModule = options.livekitModule;
     this._telemetryModule = options.telemetryModule;
     this._syncTracerProvider = options.syncTracerProvider ?? true;
@@ -91,6 +108,9 @@ export class LiveKitInstrumentor {
       return;
     }
 
+    this._releaseOptions = SHARED_LIVEKIT_TRANSFORMER.acquire(
+      this._captureOptions,
+    );
     this._transformerRegistration = registration;
     this._isInstrumented = true;
   }
@@ -106,6 +126,8 @@ export class LiveKitInstrumentor {
       this._transformerRegistration = undefined;
     }
 
+    this._releaseOptions?.();
+    this._releaseOptions = undefined;
     this._isInstrumented = false;
   }
 
@@ -113,7 +135,9 @@ export class LiveKitInstrumentor {
     return this._isInstrumented;
   }
 
-  private async _resolveTelemetryModule(): Promise<LiveKitTelemetryModule | undefined> {
+  private async _resolveTelemetryModule(): Promise<
+    LiveKitTelemetryModule | undefined
+  > {
     if (this._telemetryModule) {
       return this._telemetryModule;
     }
@@ -122,16 +146,18 @@ export class LiveKitInstrumentor {
     }
 
     try {
-      const livekit = await import("@livekit/agents") as unknown as LiveKitAgentsModule;
+      const livekit =
+        (await import("@livekit/agents")) as unknown as LiveKitAgentsModule;
       return livekit.telemetry;
     } catch {
       return undefined;
     }
   }
-
 }
 
-function syncLiveKitTracerProvider(telemetryModule: LiveKitTelemetryModule): void {
+function syncLiveKitTracerProvider(
+  telemetryModule: LiveKitTelemetryModule,
+): void {
   const provider = resolveActiveTracerProvider();
   if (!provider) {
     return;
@@ -156,7 +182,9 @@ function syncLiveKitTracerProvider(telemetryModule: LiveKitTelemetryModule): voi
 }
 
 function resolveActiveTracerProvider(): unknown {
-  const provider = trace.getTracerProvider() as unknown as { _delegate?: unknown };
+  const provider = trace.getTracerProvider() as unknown as {
+    _delegate?: unknown;
+  };
   return provider?._delegate ?? provider;
 }
 
@@ -167,14 +195,13 @@ function registerLiveKitTransformer(): SpanTransformerRegistration {
   if (typeof registerSpanTransformer !== "function") {
     throw new Error(
       "@respan/instrumentation-livekit requires a compatible @respan/tracing " +
-      "runtime with registerSpanTransformer(). Upgrade @respan/tracing before activation.",
+        "runtime with registerSpanTransformer(). Upgrade @respan/tracing before activation.",
     );
   }
 
-  return (registerSpanTransformer as typeof RespanTracing.registerSpanTransformer)(
-    LIVEKIT_TRANSFORMER_KEY,
-    SHARED_LIVEKIT_TRANSFORMER,
-  );
+  return (
+    registerSpanTransformer as typeof RespanTracing.registerSpanTransformer
+  )(LIVEKIT_TRANSFORMER_KEY, SHARED_LIVEKIT_TRANSFORMER);
 }
 
 export { LiveKitSpanTransformer, translateLiveKitSpan };
