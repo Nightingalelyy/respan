@@ -321,6 +321,11 @@ for (const option of [
       },
       (span) => {
         actual = trace.getSpan(context.active());
+        span.setAttribute("traceloop.entity.input", "PRIVATE_CANONICAL_INPUT");
+        span.setAttribute(
+          "traceloop.entity.output",
+          "PRIVATE_CANONICAL_OUTPUT",
+        );
         span.setAttribute(OI.INPUT_VALUE, "PRIVATE_INPUT");
         span.setAttribute(OI.OUTPUT_VALUE, "PRIVATE_OUTPUT");
         span.setAttribute(OI.LLM_MODEL_NAME, "safe-model");
@@ -338,11 +343,11 @@ for (const option of [
     assert.equal(attrs["gen_ai.request.model"], "safe-model");
     assert.equal(
       attrs["traceloop.entity.input"],
-      option.recordOutputs === false ? "PRIVATE_INPUT" : undefined,
+      option.recordOutputs === false ? "PRIVATE_CANONICAL_INPUT" : undefined,
     );
     assert.equal(
       attrs["traceloop.entity.output"],
-      option.recordInputs === false ? "PRIVATE_OUTPUT" : undefined,
+      option.recordInputs === false ? "PRIVATE_CANONICAL_OUTPUT" : undefined,
     );
     assert.equal(attrs.unknown, undefined);
     assert.deepEqual(env.exported[0].status, { code: 2 });
