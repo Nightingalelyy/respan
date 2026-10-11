@@ -2,7 +2,7 @@
   "name": "@respan/instrumentation-cursor",
   "type": "module",
   "version": "0.1.0",
-  "description": "Respan instrumentation plugin for the Cursor TypeScript SDK",
+  "description": "Respan instrumentation plugin for the native Cursor TypeScript SDK",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "author": "Respan <team@respan.ai>",
@@ -29,14 +29,13 @@
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/core": "^2.10.0",
-    "@opentelemetry/sdk-trace-base": "^2.10.0",
     "@opentelemetry/semantic-conventions": "^1.43.0",
-    "@respan/respan-sdk": "workspace:^",
-    "@respan/tracing": "workspace:^",
+    "@respan/respan-sdk": "^1.3.4",
+    "@respan/tracing": "^1.6.1",
     "@traceloop/ai-semantic-conventions": "^0.13.0"
   },
   "peerDependencies": {
-    "@cursor/sdk": ">=1.0.0"
+    "@cursor/sdk": ">=1.0.7"
   },
   "peerDependenciesMeta": {
     "@cursor/sdk": {
@@ -45,6 +44,12 @@
   },
   "devDependencies": {
     "@types/node": "^22.15.29",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "@cursor/sdk": "1.0.37",
+    "@opentelemetry/context-async-hooks": "^2.10.0",
+    "@opentelemetry/sdk-trace-base": "^2.10.0"
+  },
+  "engines": {
+    "node": ">=22.13"
   }
 }

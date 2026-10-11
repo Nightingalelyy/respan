@@ -1,309 +1,269 @@
-import { context, trace, TraceFlags } from "@opentelemetry/api";
-import { hrTime } from "@opentelemetry/core";
-import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import {
-  ATTR_GEN_AI_COMPLETION,
+  context,
+  trace,
+  SpanKind,
+  SpanStatusCode,
+  type Context,
+  type Span,
+} from "@opentelemetry/api";
+import { RespanSpanAttributes } from "@respan/respan-sdk";
+import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
+import {
   ATTR_GEN_AI_PROMPT,
-  ATTR_GEN_AI_USAGE_COMPLETION_TOKENS,
+  ATTR_GEN_AI_COMPLETION,
   ATTR_GEN_AI_USAGE_INPUT_TOKENS,
   ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
   ATTR_GEN_AI_USAGE_PROMPT_TOKENS,
+  ATTR_GEN_AI_USAGE_COMPLETION_TOKENS,
+  ATTR_GEN_AI_RESPONSE_MODEL,
+  ATTR_GEN_AI_RESPONSE_ID,
+  ATTR_GEN_AI_RESPONSE_FINISH_REASONS,
+  ATTR_GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
+  ATTR_GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
 } from "@opentelemetry/semantic-conventions/incubating";
-import { RespanLogType, RespanSpanAttributes } from "@respan/respan-sdk";
-import { buildReadableSpan, injectSpan } from "@respan/tracing";
-import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
 import {
   INSTRUMENTATION_LIBRARY_NAME,
   PACKAGE_VERSION,
-  RESPAN_LOG_METHOD_TS_TRACING,
-  STATUS_CODE_ATTR,
   TOGETHER_SYSTEM_NAME,
 } from "./_constants.js";
 import {
+  dataValue,
+  protect,
+  type Capture,
+  type CaptureOptions,
+} from "./_capture.js";
+import {
   applyTokenUsage,
-  extractToolExecutions,
-  formatChatOutputMessage,
   formatInputMessages,
-  formatTextCompletion,
   formatTextPrompt,
   formatTools,
-  resolveErrorMessage,
-  resolveModel,
-  resolveStatusCode,
   safeJson,
-  stringifyStructured,
   summarizeRequestBody,
   toSerializableValue,
-  type ToolExecution,
+  resolveStatusCode,
 } from "./_helpers.js";
 import type { TogetherOperationSpec } from "./_types.js";
 
-const GEN_AI_COMPLETION_0_PREFIX = `${ATTR_GEN_AI_COMPLETION}.0`;
-const GEN_AI_COMPLETION_0_ROLE = `${GEN_AI_COMPLETION_0_PREFIX}.role`;
-const GEN_AI_COMPLETION_0_CONTENT = `${GEN_AI_COMPLETION_0_PREFIX}.content`;
-const GEN_AI_COMPLETION_0_TOOL_CALLS = `${GEN_AI_COMPLETION_0_PREFIX}.tool_calls`;
-
-const TOKEN_USAGE_KEYS = {
+export interface Operation {
+  span: Span;
+  ctx: Context;
+  capture: Capture;
+  spec: TogetherOperationSpec;
+  request: any;
+  ended: boolean;
+}
+const usageKeys = {
   inputTokens: ATTR_GEN_AI_USAGE_INPUT_TOKENS,
   outputTokens: ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
   promptTokens: ATTR_GEN_AI_USAGE_PROMPT_TOKENS,
   completionTokens: ATTR_GEN_AI_USAGE_COMPLETION_TOKENS,
   totalTokens: SpanAttributes.LLM_USAGE_TOTAL_TOKENS,
 };
-
-function buildInstrumentedReadableSpan(opts: {
-  name: string;
-  startTime: [number, number];
-  endTime: [number, number];
-  attributes: Record<string, any>;
-  statusCode?: number;
-  errorMessage?: string;
-}): ReadableSpan {
-  const activeSpanContext = trace.getSpan(context.active())?.spanContext();
-  const span = buildReadableSpan({
-    name: opts.name,
-    traceId: activeSpanContext?.traceId,
-    parentId: activeSpanContext?.spanId,
-    startTimeHr: opts.startTime,
-    endTimeHr: opts.endTime,
-    attributes: opts.attributes,
-    statusCode: opts.statusCode,
-    errorMessage: opts.errorMessage,
-  }) as ReadableSpan & {
-    instrumentationScope?: { name: string; version?: string };
-    spanContext: () => ReturnType<ReadableSpan["spanContext"]>;
-  };
-
-  const originalSpanContext = span.spanContext.bind(span);
-  span.spanContext = () => ({
-    ...originalSpanContext(),
-    traceFlags: activeSpanContext?.traceFlags ?? TraceFlags.SAMPLED,
-  });
-  span.instrumentationScope = {
-    name: INSTRUMENTATION_LIBRARY_NAME,
-    version: PACKAGE_VERSION,
-  };
-  return span;
-}
-
-function setIfDefined(attrs: Record<string, any>, key: string, value: unknown): void {
-  if (value === undefined || value === null || value === "") return;
-  attrs[key] = value;
-}
-
-function setRequestOptionAttrs(attrs: Record<string, any>, request: any): void {
-  setIfDefined(attrs, SpanAttributes.LLM_REQUEST_MAX_TOKENS, request?.max_tokens);
-  setIfDefined(attrs, SpanAttributes.LLM_REQUEST_TEMPERATURE, request?.temperature);
-  setIfDefined(attrs, SpanAttributes.LLM_REQUEST_TOP_P, request?.top_p);
-  setIfDefined(attrs, SpanAttributes.LLM_FREQUENCY_PENALTY, request?.frequency_penalty);
-  setIfDefined(attrs, SpanAttributes.LLM_PRESENCE_PENALTY, request?.presence_penalty);
-  if (Array.isArray(request?.stop) && request.stop.length > 0) {
-    attrs[SpanAttributes.LLM_CHAT_STOP_SEQUENCES] = request.stop.map(String);
-  }
-}
-
-function setPromptAttrs(attrs: Record<string, any>, messages: Record<string, any>[]): void {
-  messages.forEach((message, index) => {
-    const prefix = `${ATTR_GEN_AI_PROMPT}.${index}`;
-    setIfDefined(attrs, `${prefix}.role`, message.role);
-    setIfDefined(attrs, `${prefix}.content`, stringifyStructured(message.content ?? ""));
-    if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
-      attrs[`${prefix}.tool_calls`] = safeJson(message.tool_calls);
-    }
-  });
-}
-
-function buildBaseAttrs(
+export function startOperation(
   spec: TogetherOperationSpec,
   request: any,
-  response?: any,
-): Record<string, any> {
-  const attrs: Record<string, any> = {
-    [SpanAttributes.TRACELOOP_ENTITY_NAME]: spec.spanName,
-    [SpanAttributes.TRACELOOP_ENTITY_PATH]: spec.spanName,
-    [RespanSpanAttributes.RESPAN_LOG_METHOD]: RESPAN_LOG_METHOD_TS_TRACING,
-    [RespanSpanAttributes.RESPAN_LOG_TYPE]: spec.logType,
-    [SpanAttributes.LLM_SYSTEM]: TOGETHER_SYSTEM_NAME,
-    [SpanAttributes.LLM_REQUEST_TYPE]: spec.requestType,
+  options: CaptureOptions,
+): Operation {
+  const parent = context.active();
+  const model = dataValue(request, "model");
+  const span = trace
+    .getTracer(INSTRUMENTATION_LIBRARY_NAME, PACKAGE_VERSION)
+    .startSpan(
+      spec.spanName,
+      {
+        kind: SpanKind.CLIENT,
+        attributes: {
+          [SpanAttributes.TRACELOOP_ENTITY_NAME]: spec.spanName,
+          [SpanAttributes.TRACELOOP_ENTITY_PATH]: "",
+          [SpanAttributes.LLM_SYSTEM]: TOGETHER_SYSTEM_NAME,
+          [SpanAttributes.LLM_REQUEST_TYPE]: spec.requestType,
+          [RespanSpanAttributes.RESPAN_LOG_TYPE]: spec.logType,
+          ...(typeof model === "string"
+            ? { [SpanAttributes.LLM_REQUEST_MODEL]: model }
+            : {}),
+        },
+      },
+      parent,
+    );
+  const capture = protect(span, parent, options);
+  const op: Operation = {
+    span,
+    ctx: trace.setSpan(parent, span),
+    capture,
+    spec,
+    request: undefined,
+    ended: false,
   };
-
-  const model = resolveModel(request, response);
-  if (model) attrs[SpanAttributes.LLM_REQUEST_MODEL] = model;
-  setRequestOptionAttrs(attrs, request);
-
-  if (spec.kind === "chat") {
-    const messages = formatInputMessages(request?.messages);
+  if (capture.inputs) {
+    try {
+      op.request = toSerializableValue(request);
+    } catch {}
+  }
+  return op;
+}
+function requestAttrs(op: Operation): Record<string, any> {
+  const request = op.request;
+  const attrs: Record<string, any> = {};
+  if (!op.capture.inputs || !request) return attrs;
+  if (op.spec.kind === "chat") {
+    const messages = formatInputMessages(request.messages);
     attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson(messages);
-    setPromptAttrs(attrs, messages);
-
-    const tools = formatTools(request?.tools);
-    if (tools.length > 0) {
+    const tools = formatTools(request.tools);
+    if (tools.length)
       attrs[SpanAttributes.LLM_REQUEST_FUNCTIONS] = safeJson(tools);
-    }
-    return attrs;
+  } else if (op.spec.kind === "text")
+    attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson(
+      formatTextPrompt(request.prompt),
+    );
+  else if (op.spec.kind === "embedding")
+    attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson(request.input);
+  else
+    attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson(
+      summarizeRequestBody(request),
+    );
+  for (const [field, key] of [
+    ["max_tokens", SpanAttributes.LLM_REQUEST_MAX_TOKENS],
+    ["temperature", SpanAttributes.LLM_REQUEST_TEMPERATURE],
+    ["top_p", SpanAttributes.LLM_REQUEST_TOP_P],
+    ["frequency_penalty", SpanAttributes.LLM_FREQUENCY_PENALTY],
+    ["presence_penalty", SpanAttributes.LLM_PRESENCE_PENALTY],
+  ]) {
+    const value = dataValue(request, field);
+    if (typeof value === "number" && Number.isFinite(value)) attrs[key] = value;
   }
-
-  if (spec.kind === "text") {
-    const promptMessages = formatTextPrompt(request?.prompt);
-    attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson(promptMessages);
-    setPromptAttrs(attrs, promptMessages);
-    return attrs;
-  }
-
-  if (spec.kind === "embedding") {
-    attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson(request?.input);
-    return attrs;
-  }
-
-  attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson(summarizeRequestBody(request));
   return attrs;
 }
-
-function setChatSuccessAttrs(attrs: Record<string, any>, response: any): void {
-  const outputMessage = formatChatOutputMessage(response);
-  attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson([outputMessage]);
-  attrs[GEN_AI_COMPLETION_0_ROLE] = outputMessage.role ?? "assistant";
-  attrs[GEN_AI_COMPLETION_0_CONTENT] = stringifyStructured(outputMessage.content ?? "");
-  if (Array.isArray(outputMessage.tool_calls) && outputMessage.tool_calls.length > 0) {
-    attrs[GEN_AI_COMPLETION_0_TOOL_CALLS] = safeJson(outputMessage.tool_calls);
-  }
-  applyTokenUsage(attrs, response?.usage, TOKEN_USAGE_KEYS);
-}
-
-function setTextSuccessAttrs(attrs: Record<string, any>, response: any): void {
-  const content = formatTextCompletion(response);
-  attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson([
-    { role: "assistant", content },
-  ]);
-  attrs[GEN_AI_COMPLETION_0_ROLE] = "assistant";
-  attrs[GEN_AI_COMPLETION_0_CONTENT] = content;
-  applyTokenUsage(attrs, response?.usage, TOKEN_USAGE_KEYS);
-}
-
-function setEmbeddingSuccessAttrs(attrs: Record<string, any>, response: any): void {
-  const vectors = Array.isArray(response?.data)
-    ? response.data.map((item: any) => ({
-        index: item?.index,
-        embedding: item?.embedding,
-      }))
-    : response;
-  attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson(vectors);
-}
-
-function setGenericSuccessAttrs(attrs: Record<string, any>, response: any): void {
-  attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson(toSerializableValue(response));
-  applyTokenUsage(attrs, response?.usage, TOKEN_USAGE_KEYS);
-}
-
-function applySuccessAttrs(
-  attrs: Record<string, any>,
-  spec: TogetherOperationSpec,
-  response: any,
+export function finishOperation(
+  op: Operation,
+  response?: any,
+  error?: unknown,
+  hasError = false,
 ): void {
-  if (spec.kind === "chat") {
-    setChatSuccessAttrs(attrs, response);
-  } else if (spec.kind === "text") {
-    setTextSuccessAttrs(attrs, response);
-  } else if (spec.kind === "embedding") {
-    setEmbeddingSuccessAttrs(attrs, response);
-  } else {
-    setGenericSuccessAttrs(attrs, response);
-  }
-}
-
-function emitSpan(
-  spec: TogetherOperationSpec,
-  attrs: Record<string, any>,
-  startTime: [number, number],
-  errorMessage?: string,
-  statusCode?: number,
-): void {
+  if (op.ended) return;
+  op.ended = true;
+  op.capture.observe();
   try {
-    const span = buildInstrumentedReadableSpan({
-      name: spec.spanName,
-      startTime,
-      endTime: hrTime(),
-      attributes: attrs,
-      statusCode,
-      errorMessage,
-    });
-    injectSpan(span);
-  } catch {
-    // Instrumentation must never break the application.
-  }
-}
-
-export function emitSuccessSpan(
-  spec: TogetherOperationSpec,
-  request: any,
-  startTime: [number, number],
-  response: any,
-): void {
-  try {
-    const attrs = buildBaseAttrs(spec, request, response);
-    applySuccessAttrs(attrs, spec, response);
-    emitSpan(spec, attrs, startTime);
-  } catch {
-    // Instrumentation must never break the application.
-  }
-}
-
-export function emitErrorSpan(
-  spec: TogetherOperationSpec,
-  request: any,
-  startTime: [number, number],
-  err: unknown,
-): void {
-  try {
-    const errorMessage = resolveErrorMessage(err);
-    const statusCode = resolveStatusCode(err);
-    const attrs = buildBaseAttrs(spec, request);
-    attrs["error.message"] = errorMessage;
-    if (statusCode !== undefined) attrs[STATUS_CODE_ATTR] = statusCode;
-    emitSpan(spec, attrs, startTime, errorMessage, statusCode);
-  } catch {
-    // Instrumentation must never break the application.
-  }
-}
-
-export function emitToolSpan(toolExecution: ToolExecution): void {
-  const startTime = hrTime();
-  const attrs: Record<string, any> = {
-    [SpanAttributes.TRACELOOP_ENTITY_NAME]: toolExecution.name,
-    [SpanAttributes.TRACELOOP_ENTITY_PATH]: toolExecution.name,
-    [RespanSpanAttributes.RESPAN_LOG_METHOD]: RESPAN_LOG_METHOD_TS_TRACING,
-    [RespanSpanAttributes.RESPAN_LOG_TYPE]: RespanLogType.TOOL,
-    [SpanAttributes.TRACELOOP_ENTITY_INPUT]: safeJson({
-      name: toolExecution.name,
-      arguments: toSerializableValue(toolExecution.input),
-    }),
-    [SpanAttributes.TRACELOOP_ENTITY_OUTPUT]: safeJson(toSerializableValue(toolExecution.output)),
-  };
-
-  if (toolExecution.id) attrs["tool_call_id"] = toolExecution.id;
-  if (toolExecution.isError) attrs["error.message"] = stringifyStructured(toolExecution.output);
-
-  const toolSpec: TogetherOperationSpec = {
-    kind: "chat",
-    method: "create",
-    spanName: `${toolExecution.name}.tool`,
-    logType: RespanLogType.TOOL,
-    requestType: "tool",
-  };
-  emitSpan(
-    toolSpec,
-    attrs,
-    startTime,
-    toolExecution.isError ? stringifyStructured(toolExecution.output) : undefined,
-  );
-}
-
-export function emitToolSpansFromMessages(messages: any[] | undefined): void {
-  for (const toolExecution of extractToolExecutions(messages)) {
-    try {
-      emitToolSpan(toolExecution);
-    } catch {
-      // Instrumentation must never break the application.
+    const attrs = requestAttrs(op);
+    if (!hasError && response !== undefined && op.span.isRecording()) {
+      const responseModel = dataValue(response, "model");
+      if (typeof responseModel === "string")
+        attrs[ATTR_GEN_AI_RESPONSE_MODEL] = responseModel;
+      const responseId = dataValue(response, "id");
+      if (typeof responseId === "string")
+        attrs[ATTR_GEN_AI_RESPONSE_ID] = responseId;
+      const usage = dataValue(response, "usage");
+      if (usage && typeof usage === "object") {
+        const safeUsage: Record<string, unknown> = {};
+        for (const key of [
+          "prompt_tokens",
+          "completion_tokens",
+          "input_tokens",
+          "output_tokens",
+          "total_tokens",
+        ]) {
+          const value = dataValue(usage, key);
+          if (typeof value === "number" && Number.isFinite(value))
+            safeUsage[key] = value;
+        }
+        applyTokenUsage(attrs, safeUsage, usageKeys);
+        const details = dataValue(usage, "prompt_tokens_details"),
+          completionDetails = dataValue(usage, "completion_tokens_details");
+        const cached = dataValue(details, "cached_tokens"),
+          reasoning = dataValue(completionDetails, "reasoning_tokens");
+        if (typeof cached === "number" && Number.isFinite(cached))
+          attrs[ATTR_GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] = cached;
+        if (typeof reasoning === "number" && Number.isFinite(reasoning))
+          attrs[ATTR_GEN_AI_USAGE_REASONING_OUTPUT_TOKENS] = reasoning;
+      }
+      if (op.capture.outputs) {
+        if (op.spec.kind === "chat") {
+          const outputs = Array.isArray(response?.choices)
+            ? response.choices.map((choice: any) => {
+                const message = choice.message ?? {};
+                return {
+                  ...toSerializableValue(message),
+                  role: message.role ?? "assistant",
+                };
+              })
+            : [];
+          attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson(outputs);
+          const first = outputs[0];
+          if (first) {
+            attrs[`${ATTR_GEN_AI_COMPLETION}.0.role`] = first.role;
+            if (first.content !== undefined)
+              attrs[`${ATTR_GEN_AI_COMPLETION}.0.content`] =
+                typeof first.content === "string"
+                  ? first.content
+                  : safeJson(first.content);
+            if (first.tool_calls?.length)
+              attrs[`${ATTR_GEN_AI_COMPLETION}.0.tool_calls`] = safeJson(
+                first.tool_calls,
+              );
+          }
+        } else if (op.spec.kind === "text")
+          attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson(
+            (response?.choices ?? []).map((choice: any) => ({
+              role: "assistant",
+              content: choice.text ?? "",
+            })),
+          );
+        else if (op.spec.kind === "embedding")
+          attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson(
+            response?.data ?? response,
+          );
+        else
+          attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson(
+            toSerializableValue(response),
+          );
+      }
     }
+    // Canonical bodies, schemas and all usage precede optional indexed messages.
+    op.span.setAttributes(attrs);
+    if (!hasError && op.capture.outputs && Array.isArray(response?.choices)) {
+      const reasons = response.choices
+        .map((choice: any) => choice.finish_reason)
+        .filter((value: any) => typeof value === "string");
+      if (reasons.length)
+        op.span.setAttribute(ATTR_GEN_AI_RESPONSE_FINISH_REASONS, reasons);
+    }
+    if (op.capture.inputs && op.spec.kind === "chat")
+      formatInputMessages(op.request?.messages).forEach((message, index) => {
+        op.span.setAttribute(
+          `${ATTR_GEN_AI_PROMPT}.${index}.role`,
+          message.role,
+        );
+        if (message.content !== undefined)
+          op.span.setAttribute(
+            `${ATTR_GEN_AI_PROMPT}.${index}.content`,
+            typeof message.content === "string"
+              ? message.content
+              : safeJson(message.content),
+          );
+        if (message.tool_calls?.length)
+          op.span.setAttribute(
+            `${ATTR_GEN_AI_PROMPT}.${index}.tool_calls`,
+            safeJson(message.tool_calls),
+          );
+      });
+    if (hasError) {
+      op.span.setStatus({
+        code: SpanStatusCode.ERROR,
+        ...(op.capture.inputs && op.capture.outputs
+          ? { message: error instanceof Error ? error.message : String(error) }
+          : {}),
+      });
+      if (op.capture.inputs && op.capture.outputs)
+        op.span.recordException(
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      const status =
+        dataValue(error, "status") ?? dataValue(error, "statusCode");
+      if (typeof status === "number" && Number.isFinite(status))
+        op.span.setAttribute("status_code", status);
+    }
+  } catch {
+  } finally {
+    op.span.end();
+    op.request = undefined;
   }
 }

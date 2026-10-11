@@ -1,408 +1,220 @@
 import { createRequire } from "node:module";
+import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-
-/**
- * Respan instrumentation plugin for the Google Vertex AI TypeScript SDK.
- *
- * Patches generation and chat methods from `@google-cloud/vertexai` to emit
- * canonical Respan chat spans for sync-like promises, streaming responses, and
- * chat sessions.
- */
-
+import { context } from "@opentelemetry/api";
+import { type CaptureOptions } from "./_capture.js";
 import {
-  CHAT_SESSION_CLASS_NAME,
-  GENERATE_CONTENT_METHOD_NAME,
-  GENERATE_CONTENT_STREAM_METHOD_NAME,
-  GENERATIVE_MODEL_CLASS_NAME,
-  SEND_MESSAGE_METHOD_NAME,
-  SEND_MESSAGE_STREAM_METHOD_NAME,
-  START_CHAT_METHOD_NAME,
-  VERTEXAI_CHAT_SPAN_NAME,
-  VERTEXAI_GENERATE_CONTENT_SPAN_NAME,
-  VERTEXAI_INSTRUMENTATION_NAME,
-} from "./_constants.js";
-import { emitGenerateContentSpan } from "./_otel_emitter.js";
-import { requestPayloadFromCall, type VertexAIRequestPayload } from "./_translator.js";
-
-type AnyFunction = (...args: any[]) => any;
-type PatchablePrototype = Record<string, unknown>;
-
+  startOperation,
+  finishOperation,
+  type VertexOperation,
+} from "./_otel_emitter.js";
+import { wrapStream } from "./_streaming.js";
+type Prototype = Record<string, any>;
 export interface VertexAIModule {
-  GenerativeModel?: { prototype?: PatchablePrototype };
-  ChatSession?: { prototype?: PatchablePrototype };
+  GenerativeModel?: { prototype?: Prototype };
+  GenerativeModelPreview?: { prototype?: Prototype };
+  ChatSession?: { prototype?: Prototype };
+  ChatSessionPreview?: { prototype?: Prototype };
 }
-
-export interface VertexAIInstrumentorOptions {
+export interface GoogleGenAIModule {
+  Models?: { prototype?: Prototype };
+}
+export interface VertexAIInstrumentorOptions extends CaptureOptions {
   sdkModule?: VertexAIModule;
+  genaiModule?: GoogleGenAIModule;
 }
-
-interface PatchedMethod {
-  methodName: string;
-  original: AnyFunction;
-  prototype: PatchablePrototype;
+interface Patch {
+  prototype: Prototype;
+  method: string;
+  original: any;
+  wrapped: any;
+  owners: Set<VertexAIInstrumentor>;
 }
-
-interface TraceCallOptions {
-  args: unknown[];
-  instance: unknown;
-  isChatMethod?: boolean;
-  isStreamMethod?: boolean;
-  original: AnyFunction;
-  spanName: string;
+const patches: Patch[] = [];
+function options(owners: Set<VertexAIInstrumentor>): CaptureOptions {
+  return {
+    traceContent: [...owners].every(
+      (owner) => owner.options.traceContent !== false,
+    ),
+    recordInputs: [...owners].every(
+      (owner) => owner.options.recordInputs !== false,
+    ),
+    recordOutputs: [...owners].every(
+      (owner) => owner.options.recordOutputs !== false,
+    ),
+  };
 }
-
-const PATCHED_BY_RESPAN = Symbol.for("respan.instrumentation.vertexai.patched");
-
-function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
-  return Boolean(value && typeof (value as PromiseLike<unknown>).then === "function");
-}
-
-function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
-  return Boolean(value && typeof (value as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function");
-}
-
-function isStreamResult(value: unknown): boolean {
-  return Boolean(value && typeof value === "object" && "stream" in value);
-}
-
-async function collectAsyncChunks(iterable: AsyncIterable<unknown>): Promise<unknown[]> {
-  const chunks: unknown[] = [];
-  for await (const chunk of iterable) {
-    chunks.push(chunk);
-  }
-  return chunks;
-}
-
-function emitSuccess(
-  requestPayload: VertexAIRequestPayload,
-  startTimeIso: string,
-  spanName: string,
-  responseOrChunks: unknown,
-): void {
-  emitGenerateContentSpan({
-    requestPayload,
-    startTimeIso,
-    responseOrChunks,
-    spanName,
-  });
-}
-
-function emitError(
-  requestPayload: VertexAIRequestPayload,
-  startTimeIso: string,
-  spanName: string,
-  error: unknown,
-): void {
-  emitGenerateContentSpan({
-    requestPayload,
-    startTimeIso,
-    spanName,
-    errorMessage: error instanceof Error ? error.message : String(error),
-    statusCode: 500,
-  });
-}
-
-function instrumentResponsePromise<T>(
-  responsePromise: PromiseLike<T>,
-  requestPayload: VertexAIRequestPayload,
-  startTimeIso: string,
-  spanName: string,
-): Promise<T> {
-  return Promise.resolve(responsePromise).then(
-    (response) => {
-      emitSuccess(requestPayload, startTimeIso, spanName, response);
-      return response;
-    },
-    (error) => {
-      emitError(requestPayload, startTimeIso, spanName, error);
-      throw error;
-    },
-  );
-}
-
-function instrumentResolvedResult<T>(
-  result: T,
-  requestPayload: VertexAIRequestPayload,
-  startTimeIso: string,
-  spanName: string,
-): T {
-  if (isAsyncIterable(result)) {
-    const wrapped = (async function* wrappedVertexAIStream() {
-      const chunks: unknown[] = [];
-      try {
-        for await (const chunk of result) {
-          chunks.push(chunk);
-          yield chunk;
-        }
-        emitSuccess(requestPayload, startTimeIso, spanName, chunks);
-      } catch (error) {
-        emitError(requestPayload, startTimeIso, spanName, error);
-        throw error;
-      }
-    })();
-    return wrapped as T;
-  }
-
+function instrumentResult(result: any, op: VertexOperation): any {
+  if (result && typeof result[Symbol.asyncIterator] === "function")
+    return wrapStream(result, op);
   if (result && typeof result === "object" && "response" in result) {
-    const responseValue = (result as Record<string, any>).response;
-    if (isPromiseLike(responseValue)) {
-      const instrumentedResponse = instrumentResponsePromise(
-        responseValue,
-        requestPayload,
-        startTimeIso,
-        spanName,
-      );
-      try {
-        (result as Record<string, any>).response = instrumentedResponse;
-      } catch {
-        instrumentedResponse.catch(() => undefined);
-      }
+    const response = result.response;
+    if (response && typeof response.then === "function") {
+      // Native Promise await bypasses own .then overrides; retain its identity.
+      response
+        .then(
+          (value: any) => {
+            finishOperation(op, value);
+          },
+          (error: unknown) => {
+            finishOperation(op, undefined, error, true);
+          },
+        )
+        .catch(() => {});
+      if (result.stream) wrapStream(result.stream, op);
       return result;
     }
-
-    emitSuccess(requestPayload, startTimeIso, spanName, responseValue);
+    finishOperation(op, response);
     return result;
   }
-
-  if (isStreamResult(result)) {
-    const stream = (result as Record<string, unknown>).stream;
-    if (isAsyncIterable(stream)) {
-      collectAsyncChunks(stream).then(
-        (chunks) => emitSuccess(requestPayload, startTimeIso, spanName, chunks),
-        (error) => emitError(requestPayload, startTimeIso, spanName, error),
-      );
-      return result;
-    }
-  }
-
-  emitSuccess(requestPayload, startTimeIso, spanName, result);
+  finishOperation(op, result);
   return result;
 }
-
-function traceVertexAICall<T>(opts: TraceCallOptions): T {
-  const startTimeIso = new Date().toISOString();
-  const requestPayload = requestPayloadFromCall(opts.instance, opts.args, {
-    isChatMethod: opts.isChatMethod,
-    isStreamMethod: opts.isStreamMethod,
-  });
-
-  try {
-    const result = opts.original.apply(opts.instance, opts.args);
-    if (isPromiseLike(result)) {
-      return Promise.resolve(result).then(
-        (resolved) => instrumentResolvedResult(
-          resolved,
-          requestPayload,
-          startTimeIso,
-          opts.spanName,
-        ),
-        (error) => {
-          emitError(requestPayload, startTimeIso, opts.spanName, error);
-          throw error;
-        },
-      ) as T;
-    }
-
-    return instrumentResolvedResult(result, requestPayload, startTimeIso, opts.spanName);
-  } catch (error) {
-    emitError(requestPayload, startTimeIso, opts.spanName, error);
-    throw error;
+function patch(
+  owner: VertexAIInstrumentor,
+  prototype: Prototype | undefined,
+  method: string,
+  genai = false,
+  embedding = false,
+  chat = false,
+  generation = false,
+): void {
+  if (!prototype || typeof prototype[method] !== "function") return;
+  const existing = patches.find(
+    (p) => p.prototype === prototype && p.method === method,
+  );
+  if (existing) {
+    existing.owners.add(owner);
+    return;
   }
-}
-
-function wrapMethod(
-  original: AnyFunction,
-  spanName: string,
-  opts: { isChatMethod?: boolean; isStreamMethod?: boolean } = {},
-): AnyFunction {
-  const wrapped = function wrappedVertexAIMethod(this: unknown, ...args: unknown[]) {
-    return traceVertexAICall({
-      args,
-      instance: this,
-      isChatMethod: opts.isChatMethod,
-      isStreamMethod: opts.isStreamMethod,
-      original,
-      spanName,
-    });
-  };
-  Object.defineProperty(wrapped, PATCHED_BY_RESPAN, {
-    enumerable: false,
-    value: true,
-  });
-  return wrapped;
-}
-
-export class VertexAIInstrumentor {
-  public readonly name = VERTEXAI_INSTRUMENTATION_NAME;
-
-  private static readonly _sharedState = {
-    activeInstances: 0,
-    patchedMethods: [] as PatchedMethod[],
-    patchedChatInstances: new WeakSet<object>(),
-  };
-
-  private readonly _sdkModule?: VertexAIModule;
-  private _isInstrumented = false;
-
-  constructor(options: VertexAIInstrumentorOptions = {}) {
-    this._sdkModule = options.sdkModule;
-  }
-
-  async activate(): Promise<void> {
-    if (this._isInstrumented) return;
-
-    const module = await this._resolveSdkModule();
-    if (!module) {
-      console.warn(
-        "[Respan] Failed to activate Vertex AI instrumentation - @google-cloud/vertexai not found",
+  const owners = new Set([owner]);
+  const original = prototype[method];
+  const wrapped = function (this: any, ...args: any[]) {
+    if (genai && this?.apiClient?.isVertexAI?.() !== true)
+      return original.apply(this, args);
+    let op: VertexOperation;
+    try {
+      op = startOperation(
+        this,
+        args,
+        options(owners),
+        genai,
+        embedding,
+        chat,
+        generation,
       );
-      return;
-    }
-
-    const sharedState = VertexAIInstrumentor._sharedState;
-    try {
-      this._patchGenerationPrototype(module.GenerativeModel?.prototype);
-      this._patchChatPrototype(module.ChatSession?.prototype);
-
-      if (sharedState.patchedMethods.length === 0) {
-        console.warn(
-          "[Respan] Failed to activate Vertex AI instrumentation - no compatible prototypes found",
-        );
-        return;
-      }
-
-      sharedState.activeInstances += 1;
-      this._isInstrumented = true;
-    } catch (error) {
-      console.warn("[Respan] Failed to activate Vertex AI instrumentation:", error);
-      this.deactivate();
-    }
-  }
-
-  deactivate(): void {
-    if (!this._isInstrumented) return;
-
-    const sharedState = VertexAIInstrumentor._sharedState;
-    sharedState.activeInstances = Math.max(0, sharedState.activeInstances - 1);
-    this._isInstrumented = false;
-
-    if (sharedState.activeInstances > 0) return;
-
-    for (const patched of sharedState.patchedMethods) {
-      patched.prototype[patched.methodName] = patched.original;
-    }
-    sharedState.patchedMethods = [];
-    sharedState.patchedChatInstances = new WeakSet<object>();
-  }
-
-  isActive(): boolean {
-    return this._isInstrumented;
-  }
-
-  private async _resolveSdkModule(): Promise<VertexAIModule | undefined> {
-    if (this._sdkModule) return this._sdkModule;
-    const moduleName = "@google-cloud/vertexai";
-    try {
-      const hostRequire = createRequire(`${process.cwd()}/package.json`);
-      return (await import(pathToFileURL(hostRequire.resolve(moduleName)).href)) as VertexAIModule;
     } catch {
-      try {
-        return (await import(moduleName)) as VertexAIModule;
-      } catch {
-        return undefined;
+      return original.apply(this, args);
+    }
+    try {
+      const result = context.with(op.ctx, () => original.apply(this, args));
+      if (result && typeof result.then === "function") {
+        return result.then(
+          (value: any) => instrumentResult(value, op),
+          (error: unknown) => {
+            finishOperation(op, undefined, error, true);
+            throw error;
+          },
+        );
+      }
+      return instrumentResult(result, op);
+    } catch (error) {
+      finishOperation(op, undefined, error, true);
+      throw error;
+    }
+  };
+  prototype[method] = wrapped;
+  patches.push({ prototype, method, original, wrapped, owners });
+}
+async function load(name: string): Promise<any[]> {
+  const result: any[] = [];
+  for (const base of [
+    import.meta.url,
+    pathToFileURL(process.cwd() + "/__respan_runtime__.js").href,
+  ])
+    try {
+      const require = createRequire(base);
+      const entry = require.resolve(name);
+      for (const candidate of [
+        entry,
+        entry.endsWith(".cjs") ? entry.slice(0, -4) + ".mjs" : entry,
+      ]) {
+        if (!existsSync(candidate)) continue;
+        const module = await import(pathToFileURL(candidate).href);
+        if (!result.includes(module)) result.push(module);
+      }
+    } catch {}
+  return result;
+}
+/** Instruments released Vertex AI clients and Google GenAI calls using the Vertex backend. */
+export class VertexAIInstrumentor {
+  readonly name = "vertexai";
+  private active = false;
+  private generation = 0;
+  private activating?: Promise<void>;
+  constructor(readonly options: VertexAIInstrumentorOptions = {}) {}
+  isActive(): boolean {
+    return this.active;
+  }
+  activate(): Promise<void> {
+    if (this.active) return Promise.resolve();
+    if (this.activating) return this.activating;
+    const generation = this.generation;
+    const pending = this.activateOnce(generation).finally(() => {
+      if (this.activating === pending) this.activating = undefined;
+    });
+    this.activating = pending;
+    return pending;
+  }
+  private async activateOnce(generation: number): Promise<void> {
+    const legacy = this.options.sdkModule
+      ? [this.options.sdkModule]
+      : await load("@google-cloud/vertexai");
+    const modern = this.options.genaiModule
+      ? [this.options.genaiModule]
+      : await load("@google/genai");
+    if (generation !== this.generation) return;
+    for (const module of legacy) {
+      for (const key of ["GenerativeModel", "GenerativeModelPreview"]) {
+        const proto = module[key]?.prototype;
+        patch(this, proto, "generateContent");
+        patch(this, proto, "generateContentStream");
+      }
+      for (const key of ["ChatSession", "ChatSessionPreview"]) {
+        const proto = module[key]?.prototype;
+        patch(this, proto, "sendMessage", false, false, true);
+        patch(this, proto, "sendMessageStream", false, false, true);
       }
     }
+    for (const module of modern) {
+      const proto = module.Models?.prototype;
+      patch(this, proto, "generateContentInternal", true);
+      patch(this, proto, "generateContentStreamInternal", true);
+      patch(this, proto, "embedContentInternal", true, true);
+      for (const method of [
+        "generateImagesInternal",
+        "editImageInternal",
+        "upscaleImageInternal",
+        "recontextImage",
+        "segmentImage",
+        "generateVideosInternal",
+      ])
+        patch(this, proto, method, true, false, false, true);
+    }
+    if (patches.some((p) => p.owners.has(this))) this.active = true;
   }
-
-  private _patchGenerationPrototype(prototype: PatchablePrototype | undefined): void {
-    if (!prototype) return;
-
-    this._patchMethod(
-      prototype,
-      GENERATE_CONTENT_METHOD_NAME,
-      VERTEXAI_GENERATE_CONTENT_SPAN_NAME,
-    );
-    this._patchMethod(
-      prototype,
-      GENERATE_CONTENT_STREAM_METHOD_NAME,
-      VERTEXAI_GENERATE_CONTENT_SPAN_NAME,
-      { isStreamMethod: true },
-    );
-    this._patchStartChat(prototype);
-  }
-
-  private _patchChatPrototype(prototype: PatchablePrototype | undefined): void {
-    if (!prototype) return;
-
-    this._patchMethod(
-      prototype,
-      SEND_MESSAGE_METHOD_NAME,
-      VERTEXAI_CHAT_SPAN_NAME,
-      { isChatMethod: true },
-    );
-    this._patchMethod(
-      prototype,
-      SEND_MESSAGE_STREAM_METHOD_NAME,
-      VERTEXAI_CHAT_SPAN_NAME,
-      { isChatMethod: true, isStreamMethod: true },
-    );
-  }
-
-  private _patchStartChat(prototype: PatchablePrototype): void {
-    const original = prototype[START_CHAT_METHOD_NAME];
-    if (typeof original !== "function") return;
-    if ((original as unknown as Record<symbol, unknown>)[PATCHED_BY_RESPAN]) return;
-
-    const instrumentor = this;
-    const wrapped = function wrappedStartChat(this: unknown, ...args: unknown[]) {
-      const chat = (original as AnyFunction).apply(this, args);
-      instrumentor._patchChatInstance(chat);
-      return chat;
-    };
-    Object.defineProperty(wrapped, PATCHED_BY_RESPAN, {
-      enumerable: false,
-      value: true,
-    });
-
-    prototype[START_CHAT_METHOD_NAME] = wrapped;
-    VertexAIInstrumentor._sharedState.patchedMethods.push({
-      methodName: START_CHAT_METHOD_NAME,
-      original: original as AnyFunction,
-      prototype,
-    });
-  }
-
-  private _patchChatInstance(chat: unknown): void {
-    if (!chat || typeof chat !== "object") return;
-    const sharedState = VertexAIInstrumentor._sharedState;
-    if (sharedState.patchedChatInstances.has(chat)) return;
-
-    const prototype = Object.getPrototypeOf(chat) as PatchablePrototype | undefined;
-    if (!prototype) return;
-
-    this._patchChatPrototype(prototype);
-    sharedState.patchedChatInstances.add(chat);
-  }
-
-  private _patchMethod(
-    prototype: PatchablePrototype,
-    methodName: string,
-    spanName: string,
-    opts: { isChatMethod?: boolean; isStreamMethod?: boolean } = {},
-  ): void {
-    const original = prototype[methodName];
-    if (typeof original !== "function") return;
-    if ((original as unknown as Record<symbol, unknown>)[PATCHED_BY_RESPAN]) return;
-
-    prototype[methodName] = wrapMethod(original as AnyFunction, spanName, opts);
-    VertexAIInstrumentor._sharedState.patchedMethods.push({
-      methodName,
-      original: original as AnyFunction,
-      prototype,
-    });
+  deactivate(): void {
+    this.generation++;
+    this.active = false;
+    for (const p of [...patches]) {
+      p.owners.delete(this);
+      if (p.owners.size) continue;
+      if (p.prototype[p.method] === p.wrapped)
+        p.prototype[p.method] = p.original;
+      patches.splice(patches.indexOf(p), 1);
+    }
   }
 }
-
 export { buildGenerateContentAttrs } from "./_otel_emitter.js";
 export {
   extractToolCalls,
