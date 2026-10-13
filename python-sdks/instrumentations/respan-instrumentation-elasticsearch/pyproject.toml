@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "respan-instrumentation-elasticsearch"
-version = "0.1.0"
+version = "0.2.0"
 description = "Respan instrumentation plugin for Elasticsearch"
 authors = ["Respan <team@respan.ai>"]
 license = "Apache 2.0"

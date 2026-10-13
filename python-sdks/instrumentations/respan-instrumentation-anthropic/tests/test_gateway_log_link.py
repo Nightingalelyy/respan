@@ -14,7 +14,6 @@ import httpx2
 import pytest
 from anthropic import Anthropic, AsyncAnthropic, AuthenticationError
 from respan_instrumentation_anthropic import _instrumentation as instrumentation
-from respan_instrumentation_anthropic import _messages as message_helpers
 from respan_instrumentation_anthropic._gateway_link import (
     RESPAN_GATEWAY_LOG_ID,
     RESPAN_LOG_ID_RESPONSE_HEADER,
@@ -77,18 +76,28 @@ STREAM_EVENTS = [
 
 
 @pytest.fixture
-def captured(monkeypatch):
+def captured():
+    from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
+
     spans = []
-    monkeypatch.setattr(
-        message_helpers,
-        "build_readable_span",
-        lambda name, **kwargs: spans.append({"name": name, **kwargs}) or spans[-1],
-    )
-    monkeypatch.setattr(message_helpers, "inject_span", lambda span: True)
-    instrumentor = instrumentation.AnthropicInstrumentor()
+
+    class Collector(SpanProcessor):
+        def on_start(self, span, parent_context=None):
+            pass
+
+        def on_end(self, span):
+            spans.append({"name": span.name, "attributes": dict(span.attributes or {})})
+
+        def shutdown(self):
+            pass
+
+    provider = TracerProvider()
+    provider.add_span_processor(Collector())
+    instrumentor = instrumentation.AnthropicInstrumentor(tracer_provider=provider)
     instrumentor.activate()
     yield spans
     instrumentor.deactivate()
+    provider.shutdown()
 
 
 def _handler(*, log_id: str | None):
@@ -205,7 +214,7 @@ def test_direct_provider_keeps_usage_and_nothing_leaks(captured):
     linked, plain = captured
     assert linked["attributes"][RESPAN_GATEWAY_LOG_ID] == GATEWAY_LOG_ID
     assert RESPAN_GATEWAY_LOG_ID not in plain["attributes"]
-    assert plain["attributes"]["gen_ai.usage.prompt_tokens"] == 4
+    assert plain["attributes"]["gen_ai.usage.input_tokens"] == 4
 
 
 def test_deactivate_restores_process_response():
