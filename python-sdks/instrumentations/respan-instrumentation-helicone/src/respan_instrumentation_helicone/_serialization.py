@@ -333,7 +333,58 @@ def sanitize(
     return {"type": safe_type_name(value)}
 
 
-def json_dumps(value: Any, *, preserve_large_vectors: bool = False) -> str:
+def _full_sanitize(value: Any, active: set[int] | None = None) -> Any:
+    """Retain complete native JSON bodies; reject cycles and redact secrets."""
+    active = active if active is not None else set()
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (RecursionError, TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, Mapping | list):
+            return json.dumps(
+                _full_sanitize(parsed), ensure_ascii=False, separators=(",", ":")
+            )
+        return _redact_free_text(value)
+    if isinstance(value, Integral):
+        return int(value)
+    if isinstance(value, Real):
+        return float(value) if math.isfinite(float(value)) else None
+    if isinstance(value, Mapping | Sequence) and not isinstance(
+        value, bytes | bytearray
+    ):
+        if id(value) in active:
+            return {"type": safe_type_name(value), "cycle": True}
+        active.add(id(value))
+        try:
+            if isinstance(value, Mapping):
+                return {
+                    key if isinstance(key, str) else safe_type_name(key): (
+                        "<redacted>"
+                        if isinstance(key, str) and is_sensitive_key(key)
+                        else _full_sanitize(item, active)
+                    )
+                    for key, item in value.items()
+                }
+            return [_full_sanitize(item, active) for item in value]
+        finally:
+            active.remove(id(value))
+    return {"type": safe_type_name(value)}
+
+
+def json_dumps(
+    value: Any, *, preserve_large_vectors: bool = False, preserve_full: bool = False
+) -> str:
+    if preserve_full:
+        return json.dumps(
+            _full_sanitize(value),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
     sanitized = (
         _sanitize_preserving_vectors(
             value,

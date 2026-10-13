@@ -12,7 +12,7 @@ from opentelemetry.semconv.attributes.http_attributes import (
     HTTP_RESPONSE_STATUS_CODE,
 )
 from opentelemetry.semconv_ai import SpanAttributes
-from respan_instrumentation_helicone import HeliconeInstrumentor, _emitter
+from respan_instrumentation_helicone import HeliconeInstrumentor
 from respan_sdk.constants.span_attributes import RESPAN_LOG_TYPE
 
 
@@ -22,15 +22,12 @@ class Response:
 
 
 @pytest.mark.integration
-def test_real_121_log_request_and_direct_sink(monkeypatch):
+def test_real_121_log_request_and_direct_sink(monkeypatch, otel_spans):
     posts = []
-    spans = []
+    spans = otel_spans
     monkeypatch.setattr(
         "helicone_helpers.manual_logger.requests.post",
         lambda url, **kwargs: posts.append((url, kwargs)) or Response(),
-    )
-    monkeypatch.setattr(
-        _emitter, "inject_span", lambda span: spans.append(span) or True
     )
     instrumentor = HeliconeInstrumentor()
     instrumentor.activate()
@@ -78,15 +75,12 @@ def test_real_121_log_request_and_direct_sink(monkeypatch):
 
 
 @pytest.mark.integration
-def test_real_121_builder_stream_and_error(monkeypatch):
+def test_real_121_builder_stream_and_error(monkeypatch, otel_spans):
     posts = []
-    spans = []
+    spans = otel_spans
     monkeypatch.setattr(
         "helicone_helpers.manual_logger.requests.post",
         lambda url, **kwargs: posts.append((url, kwargs)) or Response(),
-    )
-    monkeypatch.setattr(
-        _emitter, "inject_span", lambda span: spans.append(span) or True
     )
     instrumentor = HeliconeInstrumentor()
     instrumentor.activate()
@@ -142,15 +136,12 @@ def test_real_121_builder_stream_and_error(monkeypatch):
 
 
 @pytest.mark.integration
-def test_real_121_log_request_error_uses_canonical_otel_status(monkeypatch):
+def test_real_121_log_request_error_uses_canonical_otel_status(monkeypatch, otel_spans):
     posts = []
-    spans = []
+    spans = otel_spans
     monkeypatch.setattr(
         "helicone_helpers.manual_logger.requests.post",
         lambda url, **kwargs: posts.append((url, kwargs)) or Response(),
-    )
-    monkeypatch.setattr(
-        _emitter, "inject_span", lambda span: spans.append(span) or True
     )
     instrumentor = HeliconeInstrumentor()
     instrumentor.activate()
@@ -179,15 +170,12 @@ def test_real_121_log_request_error_uses_canonical_otel_status(monkeypatch):
 
 
 @pytest.mark.integration
-def test_real_121_nested_direct_success_and_outer_failure(monkeypatch):
+def test_real_121_nested_direct_success_and_outer_failure(monkeypatch, otel_spans):
     posts = []
-    spans = []
+    spans = otel_spans
     monkeypatch.setattr(
         "helicone_helpers.manual_logger.requests.post",
         lambda url, **kwargs: posts.append((url, kwargs)) or Response(),
-    )
-    monkeypatch.setattr(
-        _emitter, "inject_span", lambda span: spans.append(span) or True
     )
     instrumentor = HeliconeInstrumentor()
     instrumentor.activate()
