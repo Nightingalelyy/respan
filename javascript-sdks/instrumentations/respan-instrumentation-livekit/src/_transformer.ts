@@ -1,7 +1,11 @@
 import type { Context, Span } from "@opentelemetry/api";
 import {
+  ATTR_GEN_AI_INPUT_MESSAGES,
+  ATTR_GEN_AI_OUTPUT_MESSAGES,
+  ATTR_GEN_AI_SYSTEM_INSTRUCTIONS,
+  ATTR_GEN_AI_TOOL_DEFINITIONS,
+  ATTR_GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
   ATTR_GEN_AI_PROVIDER_NAME,
-  ATTR_GEN_AI_REQUEST_MODEL,
   ATTR_GEN_AI_USAGE_INPUT_TOKENS,
   ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
 } from "@opentelemetry/semantic-conventions/incubating";
@@ -19,6 +23,15 @@ import {
   OFF_CONTRACT_ALIAS_KEYS,
 } from "./_constants.js";
 import {
+  data,
+  capture,
+  guard,
+  filterAttributes,
+  policyFor,
+  snapshot,
+  type CaptureOptions,
+} from "./_privacy.js";
+import {
   getSpanAttributes,
   isLiveKitSpan,
   stripLiveKitRawAttributes,
@@ -28,8 +41,6 @@ import {
 
 const LANGFUSE_COMPLETION_START_TIME =
   "langfuse.observation.completion_start_time";
-const LLM_USAGE_CACHE_READ_INPUT_TOKENS =
-  "llm.usage.cache_read_input_tokens";
 type TransformerReadableSpan = Parameters<
   NonNullable<RespanSpanTransformer["onEnd"]>
 >[0];
@@ -48,18 +59,30 @@ interface OpenLLMNode {
 export class LiveKitSpanTransformer implements RespanSpanTransformer {
   private readonly _openLLMNodes = new Map<string, OpenLLMNode>();
   private readonly _correlatedRequests = new Map<string, OpenLLMNode>();
+  private readonly _owners = new Set<CaptureOptions>();
+  private _exportAttributes = new WeakMap<object, MutableAttributes>();
 
-  onStart(span: Span, _parentContext: Context): void {
+  acquire(options: CaptureOptions): () => void {
+    this._owners.add(options);
+    return () => {
+      this._owners.delete(options);
+    };
+  }
+
+  onStart(span: Span, parentContext: Context): void {
     const attrs = getSpanAttributes(span);
     const spanName = getSpanName(span, attrs);
     if (
-      LIVEKIT_INTERNAL_ACTIVITY_SPAN_NAMES.has(spanName) ||
-      !isLiveKitSpan(spanName, attrs)
+      !isLiveKitSpan(spanName, attrs) &&
+      data(data(span, "instrumentationScope"), "name") !== "livekit-agents"
     ) {
       return;
     }
 
-    stampStartAttributes(span, attrs, spanName);
+    const policy = capture(span, parentContext, this._owners);
+    guard(span, policy);
+    if (LIVEKIT_INTERNAL_ACTIVITY_SPAN_NAMES.has(spanName)) return;
+    stampStartAttributes(span, getSpanAttributes(span), spanName);
 
     const identity = getSpanIdentity(span);
     if (spanName === LIVEKIT_SPAN_NAMES.LLM_NODE && identity) {
@@ -99,9 +122,20 @@ export class LiveKitSpanTransformer implements RespanSpanTransformer {
   }
 
   onEnd(span: TransformerReadableSpan): void {
-    const attrs = span.attributes as MutableAttributes;
+    const policy = policyFor(span);
+    if (!policy) return;
+    const attrs = filterAttributes(span.attributes, policy);
+    this._exportAttributes.set(span, attrs);
     const spanName = getSpanName(span, attrs);
     const identity = getSpanIdentity(span);
+
+    if (LIVEKIT_INTERNAL_ACTIVITY_SPAN_NAMES.has(spanName)) {
+      stripLiveKitRawAttributes(attrs);
+      for (const key of Object.keys(attrs))
+        if (key.startsWith("gen_ai.") || key.startsWith("llm."))
+          delete attrs[key];
+      return;
+    }
 
     if (spanName === LIVEKIT_SPAN_NAMES.LLM_NODE) {
       const node = identity ? this._openLLMNodes.get(identity.key) : undefined;
@@ -153,10 +187,37 @@ export class LiveKitSpanTransformer implements RespanSpanTransformer {
     });
   }
 
+  prepareForExport(span: TransformerReadableSpan): TransformerReadableSpan {
+    const attrs = this._exportAttributes.get(span);
+    if (!attrs) return span;
+    this._exportAttributes.delete(span);
+    const copy = Object.create(Object.getPrototypeOf(span));
+    Object.assign(copy, span);
+    Object.defineProperty(copy, "attributes", {
+      value: attrs,
+      enumerable: true,
+      configurable: true,
+    });
+    Object.defineProperty(copy, "events", {
+      value: snapshot(span.events) ?? [],
+      enumerable: true,
+      configurable: true,
+    });
+    Object.defineProperty(copy, "status", {
+      value: snapshot(span.status) ?? { code: 0 },
+      enumerable: true,
+      configurable: true,
+    });
+    const policy = policyFor(span);
+    if (policy) guard(copy, policy);
+    return copy;
+  }
+
   /** Clear correlation state after the registry drains this lease. */
   dispose(): void {
     this._openLLMNodes.clear();
     this._correlatedRequests.clear();
+    this._exportAttributes = new WeakMap();
   }
 }
 
@@ -165,8 +226,7 @@ function stampStartAttributes(
   attrs: MutableAttributes,
   spanName: string,
 ): void {
-  const logType =
-    LIVEKIT_LOG_TYPE_BY_SPAN_NAME[spanName] ?? RespanLogType.TASK;
+  const logType = LIVEKIT_LOG_TYPE_BY_SPAN_NAME[spanName] ?? RespanLogType.TASK;
   for (const [key, value] of [
     [LIVEKIT_SPAN_NAME_ATTRIBUTE, spanName],
     [RespanSpanAttributes.RESPAN_LOG_METHOD, LIVEKIT_LOG_METHOD_TS_TRACING],
@@ -182,8 +242,7 @@ function translateCorrelatedRequest(
   spanName: string,
 ): void {
   attrs[LIVEKIT_SPAN_NAME_ATTRIBUTE] = spanName;
-  attrs[RespanSpanAttributes.RESPAN_LOG_METHOD] =
-    LIVEKIT_LOG_METHOD_TS_TRACING;
+  attrs[RespanSpanAttributes.RESPAN_LOG_METHOD] = LIVEKIT_LOG_METHOD_TS_TRACING;
   attrs[RespanSpanAttributes.RESPAN_LOG_TYPE] = RespanLogType.TASK;
   attrs[SpanAttributes.TRACELOOP_ENTITY_NAME] = "livekit.llm_request";
   attrs[SpanAttributes.TRACELOOP_ENTITY_PATH] = spanName;
@@ -210,9 +269,9 @@ function mergeRequestIntoNode(
 
   copyPreferredStringToNode(
     node,
-    ATTR_GEN_AI_REQUEST_MODEL,
+    SpanAttributes.LLM_REQUEST_MODEL,
     preferredString(
-      requestAttrs[ATTR_GEN_AI_REQUEST_MODEL],
+      requestAttrs[SpanAttributes.LLM_REQUEST_MODEL],
       metadata?.modelName,
     ),
   );
@@ -242,11 +301,16 @@ function mergeRequestIntoNode(
   );
   copyAttributeToNode(
     node,
-    LLM_USAGE_CACHE_READ_INPUT_TOKENS,
-    requestAttrs[LLM_USAGE_CACHE_READ_INPUT_TOKENS] ?? metrics?.promptCachedTokens,
+    ATTR_GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
+    requestAttrs[ATTR_GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] ??
+      metrics?.promptCachedTokens,
   );
 
   for (const key of [
+    ATTR_GEN_AI_INPUT_MESSAGES,
+    ATTR_GEN_AI_OUTPUT_MESSAGES,
+    ATTR_GEN_AI_SYSTEM_INSTRUCTIONS,
+    ATTR_GEN_AI_TOOL_DEFINITIONS,
     LK_LLM_METRICS,
     LK_PROVIDER_REQUEST_IDS,
     LANGFUSE_COMPLETION_START_TIME,
@@ -318,10 +382,7 @@ function parseRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function getSpanName(
-  span: CorrelatableSpan,
-  attrs: MutableAttributes,
-): string {
+function getSpanName(span: CorrelatableSpan, attrs: MutableAttributes): string {
   const explicit = attrs[LIVEKIT_SPAN_NAME_ATTRIBUTE];
   return typeof explicit === "string" && explicit.length > 0
     ? explicit
@@ -343,8 +404,9 @@ function getSpanIdentity(
 }
 
 function getParentKey(span: CorrelatableSpan): string | undefined {
-  const parent = (span as Span & { parentSpanContext?: { traceId?: string; spanId?: string } })
-    .parentSpanContext;
+  const parent = (
+    span as Span & { parentSpanContext?: { traceId?: string; spanId?: string } }
+  ).parentSpanContext;
   if (!parent?.spanId) {
     return undefined;
   }

@@ -86,9 +86,11 @@ test("ArizeInstrumentor translates Phoenix OpenInference spans and sanitizes the
         "llm.token_count.completion": 24,
         "llm.token_count.total": 36,
         "llm.input_messages.0.message.role": "user",
-        "llm.input_messages.0.message.content": "How do I trace TypeScript apps?",
+        "llm.input_messages.0.message.content":
+          "How do I trace TypeScript apps?",
         "llm.output_messages.0.message.role": "assistant",
-        "llm.output_messages.0.message.content": "Use Phoenix helpers with Respan.",
+        "llm.output_messages.0.message.content":
+          "Use Phoenix helpers with Respan.",
         "traceloop.entity.path": "arize-demo.workflow",
       },
     });
@@ -100,21 +102,34 @@ test("ArizeInstrumentor translates Phoenix OpenInference spans and sanitizes the
     assert.equal(span.attributes["respan.entity.log_type"], "chat");
     assert.equal(span.attributes["llm.request.type"], "chat");
     assert.equal(span.attributes["traceloop.entity.name"], "synthetic-llm");
-    assert.equal(span.attributes["traceloop.entity.input"], "How do I trace TypeScript apps?");
-    assert.equal(span.attributes["traceloop.entity.output"], "Use Phoenix helpers with Respan.");
+    assert.deepEqual(JSON.parse(span.attributes["traceloop.entity.input"]), [
+      { role: "user", content: "How do I trace TypeScript apps?" },
+    ]);
+    assert.deepEqual(JSON.parse(span.attributes["traceloop.entity.output"]), [
+      { role: "assistant", content: "Use Phoenix helpers with Respan." },
+    ]);
     assert.equal(span.attributes["gen_ai.request.model"], "gpt-4o-mini");
     assert.equal(span.attributes["gen_ai.system"], "openai");
     assert.equal(span.attributes["gen_ai.prompt.0.role"], "user");
     assert.equal(span.attributes["gen_ai.completion.0.role"], "assistant");
-    assert.equal(span.attributes["traceloop.workflow.name"], "arize-demo.workflow");
+    assert.equal(
+      span.attributes["traceloop.workflow.name"],
+      "arize-demo.workflow",
+    );
     assert.equal(span.attributes[OI_SPAN_KIND], "LLM");
 
     assert.equal(exportedSpans.length, 1);
     assert.notStrictEqual(exportedSpans[0], span);
     assert.equal(exportedSpans[0].attributes["respan.entity.log_type"], "chat");
-    assert.equal(exportedSpans[0].attributes["traceloop.workflow.name"], "arize-demo.workflow");
+    assert.equal(
+      exportedSpans[0].attributes["traceloop.workflow.name"],
+      "arize-demo.workflow",
+    );
     assert.equal(exportedSpans[0].attributes[OI_SPAN_KIND], undefined);
-    assert.equal(exportedSpans[0].attributes["llm.input_messages.0.message.role"], undefined);
+    assert.equal(
+      exportedSpans[0].attributes["llm.input_messages.0.message.role"],
+      undefined,
+    );
     assert.equal(span.attributes[OI_SPAN_KIND], "LLM");
   } finally {
     instrumentor.deactivate();
@@ -147,7 +162,10 @@ test("ArizeInstrumentor sanitizes directly when no processor manager is present"
     assert.equal(exportedSpans.length, 1);
     assert.notStrictEqual(exportedSpans[0], span);
     assert.equal(exportedSpans[0].attributes[OI_SPAN_KIND], undefined);
-    assert.equal(exportedSpans[0].attributes["traceloop.entity.input"], "raw input");
+    assert.equal(
+      exportedSpans[0].attributes["traceloop.entity.input"],
+      "raw input",
+    );
   } finally {
     instrumentor.deactivate();
   }

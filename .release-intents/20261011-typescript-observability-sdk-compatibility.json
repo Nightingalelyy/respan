@@ -1,0 +1,10 @@
+{
+  "summary": "Support current Braintrust, OpenInference, and LiveKit native TypeScript SDK APIs and canonical tracing behavior",
+  "packages": {
+    "@respan/instrumentation-braintrust": "minor",
+    "@respan/instrumentation-openinference": "minor",
+    "@respan/instrumentation-livekit": "minor",
+    "@respan/instrumentation-arize": "none",
+    "@respan/instrumentation-beeai": "none"
+  }
+}
