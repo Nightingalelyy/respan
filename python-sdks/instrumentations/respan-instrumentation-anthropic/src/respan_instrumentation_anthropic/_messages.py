@@ -24,6 +24,7 @@ from respan_sdk.constants.span_attributes import (
     RESPAN_SESSION_ID,
 )
 
+from respan_instrumentation_anthropic._gateway_link import gateway_log_id, link_to_gateway_log
 from respan_instrumentation_anthropic._privacy import CapturePolicy
 from respan_instrumentation_anthropic._serialization import (
     json_string,
@@ -63,6 +64,7 @@ class CallState:
         self.done = False
         self.content_keys: set[str] = set()
         self.error = None
+        self.gateway_slot: list[str] = []
         self.usage: dict[str, int] = {}
         self.request_model = (
             kwargs.get("model") if type(kwargs.get("model")) is str else None
@@ -216,6 +218,9 @@ class CallState:
             self.error = redact_text(error["message"])
 
     def failure(self, exc: BaseException) -> None:
+        log_id = gateway_log_id(self.gateway_slot, exc)
+        if log_id:
+            self.gateway_slot[:] = [log_id]
         self.span.set_status(Status(StatusCode.ERROR))
         self.span.set_attribute(ERROR_TYPE, type(exc).__name__)
         if self.check():
@@ -287,6 +292,13 @@ class CallState:
             self.error = None
             self.policy.observer.states.discard(self)
             try:
+                log_id = gateway_log_id(self.gateway_slot)
+                if log_id:
+                    linked = link_to_gateway_log(dict(self.span.attributes or {}), log_id)
+                    for key in tuple(self.span.attributes or {}):
+                        if key not in linked:
+                            self.span._attributes.pop(key, None)
+                    self.span.set_attributes(linked)
                 self.span.end()
             except Exception:  # noqa: BLE001, S110
                 pass

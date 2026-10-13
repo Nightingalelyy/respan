@@ -13,6 +13,8 @@ from typing import Any
 from opentelemetry import context as context_api
 from opentelemetry import trace
 
+from respan_instrumentation_anthropic import _gateway_link
+from respan_instrumentation_anthropic._gateway_link import GATEWAY_LOG_ID_SLOT
 from respan_instrumentation_anthropic._messages import CallState
 from respan_instrumentation_anthropic._privacy import (
     PrivacyObserver,
@@ -195,6 +197,7 @@ def _wrapper(
 
                     def send():
                         token = _ACTIVE.set(True)
+                        gateway_token = GATEWAY_LOG_ID_SLOT.set(state.gateway_slot)
                         try:
                             result = request()
                         except BaseException as exc:
@@ -202,6 +205,7 @@ def _wrapper(
                             state.safe("finish")
                             raise
                         finally:
+                            GATEWAY_LOG_ID_SLOT.reset(gateway_token)
                             _ACTIVE.reset(token)
 
                         try:
@@ -220,6 +224,7 @@ def _wrapper(
 
                     async def send_async():
                         token = _ACTIVE.set(True)
+                        gateway_token = GATEWAY_LOG_ID_SLOT.set(state.gateway_slot)
                         try:
                             result = await request
                         except BaseException as exc:
@@ -227,6 +232,7 @@ def _wrapper(
                             state.safe("finish")
                             raise
                         finally:
+                            GATEWAY_LOG_ID_SLOT.reset(gateway_token)
                             _ACTIVE.reset(token)
 
                         try:
@@ -254,6 +260,9 @@ def _wrapper(
         @wraps(original)
         async def async_call(self: Any, *args: Any, **kwargs: Any) -> Any:
             state = start(args, kwargs)
+            gateway_token = GATEWAY_LOG_ID_SLOT.set(
+                state.gateway_slot if state else GATEWAY_LOG_ID_SLOT.get()
+            )
             try:
                 result = await original(self, *args, **kwargs)
             except BaseException as exc:
@@ -261,6 +270,8 @@ def _wrapper(
                     state.safe("failure", exc)
                     state.safe("finish")
                 raise
+            finally:
+                GATEWAY_LOG_ID_SLOT.reset(gateway_token)
             return observe(result, state)
 
         return async_call
@@ -268,6 +279,9 @@ def _wrapper(
     @wraps(original)
     def call(self: Any, *args: Any, **kwargs: Any) -> Any:
         state = start(args, kwargs)
+        gateway_token = GATEWAY_LOG_ID_SLOT.set(
+            state.gateway_slot if state else GATEWAY_LOG_ID_SLOT.get()
+        )
         try:
             result = original(self, *args, **kwargs)
         except BaseException as exc:
@@ -275,6 +289,8 @@ def _wrapper(
                 state.safe("failure", exc)
                 state.safe("finish")
             raise
+        finally:
+            GATEWAY_LOG_ID_SLOT.reset(gateway_token)
         return observe(result, state)
 
     return call
@@ -342,6 +358,17 @@ class AnthropicInstrumentor:
                 replacement.__respan_owner__ = self
                 staged.append((runtime, "detach", original, replacement))
                 runtime.detach = replacement
+                base_client = importlib.import_module(_gateway_link.BASE_CLIENT_MODULE)
+                for class_name, wrap in (
+                    (_gateway_link.SYNC_BASE_CLIENT_CLASS, _gateway_link.wrap_sync_process_response),
+                    (_gateway_link.ASYNC_BASE_CLIENT_CLASS, _gateway_link.wrap_async_process_response),
+                ):
+                    cls = getattr(base_client, class_name)
+                    method = _gateway_link.PROCESS_RESPONSE_METHOD
+                    original = getattr(cls, method)
+                    replacement = wrap(original)
+                    staged.append((cls, method, original, replacement))
+                    setattr(cls, method, replacement)
                 modules = [(resources, False)]
                 for path, managed in (
                     ("anthropic.resources.beta.messages.messages", False),

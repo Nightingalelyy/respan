@@ -1,0 +1,6 @@
+{
+  "summary": "`respan demo` now seeds simpler traces: 17 spans with semantic span names (`llm.<model>`, `agent.<name>`, `tool.<name>`, `handoff.<from>_to_<to>`), real handoff spans, gpt-6.1-sol LLM calls, and no `ai.generateText` wrapper tasks.",
+  "packages": {
+    "@respan/cli": "patch"
+  }
+}

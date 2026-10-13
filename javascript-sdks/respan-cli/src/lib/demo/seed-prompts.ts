@@ -18,19 +18,19 @@ import {
 
 /** Prompts in the account whose name exactly matches a demo fixture name.
  *
- * Queried with the `name` `iexact` filter, one query per fixture name. NOTE: the
- * `icontains`/`iexact` filters do NOT OR-match across a multi-value array — a
- * single `value: [a, b, c]` matches nothing — so each name must be queried on
- * its own. Server matching is case-insensitive, so we re-confirm with an exact,
- * case-sensitive match client-side. Returns every match (so duplicates are all
- * found, for clear). */
+ * Queried with the `name` exact-match filter (operator `''`), one query per
+ * fixture name. The backend rejects `iexact` with a 400, and `icontains` does
+ * NOT OR-match across a multi-value array — a single `value: [a, b, c]` matches
+ * nothing — so each name is queried on its own. Matches are re-confirmed
+ * client-side with an exact, case-sensitive comparison. Returns every match (so
+ * duplicates are all found, for clear). */
 async function findExistingPrompts(ctx: SeederContext): Promise<ExistingResource[]> {
   const found: ExistingResource[] = [];
   for (const fixture of DEMO_PROMPTS) {
     const response = await ctx.client.prompts.listPrompts({
       Authorization: ctx.authHeader,
       page_size: 100,
-      filters: { name: { operator: 'iexact', value: [fixture.name] } },
+      filters: { name: { operator: '', value: [fixture.name] } },
     });
     for (const row of response.results ?? []) {
       if (row.id && row.name === fixture.name) {

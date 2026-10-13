@@ -83,6 +83,99 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@anthropic-ai/claude-agent-sdk-darwin-arm64@npm:0.3.286":
+  version: 0.3.286
+  resolution: "@anthropic-ai/claude-agent-sdk-darwin-arm64@npm:0.3.286"
+  conditions: os=darwin & cpu=arm64
+  languageName: node
+  linkType: hard
+
+"@anthropic-ai/claude-agent-sdk-darwin-x64@npm:0.3.286":
+  version: 0.3.286
+  resolution: "@anthropic-ai/claude-agent-sdk-darwin-x64@npm:0.3.286"
+  conditions: os=darwin & cpu=x64
+  languageName: node
+  linkType: hard
+
+"@anthropic-ai/claude-agent-sdk-linux-arm64-musl@npm:0.3.286":
+  version: 0.3.286
+  resolution: "@anthropic-ai/claude-agent-sdk-linux-arm64-musl@npm:0.3.286"
+  conditions: os=linux & cpu=arm64 & libc=musl
+  languageName: node
+  linkType: hard
+
+"@anthropic-ai/claude-agent-sdk-linux-arm64@npm:0.3.286":
+  version: 0.3.286
+  resolution: "@anthropic-ai/claude-agent-sdk-linux-arm64@npm:0.3.286"
+  conditions: os=linux & cpu=arm64 & libc=glibc
+  languageName: node
+  linkType: hard
+
+"@anthropic-ai/claude-agent-sdk-linux-x64-musl@npm:0.3.286":
+  version: 0.3.286
+  resolution: "@anthropic-ai/claude-agent-sdk-linux-x64-musl@npm:0.3.286"
+  conditions: os=linux & cpu=x64 & libc=musl
+  languageName: node
+  linkType: hard
+
+"@anthropic-ai/claude-agent-sdk-linux-x64@npm:0.3.286":
+  version: 0.3.286
+  resolution: "@anthropic-ai/claude-agent-sdk-linux-x64@npm:0.3.286"
+  conditions: os=linux & cpu=x64 & libc=glibc
+  languageName: node
+  linkType: hard
+
+"@anthropic-ai/claude-agent-sdk-win32-arm64@npm:0.3.286":
+  version: 0.3.286
+  resolution: "@anthropic-ai/claude-agent-sdk-win32-arm64@npm:0.3.286"
+  conditions: os=win32 & cpu=arm64
+  languageName: node
+  linkType: hard
+
+"@anthropic-ai/claude-agent-sdk-win32-x64@npm:0.3.286":
+  version: 0.3.286
+  resolution: "@anthropic-ai/claude-agent-sdk-win32-x64@npm:0.3.286"
+  conditions: os=win32 & cpu=x64
+  languageName: node
+  linkType: hard
+
+"@anthropic-ai/claude-agent-sdk@npm:0.3.286":
+  version: 0.3.286
+  resolution: "@anthropic-ai/claude-agent-sdk@npm:0.3.286"
+  dependencies:
+    "@anthropic-ai/claude-agent-sdk-darwin-arm64": "npm:0.3.286"
+    "@anthropic-ai/claude-agent-sdk-darwin-x64": "npm:0.3.286"
+    "@anthropic-ai/claude-agent-sdk-linux-arm64": "npm:0.3.286"
+    "@anthropic-ai/claude-agent-sdk-linux-arm64-musl": "npm:0.3.286"
+    "@anthropic-ai/claude-agent-sdk-linux-x64": "npm:0.3.286"
+    "@anthropic-ai/claude-agent-sdk-linux-x64-musl": "npm:0.3.286"
+    "@anthropic-ai/claude-agent-sdk-win32-arm64": "npm:0.3.286"
+    "@anthropic-ai/claude-agent-sdk-win32-x64": "npm:0.3.286"
+  peerDependencies:
+    "@anthropic-ai/sdk": ">=0.93.0"
+    "@modelcontextprotocol/sdk": ^1.29.0
+    zod: ^4.0.0
+  dependenciesMeta:
+    "@anthropic-ai/claude-agent-sdk-darwin-arm64":
+      optional: true
+    "@anthropic-ai/claude-agent-sdk-darwin-x64":
+      optional: true
+    "@anthropic-ai/claude-agent-sdk-linux-arm64":
+      optional: true
+    "@anthropic-ai/claude-agent-sdk-linux-arm64-musl":
+      optional: true
+    "@anthropic-ai/claude-agent-sdk-linux-x64":
+      optional: true
+    "@anthropic-ai/claude-agent-sdk-linux-x64-musl":
+      optional: true
+    "@anthropic-ai/claude-agent-sdk-win32-arm64":
+      optional: true
+    "@anthropic-ai/claude-agent-sdk-win32-x64":
+      optional: true
+  checksum: 10c0/036b840e67322f20468fc09439b33b8e89cfbff4abfe13d65097e999ba35de95bff1582755b9d043d377f6348e4c7ec52e86a84502ec531aa1de08aa84fdb9cc
+  languageName: node
+  linkType: hard
+
 "@anthropic-ai/sdk@npm:0.41.0":
   version: 0.41.0
   resolution: "@anthropic-ai/sdk@npm:0.41.0"
@@ -4082,7 +4175,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@opentelemetry/instrumentation@npm:0.221.0":
+"@opentelemetry/instrumentation@npm:0.221.0, @opentelemetry/instrumentation@npm:>=0.213.0 <0.222.0":
   version: 0.221.0
   resolution: "@opentelemetry/instrumentation@npm:0.221.0"
   dependencies:
@@ -4408,7 +4501,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@opentelemetry/resources@npm:2.10.0, @opentelemetry/resources@npm:^2.10.0":
+"@opentelemetry/resources@npm:2.10.0, @opentelemetry/resources@npm:>=2.10.0 <2.11.0, @opentelemetry/resources@npm:^2.10.0":
   version: 2.10.0
   resolution: "@opentelemetry/resources@npm:2.10.0"
   dependencies:
@@ -4683,7 +4776,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@opentelemetry/sdk-trace-base@npm:2.10.0, @opentelemetry/sdk-trace-base@npm:^2.10.0":
+"@opentelemetry/sdk-trace-base@npm:2.10.0, @opentelemetry/sdk-trace-base@npm:>=2.6.0 <2.11.0, @opentelemetry/sdk-trace-base@npm:^2.10.0":
   version: 2.10.0
   resolution: "@opentelemetry/sdk-trace-base@npm:2.10.0"
   dependencies:
@@ -4923,6 +5016,7 @@ __metadata:
   resolution: "@respan/cli@workspace:respan-cli"
   dependencies:
     "@inquirer/prompts": "npm:^7"
+    "@modelcontextprotocol/sdk": "npm:^1.25.1"
     "@oclif/core": "npm:^4"
     "@oclif/plugin-autocomplete": "npm:^3"
     "@oclif/plugin-help": "npm:^6"
@@ -5074,6 +5168,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@respan/instrumentation-claude-agent-sdk@workspace:instrumentations/respan-instrumentation-claude-agent-sdk"
   dependencies:
+    "@anthropic-ai/claude-agent-sdk": "npm:0.3.286"
     "@opentelemetry/api": "npm:^1.9.0"
     "@opentelemetry/core": "npm:^2.10.0"
     "@opentelemetry/sdk-trace-base": "npm:^2.10.0"
@@ -5324,6 +5419,29 @@ __metadata:
   peerDependenciesMeta:
     "@modelcontextprotocol/sdk":
       optional: false
+  languageName: unknown
+  linkType: soft
+
+"@respan/instrumentation-n8n@workspace:instrumentations/respan-instrumentation-n8n":
+  version: 0.0.0-use.local
+  resolution: "@respan/instrumentation-n8n@workspace:instrumentations/respan-instrumentation-n8n"
+  dependencies:
+    "@opentelemetry/api": "npm:^1.9.0"
+    "@opentelemetry/instrumentation": "npm:>=0.213.0 <0.222.0"
+    "@opentelemetry/resources": "npm:>=2.10.0 <2.11.0"
+    "@opentelemetry/sdk-node": "npm:^0.221.0"
+    "@opentelemetry/sdk-trace-base": "npm:>=2.6.0 <2.11.0"
+    "@opentelemetry/semantic-conventions": "npm:^1.40.0"
+    "@respan/respan-sdk": "npm:^1.1.7"
+    "@respan/tracing": "workspace:^"
+    "@traceloop/ai-semantic-conventions": "npm:^0.13.0"
+    "@types/node": "npm:^24.10.1"
+    typescript: "npm:^5.7.3"
+  peerDependencies:
+    n8n: ">=2.19.0 <2.38.0"
+  peerDependenciesMeta:
+    n8n:
+      optional: true
   languageName: unknown
   linkType: soft
 
@@ -7125,6 +7243,15 @@ __metadata:
   dependencies:
     undici-types: "npm:~7.16.0"
   checksum: 10c0/d2c36b78b6050d8677769fa05a32243061675e81ddc2bb43955d91a671af3465506ef2731a24c0c9ab42b6b679bd5c1513de45bbe9ea278c2c07ee63b564b61b
+  languageName: node
+  linkType: hard
+
+"@types/node@npm:^24.10.1":
+  version: 24.13.3
+  resolution: "@types/node@npm:24.13.3"
+  dependencies:
+    undici-types: "npm:~7.18.0"
+  checksum: 10c0/a5bc08f49b9581dcdca90e02cd77197a3c799840807664942e5cd5161a553d4d2ae8064f7e3294410d748d7d098b5c1848be7fa50c06f29c4193ab16be4e59eb
   languageName: node
   linkType: hard
 
@@ -9971,17 +10098,10 @@ __metadata:
   languageName: node
   linkType: hard
 
-"hono@npm:^4.11.4":
-  version: 4.12.9
-  resolution: "hono@npm:4.12.9"
-  checksum: 10c0/393256552642f681e52935163508d9605e5552e186d9b99ff2caf219d4248341b83e3eb975c40a97149c86890d19d73421efc889aa465a28eb5920ccc42cff34
-  languageName: node
-  linkType: hard
-
-"hono@npm:^4.8.3":
-  version: 4.12.30
-  resolution: "hono@npm:4.12.30"
-  checksum: 10c0/3262ba275e44dc9515032e15aa6a88e8915bc65f5a4b9a1bc538f3ac2bdd19aa2235e6e2fdd6af3b0e5551c162856c3dccd4f353e721c43fe81e5f3268573dde
+"hono@npm:4.13.2":
+  version: 4.13.2
+  resolution: "hono@npm:4.13.2"
+  checksum: 10c0/063daaa596bfb1ed3a4dc523a9f47725cf8d56e0918c21a241161f6f1996229f5525bf0f70d6b15cc28912720ddde519584eeb06fb92730a66f01e39faba8131
   languageName: node
   linkType: hard
 

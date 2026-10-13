@@ -1,0 +1,6 @@
+{
+  "summary": "Add the filter engine's overlap, not_overlap, not_in, not_contains, not_startswith, not_endswith and has_key operators to the filter operator type",
+  "packages": {
+    "respan-sdk": "minor"
+  }
+}

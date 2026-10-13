@@ -104,6 +104,12 @@
     },
     {
       "ecosystem": "javascript",
+      "name": "@respan/instrumentation-n8n",
+      "path": "javascript-sdks/instrumentations/respan-instrumentation-n8n",
+      "registry": "npm"
+    },
+    {
+      "ecosystem": "javascript",
       "name": "@respan/instrumentation-livekit",
       "path": "javascript-sdks/instrumentations/respan-instrumentation-livekit",
       "registry": "npm"
@@ -635,6 +641,12 @@
       "ecosystem": "python",
       "name": "respan-instrumentation-restate",
       "path": "python-sdks/instrumentations/respan-instrumentation-restate",
+      "registry": "pypi"
+    },
+    {
+      "ecosystem": "python",
+      "name": "respan-instrumentation-helicone",
+      "path": "python-sdks/instrumentations/respan-instrumentation-helicone",
       "registry": "pypi"
     }
   ]

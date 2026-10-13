@@ -14,6 +14,43 @@ MetricFilterValueType = Union[
 ]
 
 
+# The operator vocabulary the Respan filter engine compiles.
+FilterOperator = Literal[
+    # region:equals
+    "",
+    "=",
+    "==",
+    "eq",
+    "equals",
+    # endregion:equals
+    "in",  # for array values
+    "not_in",
+    "not",
+    "contains",
+    "not_contains",
+    "icontains",
+    "startswith",  # casing following clickhouse
+    "not_startswith",
+    "endswith",  # casing following clickhouse
+    "not_endswith",
+    "gt",
+    "gte",
+    "lt",
+    "lte",
+    "isnull",
+    "regex",
+    "ilike",
+    "trigram_word_similar",
+    "full_text_search",
+    "empty",
+    "notEmpty",  # casing following clickhouse
+    "not_empty",  # casing following django lookups
+    "overlap",  # array field shares any value
+    "not_overlap",
+    "has_key",  # JSON field has the key
+]
+
+
 class BaseFilterMixinTypedDict(TypedDict, total=False):
     """
     Base mixin for common filter/condition functionality (TypedDict version).
@@ -21,33 +58,7 @@ class BaseFilterMixinTypedDict(TypedDict, total=False):
     Use this version for dictionary-based type definitions.
     """
 
-    operator: Literal[
-        # region:equals
-        "",
-        "=",
-        "==",
-        "eq",
-        "equals",
-        # endregion:equals
-        "in",  # for array values
-        "not",
-        "contains",
-        "icontains",
-        "startswith",  # casing following clickhouse
-        "endswith",  # casing following clickhouse
-        "gt",
-        "gte",
-        "lt",
-        "lte",
-        "isnull",
-        "regex",
-        "ilike",
-        "trigram_word_similar",
-        "full_text_search",
-        "empty",
-        "notEmpty",  # casing following clickhouse
-        "not_empty",  # casing following django lookups
-    ]
+    operator: FilterOperator
     connector: Literal["AND", "OR"]  # AND is "all" and OR is "any"
     value: Union[List[MetricFilterValueType], MetricFilterValueType]
 
@@ -59,33 +70,7 @@ class BaseFilterMixinPydantic(RespanBaseModel):
     Use this version for Pydantic model-based type definitions.
     """
 
-    operator: Literal[
-        # region:equals
-        "",
-        "=",
-        "==",
-        "eq",
-        "equals",
-        # endregion:equals
-        "in",  # for array values
-        "not",
-        "contains",
-        "icontains",
-        "startswith",  # casing following clickhouse
-        "endswith",  # casing following clickhouse
-        "gt",
-        "gte",
-        "lt",
-        "lte",
-        "isnull",
-        "regex",
-        "ilike",
-        "trigram_word_similar",
-        "full_text_search",
-        "empty",
-        "notEmpty",  # casing following clickhouse
-        "not_empty",  # casing following django lookups
-    ] = Field(..., description="The comparison operator")
+    operator: FilterOperator = Field(..., description="The comparison operator")
     connector: Optional[Literal["AND", "OR"]] = Field(
         default="AND", description="How to connect this rule with the next one"
     )
@@ -233,6 +218,7 @@ BaseFilterMixinModel = BaseFilterMixinPydantic
 # Export both versions for different use cases
 __all__ = [
     "MetricFilterValueType",
+    "FilterOperator",
     "BaseFilterMixinTypedDict",
     "BaseFilterMixinPydantic",
     "MetricFilterParamPydantic",

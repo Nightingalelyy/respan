@@ -38,11 +38,12 @@ from respan_sdk import (
 | Category | Operators |
 |----------|-----------|
 | Equality | `""`, `"="`, `"=="`, `"eq"`, `"equals"` |
-| Negation | `"not"` |
+| Negation | `"not"`, `"not_in"`, `"not_contains"`, `"not_startswith"`, `"not_endswith"`, `"not_overlap"` |
 | Numeric | `"gt"`, `"gte"`, `"lt"`, `"lte"` |
 | String | `"contains"`, `"icontains"`, `"startswith"`, `"endswith"`, `"ilike"`, `"regex"` |
-| Membership | `"in"` |
+| Membership | `"in"`, `"overlap"` (array field shares any value) |
 | Null/Empty | `"isnull"`, `"empty"`, `"notEmpty"`, `"not_empty"` |
+| JSON | `"has_key"` |
 | Search | `"trigram_word_similar"`, `"full_text_search"` |
 
 **Example — filter spans by status:**
