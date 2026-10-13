@@ -5,13 +5,17 @@ from __future__ import annotations
 import importlib
 import inspect
 import logging
+import math
 import threading
 import time
+from collections.abc import Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import wraps
 from typing import Any
 
+from opentelemetry import context, trace
 from respan_tracing.core.tracer import RespanTracer
 
 from respan_instrumentation_helicone._constants import (
@@ -22,10 +26,14 @@ from respan_instrumentation_helicone._constants import (
     HELICONE_MANUAL_LOGGER_CLASS,
 )
 from respan_instrumentation_helicone._emitter import (
+    HeliconeCall,
     HeliconeEmissionContext,
     capture_emission_context,
     emit_helicone_log,
+    end_helicone_call,
+    start_helicone_call,
 )
+from respan_instrumentation_helicone._policy import CURRENT_POLICY, observe_policy
 from respan_instrumentation_helicone._serialization import safe_text, safe_type_name
 
 logger = logging.getLogger(__name__)
@@ -46,8 +54,10 @@ class _PatchGeneration:
 @dataclass
 class _LogRequestState:
     start_time: float
+    call: HeliconeCall
     terminal_sink_calls: int = 0
     in_operation: bool = False
+    recorder: Any = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +66,7 @@ class _BuilderState:
     status_code: int
     is_streaming: bool
     context_snapshot: HeliconeEmissionContext | None
+    call: HeliconeCall
 
 
 _GENERATION: _PatchGeneration | None = None
@@ -65,6 +76,69 @@ _CURRENT_LOG_REQUEST: ContextVar[_LogRequestState | None] = ContextVar(
 _CURRENT_BUILDER: ContextVar[_BuilderState | None] = ContextVar(
     "respan_helicone_builder", default=None
 )
+
+
+@contextmanager
+def _active_call(call: HeliconeCall):
+    policy_token = CURRENT_POLICY.set(call.policy)
+    context_token = None
+    try:
+        if call.span is not None:
+            try:
+                context_token = context.attach(trace.set_span_in_context(call.span))
+            except BaseException:
+                logger.debug("Failed to attach Helicone span context", exc_info=True)
+        yield
+    finally:
+        try:
+            observe_policy(call.policy)
+        except BaseException:
+            logger.debug("Failed to observe Helicone policy", exc_info=True)
+        if context_token is not None:
+            try:
+                context.detach(context_token)
+            except BaseException:
+                logger.debug("Failed to detach Helicone span context", exc_info=True)
+        CURRENT_POLICY.reset(policy_token)
+
+
+def _observe_builder(instance: Any) -> None:
+    snapshot = getattr(instance, HELICONE_BUILDER_CONTEXT_ATTR, None)
+    policy = (
+        snapshot.policy
+        if isinstance(snapshot, HeliconeEmissionContext)
+        else CURRENT_POLICY.get()
+    )
+    if policy is not None:
+        try:
+            observe_policy(policy)
+        except BaseException:
+            logger.debug(
+                "Failed to observe native Helicone policy boundary", exc_info=True
+            )
+
+
+def _native_start_ns(value: Any, *, milliseconds: bool = False) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    if not math.isfinite(float(value)) or value <= 0:
+        return None
+    return int(value * (1_000_000 if milliseconds else 1_000_000_000))
+
+
+def _make_policy_boundary_wrapper(original: Any, generation: _PatchGeneration) -> Any:
+    @wraps(original)
+    def wrapper(instance: Any, *args: Any, **kwargs: Any) -> Any:
+        if generation.enabled:
+            _observe_builder(instance)
+        try:
+            return original(instance, *args, **kwargs)
+        finally:
+            if generation.enabled:
+                _observe_builder(instance)
+
+    wrapper.__respan_helicone_wrapper__ = True
+    return wrapper
 
 
 def _tracing_enabled() -> bool:
@@ -121,9 +195,29 @@ def _make_send_log_wrapper(original: Any, generation: _PatchGeneration) -> Any:
                 return original(instance, provider, request, response, options)
             request_state.terminal_sink_calls += 1
         builder_state = _CURRENT_BUILDER.get()
+        call = (
+            request_state.call
+            if is_terminal_sink
+            else (
+                builder_state.call
+                if builder_state is not None
+                else start_helicone_call(
+                    request,
+                    capture_content=generation.capture_content,
+                    owner=generation,
+                    provider=provider,
+                    start_time_ns=(
+                        _native_start_ns(options.get("start_time"))
+                        if isinstance(options, Mapping)
+                        else None
+                    ),
+                )
+            )
+        )
         constructor_headers = getattr(instance, "headers", None)
         try:
-            result = original(instance, provider, request, response, options)
+            with _active_call(call):
+                result = original(instance, provider, request, response, options)
         except BaseException as exc:
             emit_helicone_log(
                 provider=provider,
@@ -134,7 +228,9 @@ def _make_send_log_wrapper(original: Any, generation: _PatchGeneration) -> Any:
                 error=exc,
                 status_code=500,
                 constructor_headers=constructor_headers,
+                call=call,
             )
+            end_helicone_call(call)
             raise
         emit_helicone_log(
             provider=provider,
@@ -153,7 +249,9 @@ def _make_send_log_wrapper(original: Any, generation: _PatchGeneration) -> Any:
                 builder_state.context_snapshot if builder_state is not None else None
             ),
             constructor_headers=constructor_headers,
+            call=call,
         )
+        end_helicone_call(call)
         return result
 
     wrapper.__respan_helicone_wrapper__ = True
@@ -178,10 +276,21 @@ def _make_log_request_wrapper(original: Any, generation: _PatchGeneration) -> An
                 additional_headers=resolved_headers,
                 provider=provider,
             )
-        state = _LogRequestState(start_time=time.time())
+        start_time = time.time()
+        state = _LogRequestState(
+            start_time=start_time,
+            call=start_helicone_call(
+                request,
+                capture_content=generation.capture_content,
+                owner=generation,
+                start_time_ns=int(start_time * 1_000_000_000),
+                provider=provider,
+            ),
+        )
 
         @wraps(operation)
         def observed_operation(recorder: Any) -> Any:
+            state.recorder = recorder
             state.in_operation = True
             try:
                 return operation(recorder)
@@ -190,13 +299,14 @@ def _make_log_request_wrapper(original: Any, generation: _PatchGeneration) -> An
 
         token = _CURRENT_LOG_REQUEST.set(state)
         try:
-            return original(
-                instance,
-                request,
-                observed_operation,
-                additional_headers=resolved_headers,
-                provider=provider,
-            )
+            with _active_call(state.call):
+                return original(
+                    instance,
+                    request,
+                    observed_operation,
+                    additional_headers=resolved_headers,
+                    provider=provider,
+                )
         except BaseException as exc:
             if state.terminal_sink_calls == 0:
                 emit_helicone_log(
@@ -215,9 +325,26 @@ def _make_log_request_wrapper(original: Any, generation: _PatchGeneration) -> An
                     error=exc,
                     status_code=500,
                     constructor_headers=getattr(instance, "headers", None),
+                    call=state.call,
                 )
+                end_helicone_call(state.call)
             raise
         finally:
+            if not state.call.closed:
+                emit_helicone_log(
+                    provider=provider,
+                    request=request,
+                    response=getattr(state.recorder, "results", {}),
+                    options={
+                        "start_time": state.start_time,
+                        "end_time": time.time(),
+                        "additional_headers": resolved_headers,
+                    },
+                    capture_content=generation.capture_content,
+                    constructor_headers=getattr(instance, "headers", None),
+                    call=state.call,
+                )
+            end_helicone_call(state.call)
             _CURRENT_LOG_REQUEST.reset(token)
 
     wrapper.__respan_helicone_wrapper__ = True
@@ -231,6 +358,17 @@ def _make_builder_send_log_wrapper(original: Any, generation: _PatchGeneration) 
             result = original(instance, *args, **kwargs)
             return await result if inspect.isawaitable(result) else result
         error = _builder_error(getattr(instance, "error", None))
+        snapshot = getattr(instance, HELICONE_BUILDER_CONTEXT_ATTR, None)
+        call = start_helicone_call(
+            getattr(instance, "request", {}),
+            capture_content=generation.capture_content,
+            owner=generation,
+            snapshot=snapshot,
+            start_time_ns=_native_start_ns(
+                getattr(instance, "start_time", None),
+                milliseconds=True,
+            ),
+        )
         state = _BuilderState(
             error=error,
             status_code=_builder_status(instance, error),
@@ -238,13 +376,16 @@ def _make_builder_send_log_wrapper(original: Any, generation: _PatchGeneration) 
                 bool(getattr(instance, "stream_chunks", None))
                 or bool(getattr(instance, "request", {}).get("stream"))
             ),
-            context_snapshot=getattr(instance, HELICONE_BUILDER_CONTEXT_ATTR, None),
+            context_snapshot=snapshot,
+            call=call,
         )
         token = _CURRENT_BUILDER.set(state)
         try:
-            result = original(instance, *args, **kwargs)
-            return await result if inspect.isawaitable(result) else result
+            with _active_call(call):
+                result = original(instance, *args, **kwargs)
+                return await result if inspect.isawaitable(result) else result
         finally:
+            end_helicone_call(call)
             _CURRENT_BUILDER.reset(token)
 
     wrapper.__respan_helicone_wrapper__ = True
@@ -256,7 +397,13 @@ def _make_log_builder_wrapper(original: Any, generation: _PatchGeneration) -> An
     def wrapper(instance: Any, *args: Any, **kwargs: Any) -> Any:
         if not generation.enabled:
             return original(instance, *args, **kwargs)
-        snapshot = capture_emission_context()
+        try:
+            snapshot = capture_emission_context(
+                generation.capture_content, owner=generation
+            )
+        except BaseException:
+            logger.debug("Failed to capture Helicone builder context", exc_info=True)
+            snapshot = None
         builder = original(instance, *args, **kwargs)
         try:
             setattr(builder, HELICONE_BUILDER_CONTEXT_ATTR, snapshot)
@@ -315,6 +462,18 @@ def _install_all(generation: _PatchGeneration) -> None:
         _patch(logger_class, "log_request", _make_log_request_wrapper, generation)
         _patch(logger_class, "log_builder", _make_log_builder_wrapper, generation)
         _patch(builder_class, "send_log", _make_builder_send_log_wrapper, generation)
+        for name in ("add_chunk", "add_response", "set_error", "add_model"):
+            if hasattr(builder_class, name):
+                _patch(builder_class, name, _make_policy_boundary_wrapper, generation)
+        module = importlib.import_module(f"{HELICONE_HELPERS_MODULE}.manual_logger")
+        recorder_class = getattr(module, "HeliconeResultRecorder", None)
+        if recorder_class is not None and hasattr(recorder_class, "append_results"):
+            _patch(
+                recorder_class,
+                "append_results",
+                _make_policy_boundary_wrapper,
+                generation,
+            )
     except BaseException:
         for key in set(_ORIGINAL_METHODS) - installed_before:
             target, method_name = key
