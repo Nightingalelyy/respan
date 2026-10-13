@@ -1,0 +1,6 @@
+{
+  "summary": "Respect real sampler admission and immutable content policies in Helicone manual logger instrumentation",
+  "packages": {
+    "respan-instrumentation-helicone": "patch"
+  }
+}
