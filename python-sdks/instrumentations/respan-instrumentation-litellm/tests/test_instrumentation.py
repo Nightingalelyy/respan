@@ -803,3 +803,22 @@ async def test_native_async_delayed_callbacks_cannot_retain_finished_calls(runti
         await asyncio.sleep(0)
     await asyncio.sleep(0)
     assert not plugin.runtime.calls and not plugin.runtime.source
+
+
+def test_missing_openai_adapter_preserves_native_exception_context(monkeypatch):
+    import builtins
+
+    original_import = builtins.__import__
+
+    def import_without_adapter(name, *args, **kwargs):
+        if name == "respan_instrumentation_openai._instrumentation":
+            raise ModuleNotFoundError(name)
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_adapter)
+    native_error = RuntimeError("native failure")
+    with pytest.raises(RuntimeError) as caught:
+        with module.suppress_nested():
+            raise native_error
+    assert caught.value is native_error
+    assert native_error.__context__ is None

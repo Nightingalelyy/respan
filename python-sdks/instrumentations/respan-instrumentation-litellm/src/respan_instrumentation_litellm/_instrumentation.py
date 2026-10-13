@@ -125,10 +125,13 @@ def suppress_nested():
             suppress_openai_instrumentation,
         )
     except ImportError:
+        suppress_openai_instrumentation = None
+    # Yield outside the import handler so native exceptions retain their context.
+    if suppress_openai_instrumentation is None:
         yield
-        return
-    with suppress_openai_instrumentation():
-        yield
+    else:
+        with suppress_openai_instrumentation():
+            yield
 
 
 class _Policy(SpanProcessor):
