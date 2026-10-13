@@ -30,7 +30,6 @@
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/core": "^2.10.0",
-    "@opentelemetry/sdk-trace-base": "^2.10.0",
     "@opentelemetry/semantic-conventions": "^1.43.0",
     "@respan/respan-sdk": "^1.1.7",
     "@respan/tracing": "^1.1.6",
@@ -45,9 +44,11 @@
     }
   },
   "devDependencies": {
+    "@opentelemetry/context-async-hooks": "^2.10.0",
     "@opentelemetry/otlp-transformer": "^0.205.0",
+    "@opentelemetry/sdk-trace-base": "^2.10.0",
     "@types/node": "^22.15.29",
-    "together-ai": "^0.40.0",
-    "typescript": "^5.7.3"
+    "together-ai": "^0.58.0",
+    "typescript": "^5.9.3"
   }
 }

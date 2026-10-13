@@ -1,0 +1,9 @@
+{
+  "summary": "Support current native Codex SDK, Cursor, Together AI, and Vertex AI SDK APIs with sampler-aware canonical tracing",
+  "packages": {
+    "@respan/instrumentation-codex-sdk": "minor",
+    "@respan/instrumentation-cursor": "minor",
+    "@respan/instrumentation-together-ai": "minor",
+    "@respan/instrumentation-vertexai": "minor"
+  }
+}

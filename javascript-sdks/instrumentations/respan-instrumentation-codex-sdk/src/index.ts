@@ -1,223 +1,182 @@
-/**
- * Respan instrumentation plugin for the OpenAI Codex TypeScript SDK.
- *
- * Patches `Thread.run()` and `Thread.runStreamed()` from `@openai/codex-sdk`
- * and emits Codex turn events into the active Respan OTEL pipeline.
- */
-
+/** Native Codex turns and items in the active Respan OpenTelemetry pipeline. */
+import { context, createContextKey } from "@opentelemetry/api";
 import {
   createCodexTurnState,
-  emitCodexTurnSpans,
-  finalizeCodexTurnState,
-  markCodexTurnError,
+  fail,
+  finishCodexTurn,
   trackCodexEvent,
   trackCodexRunResult,
   type CodexEmitterOptions,
   type CodexTurnState,
 } from "./_otel_emitter.js";
 
-type AnyFunction = (...args: unknown[]) => unknown;
-type PatchablePrototype = Record<string, unknown>;
-type CodexThreadConstructor = { prototype?: object };
-
+type Fn = (...args: any[]) => any;
+type Prototype = Record<string, any>;
 export interface CodexSDKModule {
-  Thread?: CodexThreadConstructor;
+  Thread?: { prototype?: object };
 }
-
 export interface CodexSDKInstrumentorOptions extends CodexEmitterOptions {
   sdkModule?: CodexSDKModule;
 }
+interface Patch {
+  prototype: Prototype;
+  originals: Map<string, Fn>;
+  wrappers: Map<string, Fn>;
+  owners: Map<CodexSDKInstrumentor, CodexEmitterOptions>;
+}
+const patches = new WeakMap<object, Patch>();
+const CURRENT_TURN = createContextKey("respan.codex-sdk.turn");
+const wrappedIterators = new WeakSet<object>();
 
 export class CodexSDKInstrumentor {
   public readonly name = "codex-sdk";
-
-  private static _originalRun: AnyFunction | null = null;
-  private static _originalRunStreamed: AnyFunction | null = null;
-  private static _patchCount = 0;
-  private static _activeOptions: CodexEmitterOptions = {};
-
-  private readonly _sdkModule?: CodexSDKModule;
-  private readonly _options: CodexEmitterOptions;
-  private _isInstrumented = false;
-  private _threadPrototype?: PatchablePrototype;
-
-  constructor(options: CodexSDKInstrumentorOptions = {}) {
-    const { sdkModule, ...emitterOptions } = options;
-    this._sdkModule = sdkModule;
-    this._options = emitterOptions;
+  private readonly sdkModule?: CodexSDKModule;
+  private readonly options: CodexEmitterOptions;
+  private patch?: Patch;
+  private pending?: Promise<void>;
+  private generation = 0;
+  constructor({ sdkModule, ...options }: CodexSDKInstrumentorOptions = {}) {
+    this.sdkModule = sdkModule;
+    this.options = options;
   }
-
-  async activate(): Promise<void> {
-    if (this._isInstrumented) {
-      return;
-    }
-
-    const sdkModule = await this._resolveSDKModule();
-    const threadPrototype = sdkModule.Thread?.prototype;
-    if (!threadPrototype) {
+  activate(): Promise<void> {
+    if (this.patch) return Promise.resolve();
+    if (this.pending) return this.pending;
+    const generation = this.generation;
+    const pending = this.activateInternal(generation).finally(() => {
+      if (this.pending === pending) this.pending = undefined;
+    });
+    this.pending = pending;
+    return pending;
+  }
+  private async activateInternal(generation: number): Promise<void> {
+    const sdk = this.sdkModule ?? (await import("@openai/codex-sdk"));
+    if (generation !== this.generation) return;
+    const prototype = sdk.Thread?.prototype as Prototype | undefined;
+    if (
+      !prototype ||
+      typeof prototype.run !== "function" ||
+      typeof prototype.runStreamed !== "function"
+    )
       throw new Error(
-        "CodexSDKInstrumentor requires sdkModule.Thread.prototype.",
+        "CodexSDKInstrumentor requires Thread.prototype.run and runStreamed.",
       );
-    }
-
-    this._patchThreadPrototype(threadPrototype);
-    this._isInstrumented = true;
-  }
-
-  deactivate(): void {
-    if (!this._isInstrumented || !this._threadPrototype) {
-      return;
-    }
-
-    CodexSDKInstrumentor._patchCount = Math.max(
-      0,
-      CodexSDKInstrumentor._patchCount - 1,
-    );
-
-    if (CodexSDKInstrumentor._patchCount === 0) {
-      if (CodexSDKInstrumentor._originalRun) {
-        this._threadPrototype.run = CodexSDKInstrumentor._originalRun;
-      }
-      if (CodexSDKInstrumentor._originalRunStreamed) {
-        this._threadPrototype.runStreamed =
-          CodexSDKInstrumentor._originalRunStreamed;
-      }
-      CodexSDKInstrumentor._originalRun = null;
-      CodexSDKInstrumentor._originalRunStreamed = null;
-      CodexSDKInstrumentor._activeOptions = {};
-    }
-
-    this._isInstrumented = false;
-  }
-
-  isActive(): boolean {
-    return this._isInstrumented;
-  }
-
-  private async _resolveSDKModule(): Promise<CodexSDKModule> {
-    if (this._sdkModule) {
-      return this._sdkModule;
-    }
-
-    return (await import("@openai/codex-sdk")) as unknown as CodexSDKModule;
-  }
-
-  private _patchThreadPrototype(prototype: object): void {
-    const patchablePrototype = prototype as PatchablePrototype;
-    this._threadPrototype = patchablePrototype;
-    if (CodexSDKInstrumentor._patchCount === 0) {
-      const originalRun = patchablePrototype.run;
-      const originalRunStreamed = patchablePrototype.runStreamed;
-      if (typeof originalRun !== "function") {
-        throw new Error(
-          "CodexSDKInstrumentor requires Thread.prototype.run to be a function.",
-        );
-      }
-      if (typeof originalRunStreamed !== "function") {
-        throw new Error(
-          "CodexSDKInstrumentor requires Thread.prototype.runStreamed to be a function.",
-        );
-      }
-
-      CodexSDKInstrumentor._originalRun = originalRun as AnyFunction;
-      CodexSDKInstrumentor._originalRunStreamed =
-        originalRunStreamed as AnyFunction;
-      CodexSDKInstrumentor._activeOptions = this._options;
-
-      patchablePrototype.run = async function instrumentedCodexRun(
-        this: unknown,
-        ...args: unknown[]
-      ): Promise<unknown> {
-        const state = createCodexTurnState({
-          input: args[0],
-          thread: this,
-          options: CodexSDKInstrumentor._activeOptions,
-        });
-
-        try {
-          const result = await CodexSDKInstrumentor._originalRun?.apply(
-            this,
-            args,
-          );
-          trackCodexRunResult(state, result, this);
-          return result;
-        } catch (error) {
-          markCodexTurnError(state, error);
-          throw error;
-        } finally {
-          finalizeCodexTurnState(state, this);
-          emitCodexTurnSpans(state);
-        }
+    let patch = patches.get(prototype);
+    if (!patch) {
+      patch = {
+        prototype,
+        originals: new Map(),
+        wrappers: new Map(),
+        owners: new Map(),
       };
-
-      patchablePrototype.runStreamed =
-        async function instrumentedCodexRunStreamed(
-          this: unknown,
-          ...args: unknown[]
-        ): Promise<unknown> {
-          const state = createCodexTurnState({
-            input: args[0],
-            thread: this,
-            options: CodexSDKInstrumentor._activeOptions,
-          });
-
-          try {
-            const result =
-              await CodexSDKInstrumentor._originalRunStreamed?.apply(
-                this,
-                args,
-              );
-            if (!isRecord(result) || !isAsyncIterable(result.events)) {
-              finalizeCodexTurnState(state, this);
-              emitCodexTurnSpans(state);
-              return result;
-            }
-            return {
-              ...result,
-              events: wrapCodexEvents(result.events, state, this),
-            };
-          } catch (error) {
-            markCodexTurnError(state, error);
-            finalizeCodexTurnState(state, this);
-            emitCodexTurnSpans(state);
-            throw error;
-          }
-        };
+      for (const key of ["run", "runStreamed", "runStreamedInternal"]) {
+        if (typeof prototype[key] !== "function") continue;
+        patch.originals.set(key, prototype[key]);
+      }
+      install(patch);
+      patches.set(prototype, patch);
     }
-
-    CodexSDKInstrumentor._patchCount += 1;
+    patch.owners.set(this, this.options);
+    this.patch = patch;
+  }
+  deactivate(): void {
+    this.generation++;
+    const patch = this.patch;
+    this.patch = undefined;
+    if (!patch) return;
+    patch.owners.delete(this);
+    if (patch.owners.size) return;
+    for (const [key, original] of patch.originals)
+      if (patch.prototype[key] === patch.wrappers.get(key))
+        patch.prototype[key] = original;
+    patches.delete(patch.prototype);
+  }
+  isActive(): boolean {
+    return Boolean(this.patch);
   }
 }
-
-async function* wrapCodexEvents(
-  events: AsyncIterable<unknown>,
+function install(patch: Patch): void {
+  const originalInternal = patch.originals.get("runStreamedInternal");
+  if (originalInternal) {
+    const wrapper = function (this: unknown, ...args: unknown[]) {
+      const iterator = originalInternal.apply(this, args);
+      const state = context.active().getValue(CURRENT_TURN) as
+        CodexTurnState | undefined;
+      if (state) wrapIterator(iterator, state, this, false);
+      return iterator;
+    };
+    patch.wrappers.set("runStreamedInternal", wrapper);
+    patch.prototype.runStreamedInternal = wrapper;
+  }
+  for (const key of ["run", "runStreamed"]) {
+    const original = patch.originals.get(key)!;
+    const wrapper = async function (this: unknown, ...args: unknown[]) {
+      const options = [...patch.owners.values()][0] ?? {};
+      const traceContent = [...patch.owners.values()].every(
+        (owner) => owner.traceContent !== false,
+      );
+      const state = createCodexTurnState(args[0], this, {
+        ...options,
+        traceContent,
+      });
+      state.context = state.context.setValue(CURRENT_TURN, state);
+      try {
+        const result = await context.with(state.context, () =>
+          original.apply(this, args),
+        );
+        if (key === "run") {
+          context.with(state.context, () => trackCodexRunResult(state, result));
+          context.with(state.context, () => finishCodexTurn(state, this));
+        } else if (result?.events && typeof result.events.next === "function")
+          wrapIterator(result.events, state, this, true);
+        else context.with(state.context, () => finishCodexTurn(state, this));
+        return result;
+      } catch (error) {
+        context.with(state.context, () => {
+          fail(state.span, state.guard, error);
+          finishCodexTurn(state, this);
+        });
+        throw error;
+      }
+    };
+    patch.wrappers.set(key, wrapper);
+    patch.prototype[key] = wrapper;
+  }
+}
+function wrapIterator(
+  iterator: any,
   state: CodexTurnState,
   thread: unknown,
-): AsyncGenerator<unknown> {
-  try {
-    for await (const event of events) {
-      trackCodexEvent(state, event);
-      yield event;
-    }
-  } catch (error) {
-    markCodexTurnError(state, error);
-    throw error;
-  } finally {
-    finalizeCodexTurnState(state, thread);
-    emitCodexTurnSpans(state);
+  finish: boolean,
+): void {
+  if (wrappedIterators.has(iterator)) {
+    // The public streaming call owns completion; the shared internal iterator
+    // already owns event observation. Mark it without replacing its identity.
+    if (finish) iterator[FINISH_TURN] = true;
+    return;
+  }
+  wrappedIterators.add(iterator);
+  if (finish) iterator[FINISH_TURN] = true;
+  for (const key of ["next", "return", "throw"]) {
+    const original = iterator[key];
+    if (typeof original !== "function") continue;
+    iterator[key] = function (this: unknown, ...args: unknown[]) {
+      state.guard.observe();
+      return context.with(state.context, async () => {
+        try {
+          const result = await original.apply(this, args);
+          if (!result.done && key === "next")
+            trackCodexEvent(state, result.value);
+          if (result.done && iterator[FINISH_TURN])
+            finishCodexTurn(state, thread);
+          return result;
+        } catch (error) {
+          fail(state.span, state.guard, error);
+          if (iterator[FINISH_TURN]) finishCodexTurn(state, thread);
+          throw error;
+        }
+      });
+    };
   }
 }
-
-function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
-  return Boolean(
-    value &&
-      typeof value === "object" &&
-      Symbol.asyncIterator in value &&
-      typeof (value as AsyncIterable<unknown>)[Symbol.asyncIterator] ===
-        "function",
-  );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
+const FINISH_TURN = Symbol("respan.codex-sdk.finish");

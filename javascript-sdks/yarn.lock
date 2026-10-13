@@ -2161,6 +2161,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@bufbuild/protobuf@npm:1.10.0":
+  version: 1.10.0
+  resolution: "@bufbuild/protobuf@npm:1.10.0"
+  checksum: 10c0/5487b9c2e63846d0e3bde4d025cc77ae44a22166a5d6c184df0da5581e1ab6d66dd115af0ccad814576dcd011bb1b93989fb0ac1eb4ae452979bb8b186693ba0
+  languageName: node
+  linkType: hard
+
 "@bufbuild/protobuf@npm:^1.10.0, @bufbuild/protobuf@npm:^1.10.1":
   version: 1.10.1
   resolution: "@bufbuild/protobuf@npm:1.10.1"
@@ -2182,12 +2189,105 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@connectrpc/connect-web@npm:^1.6.1":
+  version: 1.7.0
+  resolution: "@connectrpc/connect-web@npm:1.7.0"
+  peerDependencies:
+    "@bufbuild/protobuf": ^1.10.0
+    "@connectrpc/connect": 1.7.0
+  checksum: 10c0/3ad4279209a587df7cec1ea0b905058069a73ba23cd271750fac2b3a9e20ee3fd6451fcf27d9920f4f4bb28d8f99dfc6a59a6f8d27c431720cf9134669395b1b
+  languageName: node
+  linkType: hard
+
+"@connectrpc/connect@npm:^1.6.1":
+  version: 1.7.0
+  resolution: "@connectrpc/connect@npm:1.7.0"
+  peerDependencies:
+    "@bufbuild/protobuf": ^1.10.0
+  checksum: 10c0/58b6835e966fa589307b7f14b8821d54e5fec92fcb9bb64a8af24076d3a6534b8a80dffdcb71455514772ee53b7ea49429c031602eb19d5ecba2dad4c3eb7a10
+  languageName: node
+  linkType: hard
+
 "@cspotcode/source-map-support@npm:^0.8.0":
   version: 0.8.1
   resolution: "@cspotcode/source-map-support@npm:0.8.1"
   dependencies:
     "@jridgewell/trace-mapping": "npm:0.3.9"
   checksum: 10c0/05c5368c13b662ee4c122c7bfbe5dc0b613416672a829f3e78bc49a357a197e0218d6e74e7c66cfcd04e15a179acab080bd3c69658c9fbefd0e1ccd950a07fc6
+  languageName: node
+  linkType: hard
+
+"@cursor/sdk-darwin-arm64@npm:1.0.37":
+  version: 1.0.37
+  resolution: "@cursor/sdk-darwin-arm64@npm:1.0.37"
+  bin:
+    rg: bin/rg
+  conditions: os=darwin & cpu=arm64
+  languageName: node
+  linkType: hard
+
+"@cursor/sdk-darwin-x64@npm:1.0.37":
+  version: 1.0.37
+  resolution: "@cursor/sdk-darwin-x64@npm:1.0.37"
+  bin:
+    rg: bin/rg
+  conditions: os=darwin & cpu=x64
+  languageName: node
+  linkType: hard
+
+"@cursor/sdk-linux-arm64@npm:1.0.37":
+  version: 1.0.37
+  resolution: "@cursor/sdk-linux-arm64@npm:1.0.37"
+  bin:
+    rg: bin/rg
+  conditions: os=linux & cpu=arm64
+  languageName: node
+  linkType: hard
+
+"@cursor/sdk-linux-x64@npm:1.0.37":
+  version: 1.0.37
+  resolution: "@cursor/sdk-linux-x64@npm:1.0.37"
+  bin:
+    rg: bin/rg
+  conditions: os=linux & cpu=x64
+  languageName: node
+  linkType: hard
+
+"@cursor/sdk-win32-x64@npm:1.0.37":
+  version: 1.0.37
+  resolution: "@cursor/sdk-win32-x64@npm:1.0.37"
+  bin:
+    rg: bin/rg.exe
+  conditions: os=win32 & cpu=x64
+  languageName: node
+  linkType: hard
+
+"@cursor/sdk@npm:1.0.37":
+  version: 1.0.37
+  resolution: "@cursor/sdk@npm:1.0.37"
+  dependencies:
+    "@bufbuild/protobuf": "npm:1.10.0"
+    "@connectrpc/connect": "npm:^1.6.1"
+    "@connectrpc/connect-web": "npm:^1.6.1"
+    "@cursor/sdk-darwin-arm64": "npm:1.0.37"
+    "@cursor/sdk-darwin-x64": "npm:1.0.37"
+    "@cursor/sdk-linux-arm64": "npm:1.0.37"
+    "@cursor/sdk-linux-x64": "npm:1.0.37"
+    "@cursor/sdk-win32-x64": "npm:1.0.37"
+    "@statsig/js-client": "npm:3.31.0"
+    zod: "npm:^3.25.0"
+  dependenciesMeta:
+    "@cursor/sdk-darwin-arm64":
+      optional: true
+    "@cursor/sdk-darwin-x64":
+      optional: true
+    "@cursor/sdk-linux-arm64":
+      optional: true
+    "@cursor/sdk-linux-x64":
+      optional: true
+    "@cursor/sdk-win32-x64":
+      optional: true
+  checksum: 10c0/e84567afd628a030f62f7f2d675fbe346236c0acf0561ec046440cddf62d3d7e25e6c37f312eb86a25a8a7dcfe47ed4a12b5141469cdf16800b19cc57f0feae0
   languageName: node
   linkType: hard
 
@@ -2635,7 +2735,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@google-cloud/vertexai@npm:^1.12.0":
+"@google-cloud/vertexai@npm:1.12.0, @google-cloud/vertexai@npm:^1.12.0":
   version: 1.12.0
   resolution: "@google-cloud/vertexai@npm:1.12.0"
   dependencies:
@@ -2730,6 +2830,23 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@google/genai@npm:2.28.0, @google/genai@npm:^2.9.0":
+  version: 2.28.0
+  resolution: "@google/genai@npm:2.28.0"
+  dependencies:
+    google-auth-library: "npm:^10.3.0"
+    p-retry: "npm:^4.6.2"
+    protobufjs: "npm:^7.5.4"
+    ws: "npm:^8.18.0"
+  peerDependencies:
+    "@modelcontextprotocol/sdk": ^1.25.2
+  peerDependenciesMeta:
+    "@modelcontextprotocol/sdk":
+      optional: true
+  checksum: 10c0/848baeabc67f600c8e7e9b5535e1384edb836d414de4368fc08eccae874c45741c7f0a4baa36b02abac41cd80fcdd73e71ebc56b13c44183d4f3de5b75a2508c
+  languageName: node
+  linkType: hard
+
 "@google/genai@npm:^1.45.0":
   version: 1.52.0
   resolution: "@google/genai@npm:1.52.0"
@@ -2744,23 +2861,6 @@ __metadata:
     "@modelcontextprotocol/sdk":
       optional: true
   checksum: 10c0/2d22f6bd4baa915a402289dae4797410acbd5c5add1ed0c8d1bedef3ac7871fe1f04640d0612aa793fe7055f086719487491f55474a5b21597addfdea8631fa6
-  languageName: node
-  linkType: hard
-
-"@google/genai@npm:^2.9.0":
-  version: 2.28.0
-  resolution: "@google/genai@npm:2.28.0"
-  dependencies:
-    google-auth-library: "npm:^10.3.0"
-    p-retry: "npm:^4.6.2"
-    protobufjs: "npm:^7.5.4"
-    ws: "npm:^8.18.0"
-  peerDependencies:
-    "@modelcontextprotocol/sdk": ^1.25.2
-  peerDependenciesMeta:
-    "@modelcontextprotocol/sdk":
-      optional: true
-  checksum: 10c0/848baeabc67f600c8e7e9b5535e1384edb836d414de4368fc08eccae874c45741c7f0a4baa36b02abac41cd80fcdd73e71ebc56b13c44183d4f3de5b75a2508c
   languageName: node
   linkType: hard
 
@@ -4259,67 +4359,67 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@openai/codex-darwin-arm64@npm:@openai/codex@0.141.0-darwin-arm64":
-  version: 0.141.0-darwin-arm64
-  resolution: "@openai/codex@npm:0.141.0-darwin-arm64"
+"@openai/codex-darwin-arm64@npm:@openai/codex@0.162.1-darwin-arm64":
+  version: 0.162.1-darwin-arm64
+  resolution: "@openai/codex@npm:0.162.1-darwin-arm64"
   conditions: os=darwin & cpu=arm64
   languageName: node
   linkType: hard
 
-"@openai/codex-darwin-x64@npm:@openai/codex@0.141.0-darwin-x64":
-  version: 0.141.0-darwin-x64
-  resolution: "@openai/codex@npm:0.141.0-darwin-x64"
+"@openai/codex-darwin-x64@npm:@openai/codex@0.162.1-darwin-x64":
+  version: 0.162.1-darwin-x64
+  resolution: "@openai/codex@npm:0.162.1-darwin-x64"
   conditions: os=darwin & cpu=x64
   languageName: node
   linkType: hard
 
-"@openai/codex-linux-arm64@npm:@openai/codex@0.141.0-linux-arm64":
-  version: 0.141.0-linux-arm64
-  resolution: "@openai/codex@npm:0.141.0-linux-arm64"
+"@openai/codex-linux-arm64@npm:@openai/codex@0.162.1-linux-arm64":
+  version: 0.162.1-linux-arm64
+  resolution: "@openai/codex@npm:0.162.1-linux-arm64"
   conditions: os=linux & cpu=arm64
   languageName: node
   linkType: hard
 
-"@openai/codex-linux-x64@npm:@openai/codex@0.141.0-linux-x64":
-  version: 0.141.0-linux-x64
-  resolution: "@openai/codex@npm:0.141.0-linux-x64"
+"@openai/codex-linux-x64@npm:@openai/codex@0.162.1-linux-x64":
+  version: 0.162.1-linux-x64
+  resolution: "@openai/codex@npm:0.162.1-linux-x64"
   conditions: os=linux & cpu=x64
   languageName: node
   linkType: hard
 
-"@openai/codex-sdk@npm:^0.141.0":
-  version: 0.141.0
-  resolution: "@openai/codex-sdk@npm:0.141.0"
+"@openai/codex-sdk@npm:^0.162.1":
+  version: 0.162.1
+  resolution: "@openai/codex-sdk@npm:0.162.1"
   dependencies:
-    "@openai/codex": "npm:0.141.0"
-  checksum: 10c0/2866e0569a9e1af0f365a4f66d8b3600939062dd822ee5149080668386bb79333aaaa87dcbb6e4dbe06e0e5d7cf225b67050a20656989a8a2e4c98465e141ebf
+    "@openai/codex": "npm:0.162.1"
+  checksum: 10c0/5e89db861485e205edd3d7b42d1f6cd09bde5aba23b50d9e3ed3c037d13b86179da15136d77e14b6eb5ffcce7c11ab7144dace1fa1e69810e7c586042fb2c3a3
   languageName: node
   linkType: hard
 
-"@openai/codex-win32-arm64@npm:@openai/codex@0.141.0-win32-arm64":
-  version: 0.141.0-win32-arm64
-  resolution: "@openai/codex@npm:0.141.0-win32-arm64"
+"@openai/codex-win32-arm64@npm:@openai/codex@0.162.1-win32-arm64":
+  version: 0.162.1-win32-arm64
+  resolution: "@openai/codex@npm:0.162.1-win32-arm64"
   conditions: os=win32 & cpu=arm64
   languageName: node
   linkType: hard
 
-"@openai/codex-win32-x64@npm:@openai/codex@0.141.0-win32-x64":
-  version: 0.141.0-win32-x64
-  resolution: "@openai/codex@npm:0.141.0-win32-x64"
+"@openai/codex-win32-x64@npm:@openai/codex@0.162.1-win32-x64":
+  version: 0.162.1-win32-x64
+  resolution: "@openai/codex@npm:0.162.1-win32-x64"
   conditions: os=win32 & cpu=x64
   languageName: node
   linkType: hard
 
-"@openai/codex@npm:0.141.0":
-  version: 0.141.0
-  resolution: "@openai/codex@npm:0.141.0"
+"@openai/codex@npm:0.162.1":
+  version: 0.162.1
+  resolution: "@openai/codex@npm:0.162.1"
   dependencies:
-    "@openai/codex-darwin-arm64": "npm:@openai/codex@0.141.0-darwin-arm64"
-    "@openai/codex-darwin-x64": "npm:@openai/codex@0.141.0-darwin-x64"
-    "@openai/codex-linux-arm64": "npm:@openai/codex@0.141.0-linux-arm64"
-    "@openai/codex-linux-x64": "npm:@openai/codex@0.141.0-linux-x64"
-    "@openai/codex-win32-arm64": "npm:@openai/codex@0.141.0-win32-arm64"
-    "@openai/codex-win32-x64": "npm:@openai/codex@0.141.0-win32-x64"
+    "@openai/codex-darwin-arm64": "npm:@openai/codex@0.162.1-darwin-arm64"
+    "@openai/codex-darwin-x64": "npm:@openai/codex@0.162.1-darwin-x64"
+    "@openai/codex-linux-arm64": "npm:@openai/codex@0.162.1-linux-arm64"
+    "@openai/codex-linux-x64": "npm:@openai/codex@0.162.1-linux-x64"
+    "@openai/codex-win32-arm64": "npm:@openai/codex@0.162.1-win32-arm64"
+    "@openai/codex-win32-x64": "npm:@openai/codex@0.162.1-win32-x64"
   dependenciesMeta:
     "@openai/codex-darwin-arm64":
       optional: true
@@ -4335,7 +4435,7 @@ __metadata:
       optional: true
   bin:
     codex: bin/codex.js
-  checksum: 10c0/7a6e903a4227ab39cc59f032ec36baf83da22a364c6b1b70083d205f4ee1d44641b37d4b71821dd95dfc3541be1d5133826e279e358d3b44d55c2b2fc5bcdffd
+  checksum: 10c0/7fee01f5bb1420afbcad9ae6727e03498f271d96626892ca31364aaa0c011bf68e8f20c143603a1a78c97430912d4f3ed02618efa5a5968ced76dc12e43b982c
   languageName: node
   linkType: hard
 
@@ -5803,11 +5903,14 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@respan/instrumentation-codex-sdk@workspace:instrumentations/respan-instrumentation-codex-sdk"
   dependencies:
-    "@openai/codex-sdk": "npm:^0.141.0"
+    "@openai/codex-sdk": "npm:^0.162.1"
     "@opentelemetry/api": "npm:^1.9.0"
+    "@opentelemetry/context-async-hooks": "npm:^2.10.0"
     "@opentelemetry/core": "npm:^2.10.0"
-    "@respan/respan-sdk": "workspace:^"
-    "@respan/tracing": "workspace:^"
+    "@opentelemetry/sdk-trace-base": "npm:^2.10.0"
+    "@respan/respan": "npm:^2.5.0"
+    "@respan/respan-sdk": "npm:^1.3.4"
+    "@respan/tracing": "npm:^1.6.1"
     "@traceloop/ai-semantic-conventions": "npm:^0.13.0"
     "@types/node": "npm:^22.15.29"
     typescript: "npm:^5.7.3"
@@ -5845,17 +5948,19 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@respan/instrumentation-cursor@workspace:instrumentations/respan-instrumentation-cursor"
   dependencies:
+    "@cursor/sdk": "npm:1.0.37"
     "@opentelemetry/api": "npm:^1.9.0"
+    "@opentelemetry/context-async-hooks": "npm:^2.10.0"
     "@opentelemetry/core": "npm:^2.10.0"
     "@opentelemetry/sdk-trace-base": "npm:^2.10.0"
     "@opentelemetry/semantic-conventions": "npm:^1.43.0"
-    "@respan/respan-sdk": "workspace:^"
-    "@respan/tracing": "workspace:^"
+    "@respan/respan-sdk": "npm:^1.3.4"
+    "@respan/tracing": "npm:^1.6.1"
     "@traceloop/ai-semantic-conventions": "npm:^0.13.0"
     "@types/node": "npm:^22.15.29"
     typescript: "npm:^5.7.3"
   peerDependencies:
-    "@cursor/sdk": ">=1.0.0"
+    "@cursor/sdk": ">=1.0.7"
   peerDependenciesMeta:
     "@cursor/sdk":
       optional: false
@@ -6248,6 +6353,7 @@ __metadata:
   resolution: "@respan/instrumentation-together-ai@workspace:instrumentations/respan-instrumentation-together-ai"
   dependencies:
     "@opentelemetry/api": "npm:^1.9.0"
+    "@opentelemetry/context-async-hooks": "npm:^2.10.0"
     "@opentelemetry/core": "npm:^2.10.0"
     "@opentelemetry/otlp-transformer": "npm:^0.205.0"
     "@opentelemetry/sdk-trace-base": "npm:^2.10.0"
@@ -6256,8 +6362,8 @@ __metadata:
     "@respan/tracing": "npm:^1.1.6"
     "@traceloop/ai-semantic-conventions": "npm:^0.13.0"
     "@types/node": "npm:^22.15.29"
-    together-ai: "npm:^0.40.0"
-    typescript: "npm:^5.7.3"
+    together-ai: "npm:^0.58.0"
+    typescript: "npm:^5.9.3"
   peerDependencies:
     together-ai: ">=0.40.0"
   peerDependenciesMeta:
@@ -6291,19 +6397,26 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@respan/instrumentation-vertexai@workspace:instrumentations/respan-instrumentation-vertexai"
   dependencies:
+    "@google-cloud/vertexai": "npm:1.12.0"
+    "@google/genai": "npm:2.28.0"
     "@opentelemetry/api": "npm:^1.9.0"
+    "@opentelemetry/context-async-hooks": "npm:^2.10.0"
+    "@opentelemetry/core": "npm:^2.10.0"
     "@opentelemetry/sdk-trace-base": "npm:^2.10.0"
     "@opentelemetry/semantic-conventions": "npm:^1.43.0"
     "@respan/respan-sdk": "npm:^1.1.7"
     "@respan/tracing": "npm:^1.1.4"
     "@traceloop/ai-semantic-conventions": "npm:^0.13.0"
     "@types/node": "npm:^22.15.29"
-    typescript: "npm:^5.7.3"
+    typescript: "npm:^5.9.3"
   peerDependencies:
     "@google-cloud/vertexai": ">=1.1.0"
+    "@google/genai": ">=1.45.0 <3"
   peerDependenciesMeta:
     "@google-cloud/vertexai":
-      optional: false
+      optional: true
+    "@google/genai":
+      optional: true
   languageName: unknown
   linkType: soft
 
@@ -6345,7 +6458,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@respan/respan-sdk@npm:^1.0.0, @respan/respan-sdk@npm:^1.1.4, @respan/respan-sdk@npm:^1.1.7, @respan/respan-sdk@npm:^1.2.0, @respan/respan-sdk@npm:^1.3.2, @respan/respan-sdk@workspace:^, @respan/respan-sdk@workspace:respan-sdk":
+"@respan/respan-sdk@npm:^1.0.0, @respan/respan-sdk@npm:^1.1.4, @respan/respan-sdk@npm:^1.1.7, @respan/respan-sdk@npm:^1.2.0, @respan/respan-sdk@npm:^1.3.2, @respan/respan-sdk@npm:^1.3.4, @respan/respan-sdk@workspace:^, @respan/respan-sdk@workspace:respan-sdk":
   version: 0.0.0-use.local
   resolution: "@respan/respan-sdk@workspace:respan-sdk"
   dependencies:
@@ -6357,6 +6470,45 @@ __metadata:
     zod: "npm:^4.1.12"
   languageName: unknown
   linkType: soft
+
+"@respan/respan@npm:^2.5.0":
+  version: 2.5.0
+  resolution: "@respan/respan@npm:2.5.0"
+  dependencies:
+    "@opentelemetry/api": "npm:^1.9.0"
+    "@respan/instrumentation-anthropic": "npm:^1.0.0"
+    "@respan/instrumentation-aws-bedrock": "npm:^1.0.0"
+    "@respan/instrumentation-azure-openai": "npm:^1.0.0"
+    "@respan/instrumentation-cohere": "npm:^0.1.0"
+    "@respan/instrumentation-openai": "npm:^1.0.0"
+    "@respan/instrumentation-openrouter": "npm:^0.1.0"
+    "@respan/instrumentation-together-ai": "npm:^0.1.0"
+    "@respan/instrumentation-vertexai": "npm:^0.1.0"
+    "@respan/instrumentation-writer": "npm:^0.1.0"
+    "@respan/respan-sdk": "npm:^1.0.0"
+    "@respan/tracing": "npm:^1.0.0"
+  dependenciesMeta:
+    "@respan/instrumentation-anthropic":
+      optional: true
+    "@respan/instrumentation-aws-bedrock":
+      optional: true
+    "@respan/instrumentation-azure-openai":
+      optional: true
+    "@respan/instrumentation-cohere":
+      optional: true
+    "@respan/instrumentation-openai":
+      optional: true
+    "@respan/instrumentation-openrouter":
+      optional: true
+    "@respan/instrumentation-together-ai":
+      optional: true
+    "@respan/instrumentation-vertexai":
+      optional: true
+    "@respan/instrumentation-writer":
+      optional: true
+  checksum: 10c0/fe483062f727f01d0f283200e29ac33491b1e1db4566962aa308c962318b917791200f53641662cffcb0713ed1fae81f9ed1539fc0ef7e0dc67d46994975981c
+  languageName: node
+  linkType: hard
 
 "@respan/respan@workspace:respan":
   version: 0.0.0-use.local
@@ -7468,6 +7620,22 @@ __metadata:
   version: 1.1.0
   resolution: "@standard-schema/spec@npm:1.1.0"
   checksum: 10c0/d90f55acde4b2deb983529c87e8025fa693de1a5e8b49ecc6eb84d1fd96328add0e03d7d551442156c7432fd78165b2c26ff561b970a9a881f046abb78d6a526
+  languageName: node
+  linkType: hard
+
+"@statsig/client-core@npm:3.31.0":
+  version: 3.31.0
+  resolution: "@statsig/client-core@npm:3.31.0"
+  checksum: 10c0/11988ba4f4c16fc189f0da5a8297c0cb774485efbc50a80ba2d9a58421257567c4266f942a7b7da2453187a1f4b0a5f8a25a97ecb215d2f483cfb4f5a2dbee96
+  languageName: node
+  linkType: hard
+
+"@statsig/js-client@npm:3.31.0":
+  version: 3.31.0
+  resolution: "@statsig/js-client@npm:3.31.0"
+  dependencies:
+    "@statsig/client-core": "npm:3.31.0"
+  checksum: 10c0/1e0d0629572ddad1a610300bfba8b197fdb02366db71ae2d23dcbaf341c3815be13ff7319330ce33ccb5c4b67bee7298a05338807878a983be6c4026ce6db76e
   languageName: node
   linkType: hard
 
@@ -14811,12 +14979,12 @@ __metadata:
   languageName: node
   linkType: hard
 
-"together-ai@npm:^0.40.0":
-  version: 0.40.0
-  resolution: "together-ai@npm:0.40.0"
+"together-ai@npm:^0.58.0":
+  version: 0.58.0
+  resolution: "together-ai@npm:0.58.0"
   bin:
     together-ai: bin/cli
-  checksum: 10c0/ac8f740d741cf67a8c794e54cdfbdaeb099c4fdb792bf4ea8e2f613142e98c9e82f948cb13a1046756c788308c6e1d84e119cd3225ad03023c1be1d78d74aaae
+  checksum: 10c0/68535b4a5207f1fbca12789d8fa5d286fbb20cdadf98d7bdbdd0e4db4c9b99cbb8074736728e2d0d1b2e0c64ba5fa6575dfde25ed013a7ae9d258734ded7d9bc
   languageName: node
   linkType: hard
 
@@ -14991,7 +15159,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"typescript@npm:^5.7.0, typescript@npm:^5.7.3, typescript@npm:^5.8.3":
+"typescript@npm:^5.7.0, typescript@npm:^5.7.3, typescript@npm:^5.8.3, typescript@npm:^5.9.3":
   version: 5.9.3
   resolution: "typescript@npm:5.9.3"
   bin:
@@ -15001,7 +15169,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"typescript@patch:typescript@npm%3A^5.7.0#optional!builtin<compat/typescript>, typescript@patch:typescript@npm%3A^5.7.3#optional!builtin<compat/typescript>, typescript@patch:typescript@npm%3A^5.8.3#optional!builtin<compat/typescript>":
+"typescript@patch:typescript@npm%3A^5.7.0#optional!builtin<compat/typescript>, typescript@patch:typescript@npm%3A^5.7.3#optional!builtin<compat/typescript>, typescript@patch:typescript@npm%3A^5.8.3#optional!builtin<compat/typescript>, typescript@patch:typescript@npm%3A^5.9.3#optional!builtin<compat/typescript>":
   version: 5.9.3
   resolution: "typescript@patch:typescript@npm%3A5.9.3#optional!builtin<compat/typescript>::version=5.9.3&hash=5786d5"
   bin:
@@ -15637,7 +15805,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"zod@npm:^3.24.2, zod@npm:^3.25.34, zod@npm:^3.25.76":
+"zod@npm:^3.24.2, zod@npm:^3.25.0, zod@npm:^3.25.34, zod@npm:^3.25.76":
   version: 3.25.76
   resolution: "zod@npm:3.25.76"
   checksum: 10c0/5718ec35e3c40b600316c5b4c5e4976f7fee68151bc8f8d90ec18a469be9571f072e1bbaace10f1e85cf8892ea12d90821b200e980ab46916a6166a4260a983c
@@ -15658,10 +15826,17 @@ __metadata:
   languageName: node
   linkType: hard
 
-"zod@npm:^4.0.0, zod@npm:^4.0.17, zod@npm:^4.2.0":
+"zod@npm:^4.0.0, zod@npm:^4.0.17":
   version: 4.6.5
   resolution: "zod@npm:4.6.5"
   checksum: 10c0/32eb6c5e98becbe045675b2141c3611451c16ba567f9779231d79af41c4d651ca1c22f154aef7e6c6e77b929f23e43f1154ca05b82e119e922353725d6776af5
+  languageName: node
+  linkType: hard
+
+"zod@npm:^4.2.0":
+  version: 4.6.6
+  resolution: "zod@npm:4.6.6"
+  checksum: 10c0/447a3113bb743c54ab839213ff95e9e8c197cc1206f65270c18aac35aa70c47a5c8cab753be911b574df9a8a9801ea74ed6be776575232cae0084e51dab3e970
   languageName: node
   linkType: hard
 
