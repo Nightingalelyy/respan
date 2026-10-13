@@ -1,6 +1,6 @@
 {
   "name": "@respan/cli",
-  "version": "0.14.2",
+  "version": "0.17.0",
   "description": "Respan CLI - manage your LLM observability from the command line",
   "type": "module",
   "main": "dist/index.js",
@@ -17,9 +17,8 @@
     "directory": "javascript-sdks/respan-cli"
   },
   "scripts": {
-    "build": "npm run generate:skill-refs && tsc && npm run build:hooks",
+    "build": "npm run clean && tsc && npm run build:hooks",
     "build:hooks": "node -e \"const{build}=require('esbuild');const hooks=['claude-code','codex-cli','gemini-cli'];Promise.all(hooks.map(h=>build({entryPoints:['src/hooks/'+h+'.ts'],bundle:true,platform:'node',target:'node18',format:'cjs',outfile:'dist/hooks/'+h+'.cjs',external:[]}))).then(()=>console.log('Hooks bundled.'))\"",
-    "generate:skill-refs": "node scripts/embed-skill-refs.mjs",
     "test": "npm run build && node --test tests/*.test.mjs",
     "clean": "rm -rf dist",
     "dev": "node --loader ts-node/esm bin/dev.js",
@@ -47,6 +46,7 @@
   },
   "dependencies": {
     "@inquirer/prompts": "^7",
+    "@modelcontextprotocol/sdk": "^1.25.1",
     "@oclif/core": "^4",
     "@oclif/plugin-autocomplete": "^3",
     "@oclif/plugin-help": "^6",
