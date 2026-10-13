@@ -47,10 +47,10 @@
     }
   },
   "devDependencies": {
+    "@opentelemetry/context-async-hooks": "^2.10.0",
+    "@opentelemetry/sdk-trace-base": "^2.10.0",
     "@types/node": "^22.15.29",
     "braintrust": "^3.37.2",
-    "@opentelemetry/sdk-trace-base": "^2.10.0",
-    "@opentelemetry/context-async-hooks": "^2.10.0",
     "openai": "^7.32.0",
     "typescript": "^5.7.3",
     "zod": "^3.25.34"

@@ -1,198 +1,279 @@
-"""Bounded, privacy-safe JSON serialization for Ragas values."""
+"""Serialize complete builtins and known Ragas storage without user conversion hooks."""
 
 from __future__ import annotations
 
 import json
 import math
 import re
-from collections.abc import Mapping, Sequence
-from dataclasses import fields, is_dataclass
-from enum import Enum
-from itertools import islice
-from numbers import Integral, Real
+import types
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-MAX_ATTRIBUTE_BYTES = 16_000
-MAX_DEPTH = 8
-MAX_ITEMS = 50
-MAX_STRING_BYTES = 4_000
 REDACTED = "[REDACTED]"
-
-_SENSITIVE_SUFFIXES = (
-    "apikey",
-    "authorization",
-    "credential",
-    "password",
-    "secret",
-    "sessiontoken",
-    "token",
+_SECRET = re.compile(
+    r"(?i)(api[_-]?key|authorization|password|secret|access[_-]?token|refresh[_-]?token|session[_-]?token|token|credentials?|private[_-]?key|cookie)$"
 )
-_SECRET_ASSIGNMENT = re.compile(
-    r"(?i)([\"']?(?:api[_-]?key|authorization|password|secret|session[_-]?token|token)[\"']?)"
-    r"(\s*[:=]\s*)([\"']?)([^\s,;}\"']+)([\"']?)"
+_AUTH = re.compile(
+    r"""(?i)\b(Bearer|Basic)\s+(?!\[REDACTED\])(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[A-Za-z0-9._~+/=-]+)"""
 )
-_BEARER = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]+")
-_ADDRESS = re.compile(r"(?i)\b0x[0-9a-f]{6,}\b")
+_ASSIGN = re.compile(
+    r"""(?ix)(["']?(?:api[_-]?key|authorization|password|secret|session[_-]?token|access[_-]?token|refresh[_-]?token|token|credentials?|private[_-]?key|cookie)["']?)(\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}]+)"""
+)
+_URL = re.compile(r"https?://[^\s\"'<>]+")
 
 
-def _truncate_utf8(value: str, limit: int = MAX_STRING_BYTES) -> str:
-    encoded = value.encode("utf-8")
-    if len(encoded) <= limit:
-        return value
-    suffix = "...[truncated]"
-    budget = max(0, limit - len(suffix.encode("utf-8")))
-    return encoded[:budget].decode("utf-8", errors="ignore") + suffix
+def redact_text(value: str) -> str:
+    if value.lstrip().startswith(("{", "[")):
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            pass
+        else:
+            converted = json_value(parsed)
+            if converted == parsed:
+                return value
+            return json.dumps(
+                converted,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
 
+    def url(match: re.Match[str]) -> str:
+        try:
+            parsed = urlsplit(match.group())
+            host = parsed.netloc.rsplit("@", 1)[-1]
+            query = urlencode(
+                [
+                    (key, REDACTED if _SECRET.search(key) else item)
+                    for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+                ]
+            )
+            return urlunsplit(
+                (parsed.scheme, host, parsed.path, query, parsed.fragment)
+            )
+        except ValueError:
+            return REDACTED
 
-def safe_text(value: Any, *, default: str = "") -> str:
-    if isinstance(value, str):
-        value = _BEARER.sub(REDACTED, value)
-        value = _SECRET_ASSIGNMENT.sub(
-            lambda match: (
-                f"{match.group(1)}{match.group(2)}{match.group(3)}"
-                f"{REDACTED}{match.group(5)}"
-            ),
-            value,
+    value = _URL.sub(url, value)
+    value = re.sub(
+        r"""(?i)\b(Bearer|Basic)\s+(\\+)(["'])(?:[\s\S]*?)(?<!\\)\2\3""",
+        lambda m: f"{m.group(1)} {REDACTED}",
+        value,
+    )
+    value = _AUTH.sub(lambda m: f"{m.group(1)} {REDACTED}", value)
+
+    def assignment(match: re.Match[str]) -> str:
+        raw = match.group(3)
+        replacement = (
+            json.dumps(REDACTED)
+            if raw.startswith('"')
+            else ("'" + REDACTED + "'" if raw.startswith("'") else REDACTED)
         )
-        return _truncate_utf8(_ADDRESS.sub("0x<redacted>", value))
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, Integral):
-        return str(int(value))
-    if isinstance(value, Real) and math.isfinite(float(value)):
-        return str(float(value))
-    return f"<{type(value).__name__}>"
+        return match.group(1) + match.group(2) + replacement
+
+    return _ASSIGN.sub(assignment, value)
 
 
-def exception_message(exc: BaseException) -> str:
-    try:
-        arguments = exc.args
-    except Exception:  # noqa: BLE001 - hostile exception objects are supported.
-        arguments = ()
-    for argument in arguments:
-        if isinstance(argument, str | bool | int | float):
-            return safe_text(argument)
-    return type(exc).__name__
-
-
-def _key(value: Any) -> str:
-    if isinstance(value, Enum):
-        value = value.value
-    return safe_text(value)[:256]
-
-
-def sensitive_key(value: Any) -> bool:
-    if not isinstance(value, str):
-        return False
-    normalized = re.sub(r"[^a-z0-9]", "", value.lower())
-    return any(normalized.endswith(suffix) for suffix in _SENSITIVE_SUFFIXES)
-
-
-def json_value(value: Any, *, depth: int = 0, seen: set[int] | None = None) -> Any:
-    if value is None or isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return safe_text(value)
-    if isinstance(value, Integral):
-        return int(value)
-    if isinstance(value, Real):
-        number = float(value)
-        return number if math.isfinite(number) else None
-    if isinstance(value, bytes | bytearray | memoryview):
-        return {"length": len(value), "type": type(value).__name__}
-    if isinstance(value, Enum):
-        return json_value(value.value, depth=depth + 1, seen=seen)
-    if depth >= MAX_DEPTH:
-        return {"truncated": "max_depth", "type": type(value).__name__}
-
-    active = seen if seen is not None else set()
-    identity = id(value)
-    if identity in active:
-        return "<cycle>"
-    active.add(identity)
-    try:
-        if is_dataclass(value) and not isinstance(value, type):
-            selected = list(islice(fields(value), MAX_ITEMS + 1))
-            converted = {
-                field.name: getattr(value, field.name) for field in selected[:MAX_ITEMS]
-            }
-            if len(selected) > MAX_ITEMS:
-                converted["__truncated_items__"] = True
-            return json_value(converted, depth=depth + 1, seen=active)
-        if isinstance(value, Mapping):
-            result: dict[str, Any] = {}
-            items = list(islice(value.items(), MAX_ITEMS + 1))
-            for key, item in items[:MAX_ITEMS]:
-                key_text = _key(key)
-                result[key_text] = (
-                    REDACTED
-                    if sensitive_key(key)
-                    else json_value(item, depth=depth + 1, seen=active)
-                )
-            if len(items) > MAX_ITEMS:
-                result["__truncated_items__"] = True
-            return result
-        if isinstance(value, Sequence) and not isinstance(
-            value, str | bytes | bytearray
+def native_storage(value: Any, base: type) -> dict | None:
+    """Read a known native base's C storage descriptor, bypassing subclass getters."""
+    if not any(
+        item is base
+        for item in type.__dict__["__mro__"].__get__(type(value), type(type(value)))
+    ):
+        return None
+    for ancestor in type.__dict__["__mro__"].__get__(base, type(base)):
+        descriptor = (
+            type.__dict__["__dict__"].__get__(ancestor, type(ancestor)).get("__dict__")
+        )
+        if any(
+            type(descriptor) is t
+            for t in (types.GetSetDescriptorType, types.MemberDescriptorType)
         ):
-            items = list(islice(iter(value), MAX_ITEMS + 1))
-            converted = [
-                json_value(item, depth=depth + 1, seen=active)
-                for item in items[:MAX_ITEMS]
+            storage = descriptor.__get__(value, base)
+            return storage if type(storage) is dict else None
+    return None
+
+
+def native_dict(value):
+    if type(value) is dict:
+        return value
+    from pydantic import BaseModel
+    from ragas.dataset import DataTable
+    from ragas.dataset_schema import EvaluationDataset, EvaluationResult
+    from ragas.metrics.result import MetricResult
+
+    if any(
+        item is BaseModel
+        for item in type.__dict__["__mro__"].__get__(type(value), type(type(value)))
+    ):
+        data = dict(native_storage(value, BaseModel) or {})
+        descriptor = type.__getattribute__(BaseModel, "__dict__").get(
+            "__pydantic_extra__"
+        )
+        if any(
+            type(descriptor) is t
+            for t in (types.GetSetDescriptorType, types.MemberDescriptorType)
+        ):
+            extra = descriptor.__get__(value, BaseModel)
+            if type(extra) is dict:
+                data.update(extra)
+        return data
+    if type(value) is EvaluationDataset:
+        data = native_storage(value, EvaluationDataset) or {}
+        return {"samples": data.get("samples", [])}
+    if type(value) is EvaluationResult:
+        data = native_storage(value, EvaluationResult) or {}
+        return {
+            k: data[k]
+            for k in ("scores", "dataset", "binary_columns", "traces", "run_id")
+            if k in data
+        }
+    if any(
+        item is MetricResult
+        for item in type.__dict__["__mro__"].__get__(type(value), type(type(value)))
+    ):
+        data = native_storage(value, MetricResult) or {}
+        return {
+            "value": data.get("_value"),
+            "reason": data.get("reason"),
+            "traces": data.get("traces"),
+        }
+    if any(
+        item is DataTable
+        for item in type.__dict__["__mro__"].__get__(type(value), type(type(value)))
+    ):
+        data = native_storage(value, DataTable) or {}
+        return {"name": data.get("name"), "data": data.get("_data", [])}
+    return None
+
+
+def _schema(data):
+    valid_types = {"object", "array", "string", "integer", "number", "boolean", "null"}
+    if type(data.get("type")) is str and data["type"] in valid_types:
+        return True
+    if type(data.get("$schema")) is str:
+        return True
+    properties = data.get("properties")
+    return (
+        type(properties) is dict
+        and bool(properties)
+        and all(
+            type(item) is bool
+            or (
+                type(item) is dict
+                and any(
+                    key in item
+                    for key in (
+                        "type",
+                        "$ref",
+                        "enum",
+                        "const",
+                        "allOf",
+                        "anyOf",
+                        "oneOf",
+                        "properties",
+                        "default",
+                        "example",
+                        "examples",
+                        "items",
+                    )
+                )
+            )
+            for item in properties.values()
+        )
+    )
+
+
+def json_value(
+    value: Any,
+    *,
+    seen: set[int] | None = None,
+    schema_names: bool = False,
+    schema: bool = False,
+    credential_schema: bool = False,
+) -> Any:
+    if value is None or any(type(value) is t for t in (bool, int)):
+        return value
+    if type(value) is float:
+        return value if math.isfinite(value) else None
+    if type(value) is str:
+        return redact_text(value)
+    active = seen if seen is not None else set()
+    if id(value) in active:
+        return None
+    active.add(id(value))
+    try:
+        from uuid import UUID
+
+        import numpy as np
+
+        if type(value) is UUID:
+            return UUID.__str__(value)
+        if type(value) is np.ndarray:
+            return json_value(np.ndarray.tolist(value), seen=active)
+        if any(
+            type(value) is t
+            for t in (
+                np.float16,
+                np.float32,
+                np.float64,
+                np.int8,
+                np.int16,
+                np.int32,
+                np.int64,
+                np.uint8,
+                np.uint16,
+                np.uint32,
+                np.uint64,
+                np.bool_,
+            )
+        ):
+            return json_value(value.item(), seen=active)
+        data = native_dict(value)
+        if data is not None:
+            is_schema = schema or _schema(data)
+            result = {}
+            for key, item in data.items():
+                if type(key) is not str:
+                    continue
+                sensitive = bool(_SECRET.search(key))
+                if (
+                    sensitive
+                    and (
+                        not schema_names
+                        or not any(type(item) is t for t in (dict, bool))
+                    )
+                ) or (
+                    credential_schema
+                    and key in ("default", "const", "enum", "examples", "example")
+                ):
+                    result[key] = REDACTED
+                else:
+                    result[key] = json_value(
+                        item,
+                        seen=active,
+                        schema_names=is_schema
+                        and key in ("properties", "$defs", "definitions"),
+                        schema=is_schema,
+                        credential_schema=schema_names and sensitive,
+                    )
+            return result
+        if any(type(value) is t for t in (list, tuple)):
+            return [
+                json_value(item, seen=active, credential_schema=credential_schema)
+                for item in value
             ]
-            if len(items) > MAX_ITEMS:
-                return {"items": converted, "truncated": True}
-            return converted
-        for method_name in ("model_dump", "to_dict", "dict"):
-            try:
-                method = getattr(value, method_name, None)
-            except Exception:  # noqa: BLE001 - vendor attributes are untrusted.
-                method = None
-            if not callable(method):
-                continue
-            try:
-                converted = method()
-            except Exception:  # noqa: BLE001,S112 - fall through to a type summary.
-                continue
-            if isinstance(converted, Mapping):
-                return json_value(converted, depth=depth + 1, seen=active)
-        return {"type": type(value).__name__}
-    except Exception:  # noqa: BLE001 - serialization must never break Ragas.
-        return {"type": type(value).__name__, "unserializable": True}
+        return (
+            "<"
+            + type.__dict__["__name__"].__get__(type(value), type(type(value)))
+            + ">"
+        )
     finally:
-        active.discard(identity)
+        active.discard(id(value))
 
 
 def json_string(value: Any) -> str:
-    """Return valid JSON bounded by the OTel attribute budget."""
-    encoded = json.dumps(
-        json_value(value),
-        allow_nan=False,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
+    return json.dumps(
+        json_value(value), ensure_ascii=False, separators=(",", ":"), allow_nan=False
     )
-    encoded_bytes = len(encoded.encode("utf-8"))
-    if encoded_bytes <= MAX_ATTRIBUTE_BYTES:
-        return encoded
-    low, high, result = 0, len(encoded), ""
-    while low <= high:
-        midpoint = (low + high) // 2
-        candidate = json.dumps(
-            {
-                "original_bytes": encoded_bytes,
-                "preview": encoded[:midpoint],
-                "truncated": True,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        if len(candidate.encode("utf-8")) <= MAX_ATTRIBUTE_BYTES:
-            result = candidate
-            low = midpoint + 1
-        else:
-            high = midpoint - 1
-    return result
