@@ -250,6 +250,23 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@anthropic-ai/sdk@npm:0.129.0":
+  version: 0.129.0
+  resolution: "@anthropic-ai/sdk@npm:0.129.0"
+  dependencies:
+    json-schema-to-ts: "npm:^3.1.1"
+    standardwebhooks: "npm:^1.0.0"
+  peerDependencies:
+    zod: ^3.25.0 || ^4.0.0
+  peerDependenciesMeta:
+    zod:
+      optional: true
+  bin:
+    anthropic-ai-sdk: bin/cli
+  checksum: 10c0/d4eba38c978ef5ecf9cce4e47b5dd927a78e1b20c6725a7cb61a77cf6e9dfa4543767165c7a8499f9c949466093e8e3d8c8416bdb0c0d78de81d54a8b2b93f6d
+  languageName: node
+  linkType: hard
+
 "@anthropic-ai/sdk@npm:0.41.0":
   version: 0.41.0
   resolution: "@anthropic-ai/sdk@npm:0.41.0"
@@ -2180,6 +2197,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@earendil-works/chord@npm:^1.1.0":
+  version: 1.1.0
+  resolution: "@earendil-works/chord@npm:1.1.0"
+  dependencies:
+    esbuild: "npm:0.28.2"
+  checksum: 10c0/010fdaa97ed96b31f14e53c380926207d8b83cec9e96d761e6a2a87e6217f8d18ddf1e6e93b26c1c054ce90e572ab3bd333883bc889df7b432fad8712e151009
+  languageName: node
+  linkType: hard
+
 "@earendil-works/pi-agent-core@npm:^0.87.1":
   version: 0.87.1
   resolution: "@earendil-works/pi-agent-core@npm:0.87.1"
@@ -2192,6 +2218,16 @@ __metadata:
     typebox: "npm:1.3.27"
     yaml: "npm:2.9.0"
   checksum: 10c0/972fcd09f359acd565e179906889675bf6a209ba609aa2bc018bb47888eff9a3bafd6e384701403e549e4e57625922c92d4d6dafacb461f6b078c0daeba3a98b
+  languageName: node
+  linkType: hard
+
+"@earendil-works/pi-agent-core@npm:^1.1.0":
+  version: 1.1.0
+  resolution: "@earendil-works/pi-agent-core@npm:1.1.0"
+  dependencies:
+    "@earendil-works/pi-ai": "npm:^1.1.0"
+    typebox: "npm:1.3.27"
+  checksum: 10c0/af5de004b56dde119ab6695b7b306f4eea72284c32b38e951a240b59f830ea7c355a23e3d17b5ac75fdce4abdeb1f028fb0d453fac8f1ba96069da3f22925170
   languageName: node
   linkType: hard
 
@@ -2215,10 +2251,98 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@earendil-works/pi-ai@npm:^1.1.0":
+  version: 1.1.0
+  resolution: "@earendil-works/pi-ai@npm:1.1.0"
+  dependencies:
+    "@anthropic-ai/sdk": "npm:0.129.0"
+    "@aws-sdk/client-bedrock-runtime": "npm:3.1127.0"
+    "@earendil-works/pi-telemetry": "npm:^1.1.0"
+    "@google/genai": "npm:2.21.0"
+    "@smithy/node-http-handler": "npm:4.12.1"
+    http-proxy-agent: "npm:9.1.0"
+    https-proxy-agent: "npm:9.1.0"
+    openai: "npm:7.19.0"
+    partial-json: "npm:0.1.7"
+    typebox: "npm:1.3.27"
+  bin:
+    pi-ai: dist/cli.js
+  checksum: 10c0/04047f267ba355685568b1c4eb9fa92d4e9f95e1a466239f2015c3a1dc2abfe729fb21f3700c61fb9d1454cbe59a856a10988ddfd875c6be7db634b737a54f29
+  languageName: node
+  linkType: hard
+
+"@earendil-works/pi-codemode@npm:^1.1.0":
+  version: 1.1.0
+  resolution: "@earendil-works/pi-codemode@npm:1.1.0"
+  dependencies:
+    quickjs-wasi: "npm:3.6.2"
+  checksum: 10c0/762b97a629e08046487b8c6493147f066575e8927f840d04bc00330112cb0da765229d8f1e058cf847bdb4bc9c0013bf1130893501c80deffc00f2a8f10b2d7f
+  languageName: node
+  linkType: hard
+
+"@earendil-works/pi-coding-agent@npm:1.1.0":
+  version: 1.1.0
+  resolution: "@earendil-works/pi-coding-agent@npm:1.1.0"
+  dependencies:
+    "@earendil-works/chord": "npm:^1.1.0"
+    "@earendil-works/pi-agent-core": "npm:^1.1.0"
+    "@earendil-works/pi-ai": "npm:^1.1.0"
+    "@earendil-works/pi-codemode": "npm:^1.1.0"
+    "@earendil-works/pi-mcp": "npm:^1.1.0"
+    "@earendil-works/pi-tui": "npm:^1.1.0"
+    "@silvia-odwyer/photon-node": "npm:0.3.4"
+    brace-expansion: "npm:5.0.12"
+    chalk: "npm:6.0.0"
+    cross-spawn: "npm:7.0.6"
+    diff: "npm:8.0.4"
+    grok-mermaid: "npm:0.2.3"
+    highlight.js: "npm:10.7.3"
+    hosted-git-info: "npm:9.0.3"
+    ignore: "npm:7.0.8"
+    jiti: "npm:2.7.0"
+    minimatch: "npm:10.2.6"
+    proper-lockfile: "npm:4.1.2"
+    quickjs-wasi: "npm:3.6.2"
+    semver: "npm:7.8.5"
+    typebox: "npm:1.3.27"
+    undici: "npm:8.10.2"
+    yaml: "npm:2.9.0"
+  bin:
+    pi: dist/bundle/cli.js
+  checksum: 10c0/8625d4e90d3feb473d4c95d4a35707e8dc1f8baff7c4f4ef9d84f6ea70586d8db0060e575a8222d4fb373132be7d5d388553136c367af586abb74c947bd23a72
+  languageName: node
+  linkType: hard
+
+"@earendil-works/pi-mcp@npm:^1.1.0":
+  version: 1.1.0
+  resolution: "@earendil-works/pi-mcp@npm:1.1.0"
+  dependencies:
+    cross-spawn: "npm:7.0.6"
+  checksum: 10c0/bbd868b16127f528e4877e024a687b42668eaa688af4313cc23baf613431ee412eacf3952792531af6f031b959dc2eb77e9e9711650501c4a917c68f4b809009
+  languageName: node
+  linkType: hard
+
 "@earendil-works/pi-telemetry@npm:^0.87.1":
   version: 0.87.1
   resolution: "@earendil-works/pi-telemetry@npm:0.87.1"
   checksum: 10c0/8bcbd720043fd7622f431b09b06bdabdaffcb1c87fc645c4a0c277e64211b998b78684b07e7990934cd8330559f25f7c0b2b422a87936f6dfe04f0da7244b616
+  languageName: node
+  linkType: hard
+
+"@earendil-works/pi-telemetry@npm:^1.1.0":
+  version: 1.1.0
+  resolution: "@earendil-works/pi-telemetry@npm:1.1.0"
+  checksum: 10c0/207af46760cf06c4b307bc144f0c9b9435ee07571817925b7c06f57625c28cf14c2dae92798241623acc5688a8707399b1f69b08cd5bcc54c850d3d80ecf68e6
+  languageName: node
+  linkType: hard
+
+"@earendil-works/pi-tui@npm:^1.1.0":
+  version: 1.1.0
+  resolution: "@earendil-works/pi-tui@npm:1.1.0"
+  dependencies:
+    get-east-asian-width: "npm:1.6.0"
+    marked: "npm:18.0.11"
+  checksum: 10c0/28a9307ef29210ee71d628c4d17d785be54576b42adf1ab6cd78163cf9a5ca46468ee7b9730356838d20b6f4abc3b170829bb7b7ebe31da22799ad7212716689
   languageName: node
   linkType: hard
 
@@ -4142,12 +4266,12 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@openrouter/sdk@npm:^0.13.7":
-  version: 0.13.22
-  resolution: "@openrouter/sdk@npm:0.13.22"
+"@openrouter/sdk@npm:^1.4.25":
+  version: 1.4.25
+  resolution: "@openrouter/sdk@npm:1.4.25"
   dependencies:
     zod: "npm:^3.25.0 || ^4.0.0"
-  checksum: 10c0/f66e3b089979ded8242d64cdf4aec732e727ac075241b1d8d8252cf2f2c0914607910265defee5666c328b9ab95128d287d16d4f94d7fed79df01a74cd5cad2d
+  checksum: 10c0/8c9bca3a5d82f2fd34f37cdbd2a3a62ce64d2897434683e5ce017db541ec9c4c3a6eb94212e6213a13175d0173d27329ab13906798f5f7b940e78014d26e047d
   languageName: node
   linkType: hard
 
@@ -5876,18 +6000,21 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@respan/instrumentation-openrouter@workspace:instrumentations/respan-instrumentation-openrouter"
   dependencies:
-    "@openrouter/sdk": "npm:^0.13.7"
+    "@openrouter/sdk": "npm:^1.4.25"
     "@opentelemetry/api": "npm:^1.9.0"
+    "@opentelemetry/context-async-hooks": "npm:^2.10.0"
+    "@opentelemetry/core": "npm:^2.10.0"
     "@opentelemetry/sdk-trace-base": "npm:^2.10.0"
     "@opentelemetry/semantic-conventions": "npm:^1.43.0"
     "@respan/respan-sdk": "npm:^1.1.7"
-    "@respan/tracing": "npm:^1.1.4"
-    "@traceloop/ai-semantic-conventions": "npm:^0.4.0"
+    "@respan/tracing": "npm:^1.3.0"
+    "@traceloop/ai-semantic-conventions": "npm:^0.27.0"
     "@types/node": "npm:^22.15.29"
     rimraf: "npm:^6.0.1"
     typescript: "npm:^5.8.3"
+    zod: "npm:^4.0.0"
   peerDependencies:
-    "@openrouter/sdk": ">=0.13.0"
+    "@openrouter/sdk": ">=0.13.7"
   languageName: unknown
   linkType: soft
 
@@ -5895,17 +6022,19 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@respan/instrumentation-pi@workspace:instrumentations/respan-instrumentation-pi"
   dependencies:
+    "@earendil-works/pi-coding-agent": "npm:1.1.0"
     "@opentelemetry/api": "npm:^1.9.0"
+    "@opentelemetry/context-async-hooks": "npm:^2.10.0"
     "@opentelemetry/core": "npm:^2.10.0"
     "@opentelemetry/sdk-trace-base": "npm:^2.10.0"
     "@opentelemetry/semantic-conventions": "npm:^1.43.0"
-    "@respan/respan-sdk": "workspace:^"
-    "@respan/tracing": "workspace:^"
+    "@respan/respan-sdk": "npm:^1.2.0"
+    "@respan/tracing": "npm:^1.3.0"
     "@traceloop/ai-semantic-conventions": "npm:^0.13.0"
     "@types/node": "npm:^22.15.29"
     typescript: "npm:^5.7.3"
   peerDependencies:
-    "@earendil-works/pi-coding-agent": ">=0.65.0"
+    "@earendil-works/pi-coding-agent": ">=0.74.0"
   peerDependenciesMeta:
     "@earendil-works/pi-coding-agent":
       optional: true
@@ -6046,15 +6175,16 @@ __metadata:
   resolution: "@respan/instrumentation-writer@workspace:instrumentations/respan-instrumentation-writer"
   dependencies:
     "@opentelemetry/api": "npm:^1.9.0"
+    "@opentelemetry/context-async-hooks": "npm:^2.10.0"
     "@opentelemetry/core": "npm:^2.10.0"
     "@opentelemetry/sdk-trace-base": "npm:^2.10.0"
     "@opentelemetry/semantic-conventions": "npm:^1.43.0"
     "@respan/respan-sdk": "npm:^1.1.7"
-    "@respan/tracing": "npm:^1.1.6"
+    "@respan/tracing": "npm:^1.3.2"
     "@traceloop/ai-semantic-conventions": "npm:^0.13.0"
     "@types/node": "npm:^22.15.29"
     typescript: "npm:^5.7.3"
-    writer-sdk: "npm:^2.3.2"
+    writer-sdk: "npm:^3.0.0"
     zod: "npm:^3.25.76"
   peerDependencies:
     writer-sdk: ">=2.0.0"
@@ -6247,7 +6377,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@respan/tracing@npm:^1.6.0, @respan/tracing@npm:^1.6.1":
+"@respan/tracing@npm:^1.3.0, @respan/tracing@npm:^1.3.2, @respan/tracing@npm:^1.6.0, @respan/tracing@npm:^1.6.1":
   version: 1.6.1
   resolution: "@respan/tracing@npm:1.6.1"
   dependencies:
@@ -6422,6 +6552,13 @@ __metadata:
     domhandler: "npm:^5.0.3"
     selderee: "npm:^0.11.0"
   checksum: 10c0/e938ba9aeb31a9cf30dcb2977ef41685c598bf744bedc88c57aa9e8b7e71b51781695cf99c08aac50773fd7714eba670bd2a079e46db0788abe40c6d220084eb
+  languageName: node
+  linkType: hard
+
+"@silvia-odwyer/photon-node@npm:0.3.4":
+  version: 0.3.4
+  resolution: "@silvia-odwyer/photon-node@npm:0.3.4"
+  checksum: 10c0/a7bca792c004b47db41a37cc3e5ad50dba5cdfcbcd984854b1783426df4083073080094fa406a810570dcb9c5835a8e22382f48d2854ccd2896c6c3554d9c6b4
   languageName: node
   linkType: hard
 
@@ -7400,10 +7537,13 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@traceloop/ai-semantic-conventions@npm:^0.4.0":
-  version: 0.4.0
-  resolution: "@traceloop/ai-semantic-conventions@npm:0.4.0"
-  checksum: 10c0/267efc1818581ff760c4736d320b3fff070d65e766106bd033ade3fb035c502de82e293d6c0cebd83eb3c7b61e0d5a4b02238c5c210afcc3bd926fb362457d28
+"@traceloop/ai-semantic-conventions@npm:^0.27.0":
+  version: 0.27.0
+  resolution: "@traceloop/ai-semantic-conventions@npm:0.27.0"
+  dependencies:
+    "@opentelemetry/api": "npm:^1.9.0"
+    "@opentelemetry/semantic-conventions": "npm:^1.40.0"
+  checksum: 10c0/1f5be5a99b16e35fcea475fddd38d0caa9c72b7f0946ad686343bc978601d0d97ea50662955276214fc2348e8c4e5aa3814a341b73b3d701411c8bd22bc94a14
   languageName: node
   linkType: hard
 
@@ -8505,6 +8645,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"chalk@npm:6.0.0":
+  version: 6.0.0
+  resolution: "chalk@npm:6.0.0"
+  checksum: 10c0/47fd9028aa66fa532295525fe3ac5aec5e467e0d86847d4b5f6e01f9c9bb70b6fd1edca79cddc78a0f31a357baa65cc752d30c6557d025904207d113c82d8962
+  languageName: node
+  linkType: hard
+
 "change-case@npm:^4":
   version: 4.1.2
   resolution: "change-case@npm:4.1.2"
@@ -8895,7 +9042,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"cross-spawn@npm:^7.0.5":
+"cross-spawn@npm:7.0.6, cross-spawn@npm:^7.0.5":
   version: 7.0.6
   resolution: "cross-spawn@npm:7.0.6"
   dependencies:
@@ -10157,6 +10304,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"get-east-asian-width@npm:1.6.0":
+  version: 1.6.0
+  resolution: "get-east-asian-width@npm:1.6.0"
+  checksum: 10c0/7e72e9550fd49ca5b246f9af6bb2afc129c96412845ff6556b3274fd44817a381702ca17028efe9866b261a3d44254cbf21e6c90cf05b4b61675630af776d431
+  languageName: node
+  linkType: hard
+
 "get-intrinsic@npm:^1.2.5, get-intrinsic@npm:^1.2.6, get-intrinsic@npm:^1.3.0":
   version: 1.3.1
   resolution: "get-intrinsic@npm:1.3.1"
@@ -10372,10 +10526,17 @@ __metadata:
   languageName: node
   linkType: hard
 
-"graceful-fs@npm:^4.1.6, graceful-fs@npm:^4.2.0, graceful-fs@npm:^4.2.6":
+"graceful-fs@npm:^4.1.6, graceful-fs@npm:^4.2.0, graceful-fs@npm:^4.2.4, graceful-fs@npm:^4.2.6":
   version: 4.2.11
   resolution: "graceful-fs@npm:4.2.11"
   checksum: 10c0/386d011a553e02bc594ac2ca0bd6d9e4c22d7fa8cfbfc448a6d148c59ea881b092db9dbe3547ae4b88e55f1b01f7c4a2ecc53b310c042793e63aa44cf6c257f2
+  languageName: node
+  linkType: hard
+
+"grok-mermaid@npm:0.2.3":
+  version: 0.2.3
+  resolution: "grok-mermaid@npm:0.2.3"
+  checksum: 10c0/e7d2299831d2e44988f567538d822155316f3d92bb302af04447fb5f15c21049a33c83e10a4c641c18c675098f3fe9f19194887370500764334ffdb96347abdd
   languageName: node
   linkType: hard
 
@@ -10474,6 +10635,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"highlight.js@npm:10.7.3":
+  version: 10.7.3
+  resolution: "highlight.js@npm:10.7.3"
+  checksum: 10c0/073837eaf816922427a9005c56c42ad8786473dc042332dfe7901aa065e92bc3d94ebf704975257526482066abb2c8677cc0326559bb8621e046c21c5991c434
+  languageName: node
+  linkType: hard
+
 "homedir-polyfill@npm:^1.0.1":
   version: 1.0.3
   resolution: "homedir-polyfill@npm:1.0.3"
@@ -10494,6 +10662,15 @@ __metadata:
   version: 6.1.1
   resolution: "hookable@npm:6.1.1"
   checksum: 10c0/bb46cd9ffc0a997af21febd97835da4e59a6989adec73dc3c215fcc44c7ac01de4781f251c3d420bf45862d2592a695f5f0de095b6f5df52db8afb5166938212
+  languageName: node
+  linkType: hard
+
+"hosted-git-info@npm:9.0.3":
+  version: 9.0.3
+  resolution: "hosted-git-info@npm:9.0.3"
+  dependencies:
+    lru-cache: "npm:^11.1.0"
+  checksum: 10c0/8f216ccb461ca54ae1846745325ced6a880b53101a58c820b813f067caa301576bf974f787df5688b7f0f1b752cdfcbaa2979751d1fcfd604032cc57bc538607
   languageName: node
   linkType: hard
 
@@ -10958,6 +11135,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"jiti@npm:2.7.0":
+  version: 2.7.0
+  resolution: "jiti@npm:2.7.0"
+  bin:
+    jiti: lib/jiti-cli.mjs
+  checksum: 10c0/1b1e2310a490dce1aeea3da5f5dfe18273516c20ce48be2e98eb8ea452d5f3dcc8fd0cfd6d28b4052a24c5dbab6e3089b2d7e79f0bce7915b10d750929563c42
+  languageName: node
+  linkType: hard
+
 "joplin-turndown-plugin-gfm@npm:^1.0.12":
   version: 1.0.12
   resolution: "joplin-turndown-plugin-gfm@npm:1.0.12"
@@ -11320,6 +11506,15 @@ __metadata:
     promise-retry: "npm:^2.0.1"
     ssri: "npm:^13.0.0"
   checksum: 10c0/525f74915660be60b616bcbd267c4a5b59481b073ba125e45c9c3a041bb1a47a2bd0ae79d028eb6f5f95bf9851a4158423f5068539c3093621abb64027e8e461
+  languageName: node
+  linkType: hard
+
+"marked@npm:18.0.11":
+  version: 18.0.11
+  resolution: "marked@npm:18.0.11"
+  bin:
+    marked: bin/marked.js
+  checksum: 10c0/6c2a2bea05974f08f869d591a8eb6aa7fe68e56edbfe74c2d15eea3b85d45aabfea9dada6914d6f4a7917d612059b64eb8b9e5fd190c74ad8ab79c1f48a249b3
   languageName: node
   linkType: hard
 
@@ -12018,6 +12213,33 @@ __metadata:
   languageName: node
   linkType: hard
 
+"openai@npm:7.19.0":
+  version: 7.19.0
+  resolution: "openai@npm:7.19.0"
+  peerDependencies:
+    "@aws-sdk/credential-provider-node": ">=3.972.0 <4"
+    "@smithy/hash-node": ">=4.3.0 <5"
+    "@smithy/signature-v4": ">=5.4.0 <6"
+    undici: ">=5 <9"
+    ws: ^8.21.0
+    zod: ^3.25 || ^4.0
+  peerDependenciesMeta:
+    "@aws-sdk/credential-provider-node":
+      optional: true
+    "@smithy/hash-node":
+      optional: true
+    "@smithy/signature-v4":
+      optional: true
+    undici:
+      optional: true
+    ws:
+      optional: true
+    zod:
+      optional: true
+  checksum: 10c0/027f21e9dd47bfc76f411775d18e17bb0d7c25a1f29d0bc5832a304b598509b44809b1d33ce231fa7657a9f6d38cda0304c15cd4eb7864aa8f3d50ebd4b7ed52
+  languageName: node
+  linkType: hard
+
 "openai@npm:7.23.0":
   version: 7.23.0
   resolution: "openai@npm:7.23.0"
@@ -12545,6 +12767,17 @@ __metadata:
   languageName: node
   linkType: hard
 
+"proper-lockfile@npm:4.1.2":
+  version: 4.1.2
+  resolution: "proper-lockfile@npm:4.1.2"
+  dependencies:
+    graceful-fs: "npm:^4.2.4"
+    retry: "npm:^0.12.0"
+    signal-exit: "npm:^3.0.2"
+  checksum: 10c0/2f265dbad15897a43110a02dae55105c04d356ec4ed560723dcb9f0d34bc4fb2f13f79bb930e7561be10278e2314db5aca2527d5d3dcbbdee5e6b331d1571f6d
+  languageName: node
+  linkType: hard
+
 "proto-list@npm:~1.2.1":
   version: 1.2.4
   resolution: "proto-list@npm:1.2.4"
@@ -12628,6 +12861,13 @@ __metadata:
   version: 5.1.1
   resolution: "quick-lru@npm:5.1.1"
   checksum: 10c0/a24cba5da8cec30d70d2484be37622580f64765fb6390a928b17f60cd69e8dbd32a954b3ff9176fa1b86d86ff2ba05252fae55dc4d40d0291c60412b0ad096da
+  languageName: node
+  linkType: hard
+
+"quickjs-wasi@npm:3.6.2":
+  version: 3.6.2
+  resolution: "quickjs-wasi@npm:3.6.2"
+  checksum: 10c0/044491e56924c683b1c96e17e542fbdb0b7d8d9888dc8441302a13e1c6738a5843f470bef3c832b7f1cfd83eb2d8a38c84560256f7ebd08317d611b0275475d5
   languageName: node
   linkType: hard
 
@@ -13043,21 +13283,21 @@ __metadata:
   languageName: node
   linkType: hard
 
+"semver@npm:7.8.5, semver@npm:^7.8.5":
+  version: 7.8.5
+  resolution: "semver@npm:7.8.5"
+  bin:
+    semver: bin/semver.js
+  checksum: 10c0/b1f3127a5be8125a94f37188b361c212466c292c6910adce3ec106cff5dc211ccaedc4739c11bb70fda59d6fc1f040a9bca289f4e093451521a2372e5231fe0c
+  languageName: node
+  linkType: hard
+
 "semver@npm:^7.3.5, semver@npm:^7.5.2, semver@npm:^7.6.0, semver@npm:^7.7.3, semver@npm:^7.7.4":
   version: 7.7.4
   resolution: "semver@npm:7.7.4"
   bin:
     semver: bin/semver.js
   checksum: 10c0/5215ad0234e2845d4ea5bb9d836d42b03499546ddafb12075566899fc617f68794bb6f146076b6881d755de17d6c6cc73372555879ec7dce2c2feee947866ad2
-  languageName: node
-  linkType: hard
-
-"semver@npm:^7.8.5":
-  version: 7.8.5
-  resolution: "semver@npm:7.8.5"
-  bin:
-    semver: bin/semver.js
-  checksum: 10c0/b1f3127a5be8125a94f37188b361c212466c292c6910adce3ec106cff5dc211ccaedc4739c11bb70fda59d6fc1f040a9bca289f4e093451521a2372e5231fe0c
   languageName: node
   linkType: hard
 
@@ -13315,6 +13555,13 @@ __metadata:
     side-channel-map: "npm:^1.0.1"
     side-channel-weakmap: "npm:^1.0.2"
   checksum: 10c0/dc0ab81d67f61bda9247d053ce93f41c3fd8ad2bdcb9cf9d8d2f8540d488f26d87a5e99ebfc07eea49ec025867b2452b705442d974b1478f0395e69f6bfb3270
+  languageName: node
+  linkType: hard
+
+"signal-exit@npm:^3.0.2":
+  version: 3.0.7
+  resolution: "signal-exit@npm:3.0.7"
+  checksum: 10c0/25d272fa73e146048565e08f3309d5b942c1979a6f4a58a8c59d5fa299728e9c2fcd1a759ec870863b1fd38653670240cd420dad2ad9330c71f36608a6a1c912
   languageName: node
   linkType: hard
 
@@ -14381,9 +14628,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"writer-sdk@npm:^2.3.2":
-  version: 2.3.2
-  resolution: "writer-sdk@npm:2.3.2"
+"writer-sdk@npm:^3.0.0":
+  version: 3.0.0
+  resolution: "writer-sdk@npm:3.0.0"
   peerDependencies:
     zod: ^3.23.8
   peerDependenciesMeta:
@@ -14391,7 +14638,7 @@ __metadata:
       optional: true
   bin:
     writer-sdk: bin/cli
-  checksum: 10c0/775149cd6c68f64299a3d66ad9017fa95ec532ecfa07dd8a92544334456b91a294517eded818d2affa79218647b0e166ac154def1d4ca95e8708196a2f693ec5
+  checksum: 10c0/75283b547cb44ec48ce2b8a5be3d3a1fb9751e153010a4f5c941a97c0bd764cba9dba06dfe325cc433ac0b970460443512000e64bb04c3b63edda54b544ae91b
   languageName: node
   linkType: hard
 
@@ -14524,6 +14771,13 @@ __metadata:
   version: 4.4.3
   resolution: "zod@npm:4.4.3"
   checksum: 10c0/7ea31b558e88f9faf44f31dd185e2e1cbf51fed3081787fb96cc2534749b50c0acfc6da7f0922a7353ed092dd358c7d50c28ea96c94d04af64191bd33152eca3
+  languageName: node
+  linkType: hard
+
+"zod@npm:^4.0.0":
+  version: 4.6.5
+  resolution: "zod@npm:4.6.5"
+  checksum: 10c0/32eb6c5e98becbe045675b2141c3611451c16ba567f9779231d79af41c4d651ca1c22f154aef7e6c6e77b929f23e43f1154ca05b82e119e922353725d6776af5
   languageName: node
   linkType: hard
 
