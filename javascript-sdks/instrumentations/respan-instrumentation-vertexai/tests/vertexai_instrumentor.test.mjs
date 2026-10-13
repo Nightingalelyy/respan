@@ -1,361 +1,766 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-
+import * as legacy from "@google-cloud/vertexai";
+import * as genai from "@google/genai";
 import { context, trace } from "@opentelemetry/api";
+import {
+  BasicTracerProvider,
+  SimpleSpanProcessor,
+  InMemorySpanExporter,
+  SamplingDecision,
+} from "@opentelemetry/sdk-trace-base";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
-import { RespanSpanAttributes } from "@respan/respan-sdk";
-import { WORKFLOW_NAME_KEY } from "@respan/tracing";
-import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
-
+import { suppressTracing } from "@opentelemetry/core";
+import { CONTEXT_KEY_ALLOW_TRACE_CONTENT } from "@traceloop/ai-semantic-conventions";
 import {
   VertexAIInstrumentor,
   buildGenerateContentAttrs,
-  requestPayloadFromCall,
 } from "../dist/index.js";
-
-const capturedSpans = [];
-const originalGetTracerProvider = trace.getTracerProvider.bind(trace);
-const contextManager = new AsyncLocalStorageContextManager().enable();
-context.setGlobalContextManager(contextManager);
-
-function makeUsage(promptTokens = 3, completionTokens = 4) {
-  return {
-    promptTokenCount: promptTokens,
-    candidatesTokenCount: completionTokens,
-    totalTokenCount: promptTokens + completionTokens,
-  };
-}
-
-function makeResponse(text = "Hello", opts = {}) {
+const originalFetch = globalThis.fetch;
+const envs = [];
+test.afterEach(async () => {
+  for (const e of envs.splice(0)) await e.done();
+  globalThis.fetch = originalFetch;
+});
+const authClient = {
+  async getAccessToken() {
+    return { token: "fixture-only" };
+  },
+  async getRequestHeaders() {
+    return new Headers({ Authorization: "Bearer fixture-only" });
+  },
+};
+function response(
+  parts = [{ text: "ANSWER" }],
+  usage = { promptTokenCount: 4, candidatesTokenCount: 5, totalTokenCount: 17 },
+) {
   return {
     candidates: [
-      {
-        content: {
-          role: "model",
-          parts: opts.parts ?? [{ text }],
-        },
-      },
+      { index: 0, finishReason: "STOP", content: { role: "model", parts } },
     ],
-    usageMetadata: opts.usage ?? makeUsage(),
+    usageMetadata: usage,
+    modelVersion: "native-response-model",
+    responseId: "actual-response",
   };
 }
-
-function makeTool(name = "get_weather") {
-  return {
-    functionDeclarations: [
+function setup(
+  options = {},
+  decision = SamplingDecision.RECORD_AND_SAMPLED,
+  onStart = () => {},
+) {
+  trace.disable();
+  context.disable();
+  context.setGlobalContextManager(
+    new AsyncLocalStorageContextManager().enable(),
+  );
+  const exporter = new InMemorySpanExporter(),
+    native = [],
+    requests = [];
+  const sampler = {
+    shouldSample() {
+      return { decision };
+    },
+    toString() {
+      return "fixture";
+    },
+  };
+  const provider = new BasicTracerProvider({
+    sampler,
+    spanProcessors: [
       {
-        name,
-        description: "Get weather",
+        onStart,
+        onEnd(s) {
+          native.push(s);
+        },
+        async shutdown() {},
+        async forceFlush() {},
+      },
+      new SimpleSpanProcessor(exporter),
+    ],
+  });
+  trace.setGlobalTracerProvider(provider);
+  const plugin = new VertexAIInstrumentor({
+    sdkModule: legacy,
+    genaiModule: genai,
+    ...options,
+  });
+  const e = {
+    exporter,
+    native,
+    requests,
+    sampler,
+    provider,
+    plugin,
+    async done() {
+      plugin.deactivate();
+      await provider.shutdown();
+      trace.disable();
+      context.disable();
+    },
+  };
+  envs.push(e);
+  return e;
+}
+function transport(e, res = response()) {
+  globalThis.fetch = async (url, opts) => {
+    const body =
+      typeof opts.body === "string" ? JSON.parse(opts.body) : opts.body;
+    e.requests.push({ url: String(url), body });
+    const value =
+      typeof res === "function" ? await res(String(url), body) : res;
+    return value instanceof Response ? value : Response.json(value);
+  };
+}
+function modern(vertexai = true) {
+  return new genai.GoogleGenAI(
+    vertexai
+      ? {
+          vertexai: true,
+          project: "fixture-project",
+          location: "us-central1",
+          googleAuthOptions: { authClient },
+        }
+      : { apiKey: "fixture-only" },
+  );
+}
+function old(preview = false) {
+  const c = new legacy.VertexAI({
+    project: "fixture-project",
+    location: "us-central1",
+    googleAuthOptions: { authClient },
+  });
+  return (preview ? c.preview : c).getGenerativeModel({
+    model: "gemini-fixture",
+  });
+}
+const request = { model: "gemini-fixture", contents: "PROMPT" };
+test("native legacy GA and Preview current generation both emit", async () => {
+  const e = setup();
+  transport(e);
+  await e.plugin.activate();
+  await old().generateContent("PROMPT");
+  await old(true).generateContent("PREVIEW");
+  assert.equal(e.native.length, 2);
+  assert.equal(e.requests.length, 2);
+  for (const s of e.native)
+    assert.equal(s.attributes["llm.usage.total_tokens"], 17);
+});
+test("modern Vertex generation keeps public response helpers and explicit provider usage", async () => {
+  const e = setup();
+  transport(e);
+  await e.plugin.activate();
+  const r = await modern().models.generateContent(request);
+  assert.equal(r.text, "ANSWER");
+  assert.equal(r.responseId, "actual-response");
+  const a = e.native[0].attributes;
+  assert.equal(a["gen_ai.system"], "google");
+  assert.equal(a["gen_ai.request.model"], "gemini-fixture");
+  assert.equal(a["llm.usage.total_tokens"], 17);
+  assert.equal(a["gen_ai.response.model"], "native-response-model");
+  assert.equal(JSON.parse(a["traceloop.entity.input"])[0].content, "PROMPT");
+});
+test("modern Gemini Developer backend is untouched", async () => {
+  const e = setup();
+  transport(e);
+  await e.plugin.activate();
+  assert.equal(
+    (await modern(false).models.generateContent(request)).text,
+    "ANSWER",
+  );
+  assert.equal(e.native.length, 0);
+});
+test("modern typed parts preserve image, inline audio, reasoning and signature", async () => {
+  const e = setup();
+  transport(
+    e,
+    response([
+      { text: "thought", thought: true, thoughtSignature: "actual-signature" },
+      { text: "answer" },
+      { inlineData: { mimeType: "image/png", data: "fixture" } },
+    ]),
+  );
+  await e.plugin.activate();
+  await modern().models.generateContent({
+    ...request,
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { text: "question" },
+          { inlineData: { mimeType: "audio/wav", data: "fixture-audio" } },
+        ],
+      },
+    ],
+  });
+  const a = e.native[0].attributes;
+  assert.equal(
+    JSON.parse(a["traceloop.entity.input"])[0].content[1].inline_data.data,
+    "fixture-audio",
+  );
+  const output = JSON.parse(a["traceloop.entity.output"])[0].content;
+  assert.equal(output[0].thought, true);
+  assert.equal(output[0].thoughtSignature, "actual-signature");
+  assert.equal(output[2].inlineData.data, "fixture");
+});
+test("modern complete histories and75tool schemas precede optional attrs", async () => {
+  const e = setup();
+  transport(
+    e,
+    response([
+      { functionCall: { id: "native-call", name: "tool_79", args: { x: 0 } } },
+    ]),
+  );
+  await e.plugin.activate();
+  const tools = [
+    {
+      functionDeclarations: Array.from({ length: 80 }, (_, i) => ({
+        name: `tool_${i}`,
         parameters: {
-          type: "object",
-          properties: { city: { type: "string" } },
+          type: "OBJECT",
+          properties: { x: { type: "INTEGER" } },
+          required: ["x"],
+        },
+      })),
+    },
+  ];
+  await modern().models.generateContent({
+    ...request,
+    contents: Array.from({ length: 80 }, (_, i) => ({
+      role: "user",
+      parts: [{ text: `history-${i}` }],
+    })),
+    config: { tools },
+  });
+  const a = e.native[0].attributes;
+  assert.equal(JSON.parse(a["traceloop.entity.input"]).length, 80);
+  assert.equal(JSON.parse(a["llm.request.functions"]).length, 80);
+  assert.equal(
+    JSON.parse(a["gen_ai.completion.0.tool_calls"])[0].id,
+    "native-call",
+  );
+  assert.equal(a["llm.usage.total_tokens"], 17);
+});
+test("modern native chat captures actual preceding turns with tool IDs", async () => {
+  const e = setup();
+  let turn = 0;
+  transport(e, () =>
+    ++turn === 1
+      ? response([
+          {
+            functionCall: {
+              id: "chat-call",
+              name: "weather",
+              args: { city: "Tokyo" },
+            },
+          },
+        ])
+      : response(),
+  );
+  await e.plugin.activate();
+  const chat = modern().chats.create({ model: "gemini-fixture" });
+  await chat.sendMessage({ message: "weather?" });
+  await chat.sendMessage({
+    message: [
+      {
+        functionResponse: {
+          id: "chat-call",
+          name: "weather",
+          response: { temperature: 0 },
         },
       },
     ],
-  };
-}
-
-function createFakeVertexAIModule() {
-  class GenerativeModel {
-    constructor(model = "gemini-2.0-flash", opts = {}) {
-      this.model = model;
-      this.systemInstruction = opts.systemInstruction;
-      this.tools = opts.tools;
-      this.generationConfig = opts.generationConfig;
-    }
-
-    generateContent(request) {
-      return Promise.resolve({
-        response: makeResponse(`generate: ${JSON.stringify(request)}`, {
-          usage: makeUsage(5, 6),
-        }),
-      });
-    }
-
-    generateContentStream(_request) {
-      return Promise.resolve({
-        stream: (async function* streamChunks() {
-          yield makeResponse("stream ");
-          yield makeResponse("done", { usage: makeUsage(7, 8) });
-        })(),
-        response: Promise.resolve(makeResponse("stream done", { usage: makeUsage(7, 8) })),
-      });
-    }
-
-    startChat() {
-      return new ChatSession(this);
-    }
-  }
-
-  class ChatSession {
-    constructor(model) {
-      this.model = model;
-    }
-
-    sendMessage(content) {
-      return Promise.resolve({
-        response: makeResponse(`chat: ${content}`, { usage: makeUsage(9, 10) }),
-      });
-    }
-
-    sendMessageStream(content) {
-      return Promise.resolve({
-        response: Promise.resolve(
-          makeResponse(`chat stream: ${content}`, { usage: makeUsage(11, 12) }),
-        ),
-      });
-    }
-  }
-
-  return { GenerativeModel, ChatSession };
-}
-
-function resetTraceCapture() {
-  capturedSpans.length = 0;
-  Object.defineProperty(trace, "getTracerProvider", {
-    configurable: true,
-    writable: true,
-    value() {
-      return {
-        activeSpanProcessor: {
-          onEnd(span) {
-            capturedSpans.push(span);
+  });
+  assert.equal(e.native.length, 2);
+  const input = JSON.parse(e.native[1].attributes["traceloop.entity.input"]);
+  assert.ok(JSON.stringify(input).includes("chat-call"));
+  assert.equal(input.length, 3);
+  assert.equal(
+    e.native.filter((s) => s.attributes["respan.entity.log_type"] === "tool")
+      .length,
+    0,
+  );
+});
+test("modern native AFC executes callback once and traces only two actual model calls", async () => {
+  const e = setup();
+  let turns = 0,
+    called = 0;
+  transport(e, () =>
+    ++turns === 1
+      ? response([
+          {
+            functionCall: {
+              id: "afc-call",
+              name: "weather",
+              args: { city: "Tokyo" },
+            },
           },
-        },
+        ])
+      : response([{ text: "AFC answer" }]),
+  );
+  await e.plugin.activate();
+  const callable = {
+    async tool() {
+      return {
+        functionDeclarations: [
+          {
+            name: "weather",
+            parameters: {
+              type: "OBJECT",
+              properties: { city: { type: "STRING" } },
+            },
+          },
+        ],
       };
     },
+    async callTool(calls) {
+      called++;
+      assert.equal(calls[0].id, "afc-call");
+      return [
+        {
+          functionResponse: {
+            id: calls[0].id,
+            name: calls[0].name,
+            response: { temperature: 0 },
+          },
+        },
+      ];
+    },
+  };
+  const r = await modern().models.generateContent({
+    ...request,
+    config: { tools: [callable] },
   });
-}
-
-test.after(() => {
-  context.disable();
-  Object.defineProperty(trace, "getTracerProvider", {
-    configurable: true,
-    writable: true,
-    value: originalGetTracerProvider,
-  });
+  assert.equal(r.text, "AFC answer");
+  assert.equal(called, 1);
+  assert.equal(e.requests.length, 2);
+  assert.equal(e.native.length, 2);
+  assert.ok(
+    e.native.every((s) => s.attributes["respan.entity.log_type"] === "chat"),
+  );
+  assert.ok(
+    e.native[1].attributes["traceloop.entity.input"].includes("afc-call"),
+  );
 });
-
-test("buildGenerateContentAttrs emits canonical chat fields without banned aliases", () => {
-  const response = makeResponse("", {
-    parts: [
+const sse = (values) =>
+  new Response(
+    values.map((value) => `data: ${JSON.stringify(value)}\n\n`).join(""),
+    { headers: { "content-type": "text/event-stream" } },
+  );
+test("modern SSE preserves native generator and parts while streaming two candidates", async () => {
+  const chunks = [
+    response([{ text: "A" }], undefined),
+    {
+      candidates: [
+        { index: 0, content: { role: "model", parts: [{ text: "C" }] } },
+        { index: 1, content: { role: "model", parts: [{ text: "B" }] } },
+      ],
+      usageMetadata: {
+        promptTokenCount: 4,
+        candidatesTokenCount: 5,
+        totalTokenCount: 17,
+      },
+    },
+  ];
+  const e = setup();
+  transport(e, sse(chunks));
+  await e.plugin.activate();
+  const stream = await modern().models.generateContentStream(request);
+  const iterator = stream[Symbol.asyncIterator]();
+  assert.equal(iterator, stream);
+  const values = [];
+  for await (const value of iterator) values.push(value);
+  assert.equal(values.length, 2);
+  const output = JSON.parse(e.native[0].attributes["traceloop.entity.output"]);
+  assert.equal(output[0].content.length, 2);
+  assert.equal(output[1].content[0].text, "B");
+});
+test("modern early stream return closes exactly one real call", async () => {
+  const e = setup();
+  transport(
+    e,
+    sse([response([{ text: "first" }]), response([{ text: "second" }])]),
+  );
+  await e.plugin.activate();
+  const stream = await modern().models.generateContentStream(request);
+  for await (const chunk of stream) {
+    assert.ok(chunk);
+    break;
+  }
+  assert.equal(e.native.length, 1);
+  assert.equal(
+    JSON.parse(e.native[0].attributes["traceloop.entity.output"])[0].content[0]
+      .text,
+    "first",
+  );
+});
+test("legacy streamed result preserves response and stream contracts", async () => {
+  const e = setup();
+  transport(e, sse([response([{ text: "A" }]), response([{ text: "B" }])]));
+  await e.plugin.activate();
+  const r = await old().generateContentStream("PROMPT");
+  const chunks = [];
+  for await (const chunk of r.stream) chunks.push(chunk);
+  const aggregated = await r.response;
+  assert.equal(chunks.length, 2);
+  assert.equal(aggregated.candidates[0].content.parts[0].text, "AB");
+  assert.equal(e.native.length, 1);
+});
+test("modern embeddings retain5001dimensions and actual statistics", async () => {
+  const e = setup();
+  const vector = Array.from({ length: 5001 }, (_, i) => i / 5001);
+  transport(e, {
+    predictions: [
       {
-        functionCall: {
-          id: "call_1",
-          name: "get_weather",
-          args: { city: "Tokyo" },
+        embeddings: {
+          values: vector,
+          statistics: { token_count: 7, truncated: false },
         },
       },
     ],
-    usage: makeUsage(13, 14),
   });
-
-  const attrs = buildGenerateContentAttrs({
-    requestPayload: {
-      model: "gemini-2.0-flash",
-      contents: [{ role: "user", parts: [{ text: "Weather in Tokyo?" }] }],
-      systemInstruction: "Be concise",
-      tools: [makeTool()],
-      generationConfig: {
-        maxOutputTokens: 128,
-        temperature: 0.2,
-        topP: 0.9,
-        topK: 32,
-      },
-    },
-    responseOrChunks: response,
+  await e.plugin.activate();
+  const r = await modern().models.embedContent({
+    model: "text-embedding-005",
+    contents: "embedding input",
   });
-
-  assert.equal(attrs[RespanSpanAttributes.RESPAN_LOG_TYPE], "chat");
-  assert.equal(attrs["gen_ai.system"], "google");
-  assert.equal(attrs["llm.request.type"], "chat");
-  assert.equal(attrs["gen_ai.request.model"], "gemini-2.0-flash");
-  assert.equal(attrs["gen_ai.request.max_tokens"], 128);
-  assert.equal(attrs["gen_ai.prompt.0.role"], "system");
-  assert.equal(attrs["gen_ai.prompt.0.content"], "Be concise");
-  assert.equal(attrs["gen_ai.prompt.1.role"], "user");
-  assert.equal(attrs["gen_ai.prompt.1.content"], "Weather in Tokyo?");
-  assert.equal(attrs["gen_ai.completion.0.role"], "assistant");
-  assert.equal(attrs["gen_ai.usage.input_tokens"], 13);
-  assert.equal(attrs["gen_ai.usage.output_tokens"], 14);
-  assert.equal(attrs["gen_ai.usage.prompt_tokens"], 13);
-  assert.equal(attrs["gen_ai.usage.completion_tokens"], 14);
-  assert.equal(attrs[SpanAttributes.LLM_USAGE_TOTAL_TOKENS], 27);
-
-  assert.equal(JSON.parse(attrs["llm.request.functions"])[0].function.name, "get_weather");
-  assert.deepEqual(JSON.parse(attrs["gen_ai.completion.0.tool_calls"]), [
-    {
-      id: "call_1",
-      type: "function",
-      function: {
-        name: "get_weather",
-        arguments: "{\"city\":\"Tokyo\"}",
-      },
-    },
-  ]);
-
-  for (const bannedKey of [
-    "respan.span.tools",
-    "respan.span.tool_calls",
-    "tools",
-    "tool_calls",
-    "model",
-    "prompt_tokens",
-    "completion_tokens",
-    "total_request_tokens",
-  ]) {
-    assert.equal(attrs[bannedKey], undefined, `${bannedKey} should not be emitted`);
-  }
+  assert.equal(r.embeddings[0].values.length, 5001);
+  const a = e.native[0].attributes;
+  assert.equal(a["respan.entity.log_type"], "embedding");
+  assert.equal(JSON.parse(a["traceloop.entity.output"])[0].values.length, 5001);
+  assert.equal(a["llm.usage.total_tokens"], undefined);
+  assert.equal(a["gen_ai.usage.input_tokens"], 7);
 });
-
-test("buildGenerateContentAttrs includes thinking tokens in output usage", () => {
-  const attrs = buildGenerateContentAttrs({
-    requestPayload: {
-      model: "gemini-2.5-flash",
-      contents: "Explain the result",
-    },
-    responseOrChunks: makeResponse("Reasoned answer", {
-      usage: {
-        promptTokenCount: 100,
-        candidatesTokenCount: 50,
-        thoughtsTokenCount: 800,
-        totalTokenCount: 950,
-      },
-    }),
+test("modern image generation preserves actual typed native output", async () => {
+  const e = setup();
+  transport(e, {
+    predictions: [
+      { bytesBase64Encoded: "fixture-image", mimeType: "image/png" },
+    ],
   });
-
-  assert.equal(attrs["gen_ai.usage.input_tokens"], 100);
-  assert.equal(attrs["gen_ai.usage.output_tokens"], 850);
-  assert.equal(attrs["gen_ai.usage.completion_tokens"], 850);
-  assert.equal(attrs[SpanAttributes.LLM_USAGE_TOTAL_TOKENS], 950);
-});
-
-test("buildGenerateContentAttrs supports snake_case thinking usage", () => {
-  const attrs = buildGenerateContentAttrs({
-    requestPayload: {
-      model: "gemini-2.5-flash",
-      contents: "Explain the result",
-    },
-    responseOrChunks: {
-      candidates: [],
-      usage_metadata: {
-        prompt_token_count: 100,
-        candidates_token_count: 50,
-        thoughts_token_count: 800,
-        total_token_count: 950,
-      },
-    },
+  await e.plugin.activate();
+  const r = await modern().models.generateImages({
+    model: "imagen-4.0-generate-001",
+    prompt: "fixture image",
   });
-
-  assert.equal(attrs["gen_ai.usage.output_tokens"], 850);
-  assert.equal(attrs["gen_ai.usage.completion_tokens"], 850);
-});
-
-test("patches generate, stream, and chat methods and emits spans", async () => {
-  resetTraceCapture();
-  const sdkModule = createFakeVertexAIModule();
-  const instrumentor = new VertexAIInstrumentor({ sdkModule });
-  await instrumentor.activate();
-
-  const model = new sdkModule.GenerativeModel("gemini-2.0-flash", {
-    systemInstruction: "Use short answers",
-    tools: [makeTool("lookup_city")],
-  });
-
-  const result = await model.generateContent({
-    contents: [{ role: "user", parts: [{ text: "Hello" }] }],
-  });
-  assert.match(result.response.candidates[0].content.parts[0].text, /^generate:/);
-
-  const streamResult = await model.generateContentStream({
-    contents: [{ role: "user", parts: [{ text: "Stream" }] }],
-  });
-  await streamResult.response;
-
-  const chat = model.startChat();
-  await chat.sendMessage("Continue");
-  const chatStream = await chat.sendMessageStream("Continue streaming");
-  await chatStream.response;
-
-  assert.equal(capturedSpans.length, 4);
-  assert.equal(capturedSpans[0].name, "vertexai.generate_content");
-  assert.equal(capturedSpans[0].instrumentationScope.name, "@respan/instrumentation-vertexai");
-  assert.equal(capturedSpans[0].attributes["gen_ai.request.model"], "gemini-2.0-flash");
-  assert.equal(capturedSpans[0].attributes["gen_ai.usage.input_tokens"], 5);
-  assert.equal(capturedSpans[1].attributes["gen_ai.completion.0.content"], "stream done");
-  assert.equal(capturedSpans[2].name, "vertexai.chat.send_message");
-  assert.equal(capturedSpans[2].attributes["gen_ai.prompt.1.content"], "Continue");
-  assert.equal(capturedSpans[3].attributes["gen_ai.usage.completion_tokens"], 12);
-
-  instrumentor.deactivate();
-});
-
-test("requestPayloadFromCall reads model defaults and chat input", () => {
-  const sdkModule = createFakeVertexAIModule();
-  const tool = makeTool("lookup");
-  const model = new sdkModule.GenerativeModel("gemini-2.0-flash", {
-    systemInstruction: "Use short answers",
-    tools: [tool],
-    generationConfig: { temperature: 0.1 },
-  });
-  const chat = model.startChat();
-
-  const payload = requestPayloadFromCall(chat, ["Hello"], { isChatMethod: true });
-
-  assert.equal(payload.model, "gemini-2.0-flash");
-  assert.equal(payload.contents, "Hello");
-  assert.equal(payload.systemInstruction, "Use short answers");
-  assert.deepEqual(payload.tools, [tool]);
-  assert.deepEqual(payload.generationConfig, undefined);
-});
-
-test("active workflow name is attached to injected Vertex AI spans", () => {
-  const workflowContext = context.active().setValue(
-    WORKFLOW_NAME_KEY,
-    "typescript_vertexai_generate_content_example",
+  assert.equal(r.generatedImages[0].image.imageBytes, "fixture-image");
+  assert.equal(e.native[0].attributes["respan.entity.log_type"], "generation");
+  assert.ok(
+    e.native[0].attributes["traceloop.entity.output"].includes("fixture-image"),
   );
-
-  const attrs = context.with(workflowContext, () =>
-    buildGenerateContentAttrs({
-      requestPayload: {
-        model: "gemini-2.0-flash",
-        contents: "Hello",
+});
+test("modern video start preserves pending operation without invented media completion", async () => {
+  const e = setup();
+  transport(e, {
+    name: "projects/fixture/locations/us-central1/publishers/google/models/veo/operations/actual-operation",
+    done: false,
+  });
+  await e.plugin.activate();
+  const r = await modern().models.generateVideos({
+    model: "veo-3.0-generate-001",
+    source: { prompt: "fixture video" },
+  });
+  assert.equal(r.done, false);
+  const a = e.native[0].attributes;
+  assert.ok(a["traceloop.entity.output"].includes("actual-operation"));
+  assert.ok(!a["traceloop.entity.output"].includes("generatedVideos"));
+});
+test("modern provider error keeps status, rejects natively and omits output", async () => {
+  const e = setup();
+  transport(
+    e,
+    Response.json(
+      {
+        error: {
+          code: 429,
+          message: "controlled error",
+          status: "RESOURCE_EXHAUSTED",
+        },
       },
-      responseOrChunks: makeResponse("Hi"),
-    }),
+      { status: 429 },
+    ),
   );
-
+  await e.plugin.activate();
+  await assert.rejects(
+    modern().models.generateContent(request),
+    (error) => error.status === 429,
+  );
+  assert.equal(e.native[0].status.code, 2);
+  assert.equal(e.native[0].attributes.status_code, 429);
+  assert.equal(e.native[0].attributes["traceloop.entity.output"], undefined);
+});
+for (const [label, options] of [
+  ["constructor", { traceContent: false }],
+  ["input lane", { recordInputs: false }],
+  ["output lane", { recordOutputs: false }],
+])
+  test(`native ${label} ceiling`, async () => {
+    const e = setup(options);
+    transport(e);
+    await e.plugin.activate();
+    await context.with(
+      context.active().setValue(CONTEXT_KEY_ALLOW_TRACE_CONTENT, true),
+      () => modern().models.generateContent(request),
+    );
+    const a = e.native[0].attributes;
+    assert.equal(
+      a["traceloop.entity.input"] === undefined,
+      options.traceContent === false || options.recordInputs === false,
+    );
+    assert.equal(
+      a["traceloop.entity.output"] === undefined,
+      options.traceContent === false || options.recordOutputs === false,
+    );
+  });
+for (const [label, decision] of [
+  ["DROP", SamplingDecision.NOT_RECORD],
+  ["RECORD_ONLY", SamplingDecision.RECORD],
+])
+  test(`real ${label} sampler precedes adapter serialization`, async () => {
+    let copies = 0,
+      observed;
+    const e = setup({}, decision);
+    e.sampler.shouldSample = () => {
+      observed = copies;
+      return { decision };
+    };
+    transport(e);
+    const nativeRequest = {
+      ...request,
+      contents: {
+        role: "user",
+        parts: [
+          {
+            text: "native",
+            toJSON() {
+              copies++;
+              return { text: "native" };
+            },
+          },
+        ],
+      },
+    };
+    await modern().models.generateContent(nativeRequest);
+    const bareCopies = copies;
+    copies = 0;
+    await e.plugin.activate();
+    await modern().models.generateContent(nativeRequest);
+    assert.equal(observed, 0);
+    assert.equal(copies, bareCopies);
+    for (const s of e.native)
+      assert.equal(s.attributes["traceloop.entity.input"], undefined);
+    assert.equal(e.exporter.getFinishedSpans().length, 0);
+  });
+test("canonical context and suppression prevent capture", async () => {
+  const e = setup();
+  transport(e);
+  await e.plugin.activate();
+  await context.with(
+    context.active().setValue(CONTEXT_KEY_ALLOW_TRACE_CONTENT, false),
+    () => modern().models.generateContent(request),
+  );
+  assert.equal(e.native[0].attributes["traceloop.entity.input"], undefined);
+  await context.with(suppressTracing(context.active()), () =>
+    modern().models.generateContent(request),
+  );
   assert.equal(
-    attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME],
-    "typescript_vertexai_generate_content_example",
+    e.native.at(-1).attributes["traceloop.entity.output"],
+    undefined,
+  );
+});
+test("late private ancestor sanitizes actual attributes, events, status and nonconfig initialattrs", async () => {
+  let actual;
+  const e = setup({}, SamplingDecision.RECORD_AND_SAMPLED, (span) => {
+    actual = span;
+    Object.defineProperty(span, "attributes", {
+      value: span.attributes,
+      writable: true,
+      configurable: false,
+      enumerable: true,
+    });
+  });
+  transport(e, () => {
+    parent.setAttribute("allow_trace_content", false);
+    actual.setAttribute("private", "secret");
+    actual.addEvent("secret", { private: "secret" });
+    actual.setStatus({ code: 2, message: "secret" });
+    return response();
+  });
+  await e.plugin.activate();
+  const parent = trace.getTracer("test").startSpan("parent");
+  await context.with(trace.setSpan(context.active(), parent), () =>
+    modern().models.generateContent(request),
+  );
+  const s = e.native[0];
+  assert.equal(s.attributes.private, undefined);
+  assert.equal(s.attributes["traceloop.entity.output"], undefined);
+  assert.equal(s.events.length, 0);
+  assert.equal(s.status.message, undefined);
+  parent.end();
+});
+test("independent owner privacy and final deactivation restore native methods", async () => {
+  const e = setup();
+  transport(e);
+  await e.plugin.activate();
+  const second = new VertexAIInstrumentor({
+    sdkModule: legacy,
+    genaiModule: genai,
+    traceContent: false,
+  });
+  await second.activate();
+  await modern().models.generateContent(request);
+  assert.equal(e.native[0].attributes["traceloop.entity.input"], undefined);
+  e.plugin.deactivate();
+  assert.equal(second.isActive(), true);
+  await modern().models.generateContent(request);
+  second.deactivate();
+  await modern().models.generateContent(request);
+  assert.equal(e.native.length, 2);
+});
+test("activation cancellation, coalescing and reactivation do not duplicate patches", async () => {
+  const e = setup();
+  transport(e);
+  const pending = e.plugin.activate();
+  e.plugin.deactivate();
+  await pending;
+  assert.equal(e.plugin.isActive(), false);
+  await Promise.all([e.plugin.activate(), e.plugin.activate()]);
+  await modern().models.generateContent(request);
+  assert.equal(e.native.length, 1);
+});
+
+for (const [method, args] of [
+  [
+    "editImage",
+    {
+      model: "imagen-3.0-capability-001",
+      prompt: "edit fixture",
+      referenceImages: [],
+    },
+  ],
+  [
+    "upscaleImage",
+    {
+      model: "imagen-4.0-upscale-preview",
+      image: { imageBytes: "fixture", mimeType: "image/png" },
+      upscaleFactor: "x2",
+    },
+  ],
+  [
+    "recontextImage",
+    {
+      model: "imagen-product-recontext-preview-06-30",
+      source: {
+        productImages: [
+          { productImage: { imageBytes: "fixture", mimeType: "image/png" } },
+        ],
+      },
+    },
+  ],
+  [
+    "segmentImage",
+    {
+      model: "image-segmentation-001",
+      source: { image: { imageBytes: "fixture", mimeType: "image/png" } },
+      config: { mode: "foreground" },
+    },
+  ],
+])
+  test(`modern native ${method} inference`, async () => {
+    const e = setup();
+    transport(e, {
+      predictions: [
+        { bytesBase64Encoded: "fixture-image", mimeType: "image/png" },
+      ],
+    });
+    await e.plugin.activate();
+    const value = await modern().models[method](args);
+    assert.ok(value);
+    assert.equal(e.requests.length, 1);
+    assert.equal(e.native.length, 1);
+    assert.equal(
+      e.native[0].attributes["respan.entity.log_type"],
+      "generation",
+    );
+    assert.ok(
+      e.native[0].attributes["traceloop.entity.input"].includes(args.model),
+    );
+  });
+
+test("independent actual legacy and modern modules release only their owned patches", async () => {
+  const e = setup();
+  transport(e);
+  const a = new VertexAIInstrumentor({ sdkModule: legacy, genaiModule: {} });
+  const b = new VertexAIInstrumentor({ sdkModule: {}, genaiModule: genai });
+  await a.activate();
+  await b.activate();
+  await old().generateContent("owned legacy");
+  await modern().models.generateContent(request);
+  assert.equal(e.native.length, 2);
+  a.deactivate();
+  await old().generateContent("unowned legacy");
+  await modern().models.generateContent(request);
+  assert.equal(e.native.length, 3);
+  b.deactivate();
+});
+
+test("public legacy helper preserves canonical native usage and request parameters", async () => {
+  const e = setup();
+  transport(e);
+  await e.plugin.activate();
+  const r = await modern().models.generateContent(request);
+  const attrs = buildGenerateContentAttrs({
+    requestPayload: {
+      model: request.model,
+      contents: request.contents,
+      generationConfig: { temperature: 0, maxOutputTokens: 64 },
+    },
+    responseOrChunks: r,
+  });
+  assert.equal(attrs["gen_ai.usage.input_tokens"], 4);
+  assert.equal(attrs["llm.usage.total_tokens"], 17);
+  assert.equal(attrs["gen_ai.request.temperature"], 0);
+  assert.equal(attrs["gen_ai.request.max_tokens"], 64);
+  assert.equal(
+    JSON.parse(attrs["traceloop.entity.output"])[0].content[0].text,
+    "ANSWER",
   );
 });
 
-test("records failed generation as an error span", async () => {
-  resetTraceCapture();
-
-  class ErrorGenerativeModel {
-    constructor(model = "gemini-2.0-flash") {
-      this.model = model;
-    }
-
-    generateContent() {
-      throw new Error("boom");
-    }
-  }
-
-  const sdkModule = { GenerativeModel: ErrorGenerativeModel };
-  const instrumentor = new VertexAIInstrumentor({ sdkModule });
-  await instrumentor.activate();
-
-  assert.throws(() => new sdkModule.GenerativeModel().generateContent("fail"), /boom/);
-
-  assert.equal(capturedSpans.length, 1);
-  assert.equal(capturedSpans[0].status.code, 2);
-  assert.equal(capturedSpans[0].status.message, "boom");
-  assert.equal(capturedSpans[0].attributes["error.message"], "boom");
-  assert.equal(capturedSpans[0].attributes.status_code, 500);
-  assert.equal(capturedSpans[0].attributes["gen_ai.request.model"], "gemini-2.0-flash");
-
-  instrumentor.deactivate();
+test("native legacy aggregate-only await observes unchanged Promise identity", async () => {
+  const e = setup();
+  transport(e, sse([response([{ text: "aggregate" }])]));
+  await e.plugin.activate();
+  const result = await old().generateContentStream("actual prompt");
+  const nativePromise = result.response;
+  const aggregate = await result.response;
+  assert.equal(result.response, nativePromise);
+  assert.equal(aggregate.candidates[0].content.parts[0].text, "aggregate");
+  assert.equal(e.native.length, 1);
+  assert.equal(e.native[0].attributes["llm.usage.total_tokens"], 17);
+});
+test("native GenAI locked writable actual attrs replacement is scrubbed under false", async () => {
+  let actual;
+  const e = setup(
+    { traceContent: false },
+    SamplingDecision.RECORD_AND_SAMPLED,
+    (span) => {
+      actual = span;
+      Object.defineProperty(span, "attributes", {
+        value: span.attributes,
+        configurable: false,
+        writable: true,
+        enumerable: true,
+      });
+    },
+  );
+  transport(e, () => {
+    actual.attributes = {
+      "traceloop.entity.output": "PRIVATE_LOCKED",
+      unknown: "PRIVATE_LOCKED",
+    };
+    return response();
+  });
+  await e.plugin.activate();
+  await modern().models.generateContent(request);
+  assert.ok(!JSON.stringify(e.native[0].attributes).includes("PRIVATE_LOCKED"));
 });

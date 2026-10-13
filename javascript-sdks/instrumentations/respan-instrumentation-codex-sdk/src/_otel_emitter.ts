@@ -1,835 +1,305 @@
-import { context, trace } from "@opentelemetry/api";
-import { hrTime } from "@opentelemetry/core";
-import { RespanLogType, RespanSpanAttributes } from "@respan/respan-sdk";
 import {
-  buildReadableSpan,
-  ensureSpanId,
-  ensureTraceId,
-  injectSpan,
-} from "@respan/tracing";
+  context,
+  trace,
+  SpanStatusCode,
+  type Context,
+  type Span,
+} from "@opentelemetry/api";
+import { RespanLogType, RespanSpanAttributes } from "@respan/respan-sdk";
 import { SpanAttributes } from "@traceloop/ai-semantic-conventions";
+import { ContentGuard } from "./_privacy.js";
+import { data, json, record, snapshot, type Row } from "./_data.js";
 
-const PACKAGE_VERSION = "1.0.0";
-const CODEX_INSTRUMENTATION_NAME = "@respan/instrumentation-codex-sdk";
-const RESPAN_LOG_METHOD_TS_TRACING = "ts_tracing";
-const DEFAULT_WORKFLOW_NAME = "codex-sdk";
-const DEFAULT_AGENT_NAME = "codex-agent";
-const STATUS_CODE_ATTR = "status_code";
-const ERROR_MESSAGE_ATTR = "error.message";
-const GEN_AI_PROMPT_PREFIX = SpanAttributes.LLM_PROMPTS;
-const GEN_AI_COMPLETION_PREFIX = SpanAttributes.LLM_COMPLETIONS;
-const GEN_AI_PROMPT_ROLE = `${GEN_AI_PROMPT_PREFIX}.0.role`;
-const GEN_AI_PROMPT_CONTENT = `${GEN_AI_PROMPT_PREFIX}.0.content`;
-const GEN_AI_COMPLETION_ROLE = `${GEN_AI_COMPLETION_PREFIX}.0.role`;
-const GEN_AI_COMPLETION_CONTENT = `${GEN_AI_COMPLETION_PREFIX}.0.content`;
-const GEN_AI_COMPLETION_TOOL_CALLS = `${GEN_AI_COMPLETION_PREFIX}.0.tool_calls`;
-
-type HrTime = [number, number];
-type RecordValue = Record<string, unknown>;
-
+const tracer = () => trace.getTracer("@respan/instrumentation-codex-sdk");
 export interface CodexEmitterOptions {
   agentName?: string;
   captureItemSpans?: boolean;
   workflowName?: string;
+  traceContent?: boolean;
 }
-
+interface ItemState {
+  span: Span;
+  guard: ContentGuard;
+  completed: boolean;
+}
 export interface CodexTurnState {
-  agentName: string;
-  agentSpanId: string;
+  span: Span;
+  guard: ContentGuard;
+  context: Context;
+  items: Map<string, ItemState>;
+  metadata: Row;
   captureItemSpans: boolean;
-  chatSpanId: string;
-  emitted: boolean;
-  endTime?: HrTime;
-  errorMessage?: string;
-  finalResponse?: string;
-  input: unknown;
-  inputMessages: RecordValue[];
-  itemOrder: string[];
-  items: Map<string, CodexItemState>;
-  model?: string;
-  parentSpanId?: string;
-  startTime: HrTime;
-  statusCode: number;
-  threadId?: string;
-  toolCalls: RecordValue[];
-  traceId: string;
-  turnId: string;
-  usage?: RecordValue;
-  workflowName: string;
-  workflowSpanId: string;
+  ended: boolean;
+  eventsObserved: boolean;
+  input?: unknown;
+  output?: string;
 }
-
-interface CodexItemState {
-  endTime?: HrTime;
-  errorMessage?: string;
-  item: RecordValue;
-  spanId: string;
-  startTime: HrTime;
-  statusCode: number;
-}
-
-let turnCounter = 0;
-
-export function createCodexTurnState({
-  input,
-  thread,
-  options = {},
-}: {
-  input: unknown;
-  thread?: unknown;
-  options?: CodexEmitterOptions;
-}): CodexTurnState {
-  const activeSpan = trace.getSpan(context.active());
-  const activeContext = activeSpan?.spanContext();
-  const threadOptions = readPrivateRecord(thread, "_threadOptions");
-  const model = stringValue(threadOptions?.model);
-  const workflowName =
-    nonEmptyString(options.workflowName) ??
-    nonEmptyString(model ? `codex.${model}` : undefined) ??
-    DEFAULT_WORKFLOW_NAME;
-  const agentName =
-    nonEmptyString(options.agentName) ??
-    nonEmptyString(model ? `codex.${model}` : undefined) ??
-    DEFAULT_AGENT_NAME;
-  const turnId = `codex-sdk-${Date.now()}-${++turnCounter}`;
-  const traceId = ensureTraceId(activeContext?.traceId);
-  const workflowSpanId = ensureSpanId(`${turnId}:workflow`);
-
-  return {
-    agentName,
-    agentSpanId: ensureSpanId(`${turnId}:agent`),
-    captureItemSpans: options.captureItemSpans ?? true,
-    chatSpanId: ensureSpanId(`${turnId}:chat`),
-    emitted: false,
-    input,
-    inputMessages: normalizeInputMessages(input),
-    itemOrder: [],
+export function createCodexTurnState(
+  input: unknown,
+  thread: unknown,
+  options: CodexEmitterOptions,
+): CodexTurnState {
+  const parent = context.active();
+  const name = options.agentName?.trim() || "codex-agent";
+  const span = tracer().startSpan(
+    name,
+    { attributes: base(name, RespanLogType.AGENT) },
+    parent,
+  );
+  const guard = new ContentGuard(span, options.traceContent !== false, parent);
+  const state: CodexTurnState = {
+    span,
+    guard,
+    context: trace.setSpan(parent, span),
     items: new Map(),
-    model,
-    parentSpanId: activeContext?.spanId,
-    startTime: hrTime(),
-    statusCode: 200,
-    threadId: readThreadId(thread),
-    toolCalls: [],
-    traceId,
-    turnId,
-    workflowName,
-    workflowSpanId,
+    metadata: {},
+    captureItemSpans: options.captureItemSpans !== false,
+    ended: false,
+    eventsObserved: false,
   };
-}
-
-export function trackCodexEvent(
-  state: CodexTurnState,
-  event: unknown,
-): void {
-  if (!event || typeof event !== "object" || Array.isArray(event)) {
-    return;
+  if (options.workflowName)
+    guard.internal(() =>
+      span.setAttribute(
+        RespanSpanAttributes.RESPAN_TRACE_GROUP_ID,
+        options.workflowName!,
+      ),
+    );
+  const model = data(data(thread, "_threadOptions"), "model");
+  if (typeof model === "string") state.metadata.codex_model = model;
+  threadMetadata(state, thread);
+  if (guard.allowed()) {
+    state.input = snapshot(
+      typeof input === "string"
+        ? [{ role: "user", content: input }]
+        : [{ role: "user", content: input }],
+    );
+    guard.internal(() =>
+      span.setAttribute(
+        SpanAttributes.TRACELOOP_ENTITY_INPUT,
+        json(state.input),
+      ),
+    );
   }
-
-  const record = event as RecordValue;
-  switch (record.type) {
-    case "thread.started":
-      if (typeof record.thread_id === "string" && record.thread_id) {
-        state.threadId = record.thread_id;
-      }
+  return state;
+}
+export function trackCodexEvent(state: CodexTurnState, event: unknown): void {
+  state.guard.observe();
+  state.eventsObserved = true;
+  switch (data(event, "type")) {
+    case "thread.started": {
+      const id = data(event, "thread_id");
+      if (typeof id === "string")
+        state.guard.internal(() =>
+          state.span.setAttribute(RespanSpanAttributes.RESPAN_THREADS_ID, id),
+        );
       break;
+    }
     case "turn.completed":
-      if (isRecord(record.usage)) {
-        state.usage = record.usage;
-      }
-      state.endTime = hrTime();
+      usage(state, data(event, "usage"));
       break;
     case "turn.failed":
-      state.statusCode = 500;
-      state.errorMessage =
-        readErrorMessage(record.error) ?? "Codex turn failed.";
-      state.endTime = hrTime();
+      fail(state.span, state.guard, data(event, "error"));
       break;
     case "error":
-      state.statusCode = 500;
-      state.errorMessage =
-        typeof record.message === "string"
-          ? record.message
-          : "Codex stream error.";
-      state.endTime = hrTime();
+      fail(state.span, state.guard, event);
       break;
     case "item.started":
     case "item.updated":
     case "item.completed":
-      trackCodexItemEvent(state, record);
-      break;
-    default:
+      trackItem(
+        state,
+        data(event, "item"),
+        data(event, "type") === "item.completed",
+      );
       break;
   }
 }
-
 export function trackCodexRunResult(
   state: CodexTurnState,
   result: unknown,
-  thread?: unknown,
 ): void {
-  if (thread) {
-    state.threadId = readThreadId(thread) ?? state.threadId;
+  state.guard.observe();
+  usage(state, data(result, "usage"));
+  if (!state.eventsObserved) {
+    const items = data(result, "items");
+    if (Array.isArray(items))
+      for (const item of items) trackItem(state, item, true);
   }
-  if (!isRecord(result)) {
-    state.finalResponse = stringifyOutputValue(result);
-    state.endTime = hrTime();
-    return;
-  }
-
-  if (typeof result.finalResponse === "string") {
-    state.finalResponse = result.finalResponse;
-  }
-  if (isRecord(result.usage)) {
-    state.usage = result.usage;
-  }
-  if (Array.isArray(result.items)) {
-    for (const item of result.items) {
-      if (isRecord(item)) {
-        trackCompletedItem(state, item);
-      }
-    }
-  }
-  state.endTime = hrTime();
+  const output = data(result, "finalResponse");
+  if (state.guard.allowed() && typeof output === "string")
+    state.output = output;
 }
-
-export function markCodexTurnError(
-  state: CodexTurnState,
-  error: unknown,
-): void {
-  state.statusCode = 500;
-  state.errorMessage = error instanceof Error ? error.message : String(error);
-  state.endTime = hrTime();
-}
-
-export function finalizeCodexTurnState(
-  state: CodexTurnState,
-  thread?: unknown,
-): void {
-  if (thread) {
-    state.threadId = readThreadId(thread) ?? state.threadId;
-  }
-  state.endTime = state.endTime ?? hrTime();
-}
-
-export function emitCodexTurnSpans(state: CodexTurnState): void {
-  if (state.emitted) {
-    return;
-  }
-  state.emitted = true;
-  const endTime = state.endTime ?? hrTime();
-
-  injectSpan(
-    buildCodexReadableSpan({
-      name: `${state.workflowName}.workflow`,
-      traceId: state.traceId,
-      spanId: state.workflowSpanId,
-      parentId: state.parentSpanId,
-      startTimeHr: state.startTime,
-      endTimeHr: endTime,
-      attributes: workflowAttributes(state),
-      statusCode: state.statusCode,
-      errorMessage: state.errorMessage,
-    }),
-  );
-
-  injectSpan(
-    buildCodexReadableSpan({
-      name: `${state.agentName}.agent`,
-      traceId: state.traceId,
-      spanId: state.agentSpanId,
-      parentId: state.workflowSpanId,
-      startTimeHr: state.startTime,
-      endTimeHr: endTime,
-      attributes: agentAttributes(state),
-      statusCode: state.statusCode,
-      errorMessage: state.errorMessage,
-    }),
-  );
-
-  injectSpan(
-    buildCodexReadableSpan({
-      name: "codex.chat",
-      traceId: state.traceId,
-      spanId: state.chatSpanId,
-      parentId: state.agentSpanId,
-      startTimeHr: state.startTime,
-      endTimeHr: endTime,
-      attributes: chatAttributes(state),
-      statusCode: state.statusCode,
-      errorMessage: state.errorMessage,
-    }),
-  );
-
-  if (!state.captureItemSpans) {
-    return;
-  }
-
-  for (const itemId of state.itemOrder) {
-    const itemState = state.items.get(itemId);
-    if (!itemState) {
-      continue;
-    }
-    emitItemSpan(state, itemState, endTime);
-  }
-}
-
-function trackCodexItemEvent(
-  state: CodexTurnState,
-  event: RecordValue,
-): void {
-  if (!isRecord(event.item)) {
-    return;
-  }
-
-  const item = event.item;
-  if (event.type === "item.completed") {
-    trackCompletedItem(state, item);
-    return;
-  }
-
-  const itemState = ensureItemState(state, item);
-  itemState.item = item;
-}
-
-function trackCompletedItem(
-  state: CodexTurnState,
-  item: RecordValue,
-): void {
-  const itemState = ensureItemState(state, item);
-  itemState.item = item;
-  itemState.endTime = hrTime();
-  if (isFailedItem(item)) {
-    itemState.statusCode = 500;
-    itemState.errorMessage = failedItemMessage(item);
-  }
-
-  if (item.type === "agent_message" && typeof item.text === "string") {
-    state.finalResponse = item.text;
-  }
-
-  const toolCall = normalizeToolCall(item);
-  if (toolCall) {
-    state.toolCalls.push(toolCall);
-  }
-}
-
-function ensureItemState(
-  state: CodexTurnState,
-  item: RecordValue,
-): CodexItemState {
-  const id = itemId(item, state.itemOrder.length);
-  const existing = state.items.get(id);
-  if (existing) {
-    return existing;
-  }
-
-  const itemState: CodexItemState = {
-    item,
-    spanId: ensureSpanId(`${state.turnId}:item:${id}`),
-    startTime: hrTime(),
-    statusCode: isFailedItem(item) ? 500 : 200,
-    errorMessage: failedItemMessage(item),
-  };
-  state.items.set(id, itemState);
-  state.itemOrder.push(id);
-  return itemState;
-}
-
-function emitItemSpan(
-  state: CodexTurnState,
-  itemState: CodexItemState,
-  fallbackEndTime: HrTime,
-): void {
-  const item = itemState.item;
-  if (item.type === "agent_message") {
-    return;
-  }
-
-  const itemAttrs = itemAttributes(state, item);
-  if (!itemAttrs) {
-    return;
-  }
-
-  addStatusAttributes(itemAttrs, itemState.statusCode, itemState.errorMessage);
-
-  injectSpan(
-    buildCodexReadableSpan({
-      name: itemSpanName(item),
-      traceId: state.traceId,
-      spanId: itemState.spanId,
-      parentId: state.agentSpanId,
-      startTimeHr: itemState.startTime,
-      endTimeHr: itemState.endTime ?? fallbackEndTime,
-      attributes: itemAttrs,
-      statusCode: itemState.statusCode,
-      errorMessage: itemState.errorMessage,
-    }),
-  );
-}
-
-function workflowAttributes(state: CodexTurnState): Record<string, unknown> {
-  const attrs = baseAttrs(state.workflowName, "", RespanLogType.WORKFLOW);
-  attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson(state.inputMessages);
-  attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = state.finalResponse ?? "";
-  attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] = state.workflowName;
-  addThreadAttributes(attrs, state);
-  addStatusAttributes(attrs, state.statusCode, state.errorMessage);
-  return attrs;
-}
-
-function agentAttributes(state: CodexTurnState): Record<string, unknown> {
-  const attrs = baseAttrs(state.agentName, state.agentName, RespanLogType.AGENT);
-  attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson(state.inputMessages);
-  attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = state.finalResponse ?? "";
-  attrs[SpanAttributes.TRACELOOP_WORKFLOW_NAME] = state.workflowName;
-  attrs[RespanSpanAttributes.RESPAN_METADATA_AGENT_NAME] = state.agentName;
-  if (state.model) {
-    attrs[SpanAttributes.LLM_REQUEST_MODEL] = state.model;
-  }
-  addThreadAttributes(attrs, state);
-  addStatusAttributes(attrs, state.statusCode, state.errorMessage);
-  return attrs;
-}
-
-function chatAttributes(state: CodexTurnState): Record<string, unknown> {
-  const attrs = baseAttrs("codex.response", "codex.response", RespanLogType.CHAT);
-  const promptContent = stringifyOutputValue(state.inputMessages[0]?.content ?? "");
-  const completionContent = state.finalResponse ?? "";
-  attrs[SpanAttributes.LLM_SYSTEM] = "openai";
-  attrs[SpanAttributes.LLM_REQUEST_TYPE] = RespanLogType.CHAT;
-  attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson(state.inputMessages);
-  attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = completionContent;
-  attrs[GEN_AI_PROMPT_ROLE] = "user";
-  attrs[GEN_AI_PROMPT_CONTENT] = promptContent;
-  attrs[GEN_AI_COMPLETION_ROLE] = "assistant";
-  attrs[GEN_AI_COMPLETION_CONTENT] = completionContent;
-  if (state.model) {
-    attrs[SpanAttributes.LLM_REQUEST_MODEL] = state.model;
-  }
-  if (state.toolCalls.length > 0) {
-    attrs[GEN_AI_COMPLETION_TOOL_CALLS] = safeJson(dedupeToolCalls(state.toolCalls));
-  }
-  addUsageAttributes(attrs, state.usage);
-  addThreadAttributes(attrs, state);
-  addStatusAttributes(attrs, state.statusCode, state.errorMessage);
-  return attrs;
-}
-
-function itemAttributes(
-  state: CodexTurnState,
-  item: RecordValue,
-): Record<string, unknown> | null {
-  switch (item.type) {
-    case "reasoning": {
-      const attrs = baseAttrs("codex.reasoning", "codex.reasoning", RespanLogType.TASK);
-      attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = "";
-      attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = stringValue(item.text) ?? "";
-      addThreadAttributes(attrs, state);
-      return attrs;
-    }
-    case "command_execution": {
-      const command = stringValue(item.command) ?? "";
-      const attrs = baseAttrs("codex.command", "codex.command", RespanLogType.TOOL);
-      attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson({ command });
-      attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson({
-        aggregated_output: item.aggregated_output ?? "",
-        exit_code: item.exit_code,
-        status: item.status,
-      });
-      addThreadAttributes(attrs, state);
-      return attrs;
-    }
-    case "mcp_tool_call": {
-      const server = stringValue(item.server) ?? "mcp";
-      const tool = stringValue(item.tool) ?? "tool";
-      const attrs = baseAttrs(
-        `mcp__${server}__${tool}`,
-        `mcp.${server}.${tool}`,
-        RespanLogType.TOOL,
-      );
-      attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson({
-        server,
-        tool,
-        arguments: toSerializableValue(item.arguments),
-      });
-      attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson(
-        item.error ?? item.result ?? { status: item.status },
-      );
-      addThreadAttributes(attrs, state);
-      return attrs;
-    }
-    case "web_search": {
-      const attrs = baseAttrs("codex.web_search", "codex.web_search", RespanLogType.TOOL);
-      attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson({
-        query: item.query ?? "",
-      });
-      attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson({
-        query: item.query ?? "",
-      });
-      addThreadAttributes(attrs, state);
-      return attrs;
-    }
-    case "file_change": {
-      const attrs = baseAttrs("codex.file_change", "codex.file_change", RespanLogType.TASK);
-      attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = safeJson(item.changes ?? []);
-      attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson({
-        changes: item.changes ?? [],
-        status: item.status,
-      });
-      addThreadAttributes(attrs, state);
-      return attrs;
-    }
-    case "todo_list": {
-      const attrs = baseAttrs("codex.todo_list", "codex.todo_list", RespanLogType.TASK);
-      attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = "";
-      attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson(item.items ?? []);
-      addThreadAttributes(attrs, state);
-      return attrs;
-    }
-    case "error": {
-      const attrs = baseAttrs("codex.error", "codex.error", RespanLogType.TASK);
-      attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = "";
-      attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = safeJson({
-        message: item.message ?? "",
-      });
-      addThreadAttributes(attrs, state);
-      return attrs;
-    }
-    default:
-      return null;
-  }
-}
-
-function itemSpanName(item: RecordValue): string {
-  switch (item.type) {
-    case "reasoning":
-      return "codex.reasoning";
-    case "command_execution":
-      return "codex.command";
-    case "mcp_tool_call":
-      return `codex.mcp.${stringValue(item.server) ?? "mcp"}.${stringValue(item.tool) ?? "tool"}`;
-    case "web_search":
-      return "codex.web_search";
-    case "file_change":
-      return "codex.file_change";
-    case "todo_list":
-      return "codex.todo_list";
-    case "error":
-      return "codex.error";
-    default:
-      return `codex.${String(item.type ?? "item")}`;
-  }
-}
-
-function baseAttrs(
-  entityName: string,
-  entityPath: string,
-  logType: RespanLogType,
-): Record<string, unknown> {
-  return {
-    [RespanSpanAttributes.RESPAN_LOG_METHOD]: RESPAN_LOG_METHOD_TS_TRACING,
-    [RespanSpanAttributes.RESPAN_LOG_TYPE]: logType,
-    [SpanAttributes.TRACELOOP_ENTITY_NAME]: entityName,
-    [SpanAttributes.TRACELOOP_ENTITY_PATH]: entityPath,
-    "telemetry.sdk.name": CODEX_INSTRUMENTATION_NAME,
-    "telemetry.sdk.version": PACKAGE_VERSION,
-  };
-}
-
-function buildCodexReadableSpan(
-  options: Parameters<typeof buildReadableSpan>[0],
-): ReturnType<typeof buildReadableSpan> {
-  const span = buildReadableSpan(options) as ReturnType<typeof buildReadableSpan> & {
-    instrumentationScope?: {
-      name: string;
-      version?: string;
-    };
-  };
-
-  span.instrumentationScope = {
-    name: CODEX_INSTRUMENTATION_NAME,
-    version: PACKAGE_VERSION,
-  };
-  return span;
-}
-
-function addThreadAttributes(
-  attrs: Record<string, unknown>,
-  state: CodexTurnState,
-): void {
-  attrs[RespanSpanAttributes.RESPAN_TRACE_GROUP_ID] = state.workflowName;
-  if (state.threadId) {
-    attrs[RespanSpanAttributes.RESPAN_THREADS_ID] = state.threadId;
-    attrs[RespanSpanAttributes.RESPAN_SESSION_ID] = state.threadId;
-  }
-}
-
-function addStatusAttributes(
-  attrs: Record<string, unknown>,
-  statusCode: number,
-  errorMessage?: string,
-): void {
-  if (statusCode < 400 && !errorMessage) {
-    return;
-  }
-  attrs[STATUS_CODE_ATTR] = statusCode >= 400 ? statusCode : 500;
-  if (errorMessage) {
-    attrs[ERROR_MESSAGE_ATTR] = errorMessage;
-  }
-}
-
-function addUsageAttributes(
-  attrs: Record<string, unknown>,
-  usage: RecordValue | undefined,
-): void {
-  if (!usage) {
-    return;
-  }
-  const inputTokens = integerValue(usage.input_tokens);
-  const outputTokens = integerValue(usage.output_tokens);
-  const totalTokens =
-    inputTokens !== undefined || outputTokens !== undefined
-      ? (inputTokens ?? 0) + (outputTokens ?? 0)
-      : undefined;
-
-  if (inputTokens !== undefined) {
-    attrs[SpanAttributes.LLM_USAGE_PROMPT_TOKENS] = inputTokens;
-  }
-  if (outputTokens !== undefined) {
-    attrs[SpanAttributes.LLM_USAGE_COMPLETION_TOKENS] = outputTokens;
-  }
-  if (totalTokens !== undefined) {
-    attrs[SpanAttributes.LLM_USAGE_TOTAL_TOKENS] = totalTokens;
-  }
-}
-
-function normalizeInputMessages(input: unknown): RecordValue[] {
-  return [
-    {
-      role: "user",
-      content: normalizeInputContent(input),
-    },
-  ];
-}
-
-function normalizeInputContent(input: unknown): string {
-  if (typeof input === "string") {
-    return input;
-  }
-  const serialized = toSerializableValue(input);
-  if (!Array.isArray(serialized)) {
-    return stringifyOutputValue(serialized);
-  }
-
-  const parts: string[] = [];
-  for (const item of serialized) {
-    if (!isRecord(item)) {
-      parts.push(stringifyOutputValue(item));
-      continue;
-    }
-    if (item.type === "text" && typeof item.text === "string") {
-      parts.push(item.text);
-      continue;
-    }
-    if (item.type === "local_image" && typeof item.path === "string") {
-      parts.push(`[local_image:${item.path}]`);
-      continue;
-    }
-    parts.push(stringifyOutputValue(item));
-  }
-  return parts.filter(Boolean).join("\n\n");
-}
-
-function normalizeToolCall(item: RecordValue): RecordValue | null {
-  switch (item.type) {
-    case "command_execution":
-      return createToolCall({
-        id: stringValue(item.id),
-        name: "command_execution",
-        args: { command: item.command ?? "" },
-      });
-    case "mcp_tool_call": {
-      const server = stringValue(item.server) ?? "mcp";
-      const tool = stringValue(item.tool) ?? "tool";
-      return createToolCall({
-        id: stringValue(item.id),
-        name: `mcp__${server}__${tool}`,
-        args: item.arguments ?? {},
-      });
-    }
-    case "web_search":
-      return createToolCall({
-        id: stringValue(item.id),
-        name: "web_search",
-        args: { query: item.query ?? "" },
-      });
-    default:
-      return null;
-  }
-}
-
-function createToolCall({
-  id,
-  name,
-  args,
-}: {
-  args: unknown;
-  id?: string;
-  name: string;
-}): RecordValue {
-  return {
-    id: id ?? ensureSpanId(),
-    type: "function",
-    function: {
-      name,
-      arguments: stringifyOutputValue(args),
-    },
-  };
-}
-
-function dedupeToolCalls(toolCalls: RecordValue[]): RecordValue[] {
-  const seen = new Set<string>();
-  const deduped: RecordValue[] = [];
-  for (const toolCall of toolCalls) {
-    const key = safeJson(toolCall);
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    deduped.push(toolCall);
-  }
-  return deduped;
-}
-
-function isFailedItem(item: RecordValue): boolean {
-  return item.status === "failed" || isRecord(item.error);
-}
-
-function failedItemMessage(item: RecordValue): string | undefined {
-  if (isRecord(item.error)) {
-    return readErrorMessage(item.error);
-  }
-  if (item.status === "failed") {
-    return `${String(item.type ?? "codex_item")} failed.`;
-  }
-  return undefined;
-}
-
-function readErrorMessage(error: unknown): string | undefined {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  if (isRecord(error) && typeof error.message === "string") {
-    return error.message;
-  }
-  if (typeof error === "string") {
-    return error;
-  }
-  return undefined;
-}
-
-function itemId(item: RecordValue, index: number): string {
-  return stringValue(item.id) ?? `${String(item.type ?? "item")}-${index}`;
-}
-
-function readThreadId(thread: unknown): string | undefined {
-  if (!isRecord(thread)) {
-    return undefined;
-  }
-  return stringValue(thread.id) ?? stringValue(thread._id);
-}
-
-function readPrivateRecord(
-  target: unknown,
-  key: string,
-): RecordValue | undefined {
-  if (!isRecord(target)) {
-    return undefined;
-  }
-  const value = target[key];
-  return isRecord(value) ? value : undefined;
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value : undefined;
-}
-
-function nonEmptyString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function integerValue(value: unknown): number | undefined {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return undefined;
-  }
-  return Math.trunc(value);
-}
-
-function stringifyOutputValue(value: unknown): string {
-  const serialized = toSerializableValue(value);
-  if (serialized === undefined || serialized === null) {
-    return "";
-  }
-  if (typeof serialized === "string") {
-    return serialized;
-  }
-  return safeJson(serialized);
-}
-
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value, (_key, innerValue) =>
-      typeof innerValue === "bigint" ? innerValue.toString() : innerValue,
+export function finishCodexTurn(state: CodexTurnState, thread: unknown): void {
+  if (state.ended) return;
+  state.ended = true;
+  state.guard.observe();
+  threadMetadata(state, thread);
+  state.guard.metadata(state.metadata);
+  if (state.guard.allowed() && state.output !== undefined)
+    state.guard.internal(() =>
+      state.span.setAttribute(
+        SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
+        json(state.output),
+      ),
     );
-  } catch {
-    return String(value);
-  }
+  for (const item of state.items.values())
+    if (!item.completed) {
+      item.completed = true;
+      if (item.guard.prepare()) item.span.end();
+    }
+  if (state.guard.prepare()) state.span.end();
 }
-
-function toSerializableValue(value: unknown): unknown {
-  if (value === null || value === undefined) {
-    return undefined;
+export function fail(span: Span, guard: ContentGuard, error: unknown): void {
+  const message = guard.allowed() ? data(error, "message") : undefined;
+  guard.internal(() =>
+    span.setStatus({
+      code: SpanStatusCode.ERROR,
+      ...(typeof message === "string" ? { message } : {}),
+    }),
+  );
+}
+function threadMetadata(state: CodexTurnState, thread: unknown): void {
+  const id = data(thread, "_id");
+  if (typeof id === "string")
+    state.guard.internal(() =>
+      state.span.setAttribute(RespanSpanAttributes.RESPAN_THREADS_ID, id),
+    );
+}
+function usage(state: CodexTurnState, value: unknown): void {
+  const fields: Row = {};
+  for (const key of [
+    "input_tokens",
+    "output_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "reasoning_output_tokens",
+  ]) {
+    const count = data(value, key);
+    if (typeof count === "number" && Number.isFinite(count) && count >= 0)
+      fields[key] = count;
   }
+  if (Object.keys(fields).length) state.metadata.codex_turn_usage = fields;
+}
+function trackItem(
+  state: CodexTurnState,
+  item: unknown,
+  completed: boolean,
+): void {
+  const type = data(item, "type");
+  if (type === "agent_message") {
+    const text = state.guard.allowed() ? data(item, "text") : undefined;
+    if (completed && typeof text === "string") state.output = text;
+    return;
+  }
+  if (!state.captureItemSpans || typeof type !== "string") return;
+  const logType = ["command_execution", "mcp_tool_call", "web_search"].includes(
+    type,
+  )
+    ? RespanLogType.TOOL
+    : ["reasoning", "file_change", "todo_list", "error"].includes(type)
+      ? RespanLogType.TASK
+      : undefined;
+  if (!logType) return;
+  const id = data(item, "id");
+  if (typeof id !== "string") return;
+  let current = state.items.get(id);
+  if (!current) {
+    const name =
+      type === "mcp_tool_call"
+        ? `mcp__${string(data(item, "server"), "mcp")}__${string(data(item, "tool"), "tool")}`
+        : type;
+    const span = tracer().startSpan(
+      name,
+      {
+        attributes: {
+          ...base(name, logType),
+        },
+      },
+      state.context,
+    );
+    const guard = new ContentGuard(
+      span,
+      state.guard.captureAllowed(),
+      state.context,
+      state.guard,
+    );
+    current = { span, guard, completed: false };
+    state.items.set(id, current);
+    current.guard.metadata({ codex_item_id: id, codex_item_type: type });
+  }
+  if (current.completed) return;
+  current.guard.observe();
   if (
-    typeof value === "string" ||
-    typeof value === "number" ||
-    typeof value === "boolean"
-  ) {
-    return value;
-  }
-  if (typeof value === "bigint") {
-    return value.toString();
-  }
-  if (value instanceof Date) {
-    return value.toISOString();
-  }
-  if (Array.isArray(value)) {
-    return value.map((item) => toSerializableValue(item));
-  }
-  if (typeof value === "object") {
-    const record = value as Record<string, unknown> & {
-      toJSON?: () => unknown;
-    };
-    if (typeof record.toJSON === "function") {
-      try {
-        return toSerializableValue(record.toJSON());
-      } catch {
-        // Fall through to shallow structural serialization.
-      }
+    data(item, "status") === "failed" ||
+    type === "error" ||
+    record(data(item, "error"))
+  )
+    fail(current.span, current.guard, data(item, "error") ?? item);
+  if (current.guard.allowed()) {
+    const payload = snapshot(item) as Row;
+    let input: unknown;
+    let output: unknown;
+    switch (type) {
+      case "command_execution":
+        input = {
+          name: "command_execution",
+          arguments: { command: payload.command },
+        };
+        output = {
+          aggregated_output: payload.aggregated_output,
+          exit_code: payload.exit_code,
+          status: payload.status,
+        };
+        break;
+      case "mcp_tool_call":
+        input = {
+          name: `mcp__${payload.server}__${payload.tool}`,
+          arguments: payload.arguments,
+        };
+        output = payload.error ?? payload.result;
+        break;
+      case "web_search":
+        input = { name: "web_search", arguments: { query: payload.query } };
+        break;
+      case "reasoning":
+        output = payload.text;
+        break;
+      case "file_change":
+        input = payload.changes;
+        output = { changes: payload.changes, status: payload.status };
+        break;
+      case "todo_list":
+        output = payload.items;
+        break;
+      case "error":
+        output = { message: payload.message };
+        break;
     }
-    const normalized: RecordValue = {};
-    for (const [key, itemValue] of Object.entries(record)) {
-      if (typeof itemValue === "function") {
-        continue;
-      }
-      normalized[key] = toSerializableValue(itemValue);
-    }
-    return normalized;
+    current.guard.internal(() => {
+      if (input !== undefined)
+        current!.span.setAttribute(
+          SpanAttributes.TRACELOOP_ENTITY_INPUT,
+          json(input),
+        );
+      if (output !== undefined)
+        current!.span.setAttribute(
+          SpanAttributes.TRACELOOP_ENTITY_OUTPUT,
+          json(output),
+        );
+    });
   }
-  return String(value);
+  if (completed) {
+    current.completed = true;
+    if (current.guard.prepare()) current.span.end();
+  }
 }
-
-function isRecord(value: unknown): value is RecordValue {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+function base(name: string, type: RespanLogType): Record<string, string> {
+  return {
+    [RespanSpanAttributes.RESPAN_LOG_TYPE]: type,
+    [SpanAttributes.TRACELOOP_ENTITY_NAME]: name,
+    [SpanAttributes.TRACELOOP_ENTITY_PATH]: "",
+  };
+}
+function string(value: unknown, fallback: string): string {
+  return typeof value === "string" && value ? value : fallback;
 }

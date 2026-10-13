@@ -9,6 +9,7 @@
 import { RespanLogType } from "@respan/respan-sdk";
 import { loadTogetherConstructors } from "./_helpers.js";
 import { patchResourceMethod } from "./_patching.js";
+import type { CaptureOptions } from "./_capture.js";
 import type { PatchedResourceTarget, TogetherOperationSpec } from "./_types.js";
 
 const TOGETHER_OPERATION_SPECS = {
@@ -123,8 +124,39 @@ export class TogetherAIInstrumentor {
   };
 
   private _isInstrumented = false;
+  private _activating?: Promise<void>;
+  private _generation = 0;
+  private static readonly _owners = new Set<TogetherAIInstrumentor>();
+  constructor(private readonly options: CaptureOptions = {}) {}
+  isActive(): boolean {
+    return this._isInstrumented;
+  }
+  private static captureOptions(): CaptureOptions {
+    const owners = [...this._owners];
+    return {
+      traceContent: owners.every(
+        (owner) => owner.options.traceContent !== false,
+      ),
+      recordInputs: owners.every(
+        (owner) => owner.options.recordInputs !== false,
+      ),
+      recordOutputs: owners.every(
+        (owner) => owner.options.recordOutputs !== false,
+      ),
+    };
+  }
+  activate(): Promise<void> {
+    if (this._isInstrumented) return Promise.resolve();
+    if (this._activating) return this._activating;
+    const generation = this._generation;
+    const pending = this._activate(generation).finally(() => {
+      if (this._activating === pending) this._activating = undefined;
+    });
+    this._activating = pending;
+    return pending;
+  }
 
-  async activate(): Promise<void> {
+  private async _activate(generation: number): Promise<void> {
     if (this._isInstrumented) return;
 
     const togetherConstructors = await loadTogetherConstructors();
@@ -135,6 +167,7 @@ export class TogetherAIInstrumentor {
       return;
     }
 
+    if (generation !== this._generation) return;
     const sharedState = TogetherAIInstrumentor._sharedState;
 
     try {
@@ -144,13 +177,16 @@ export class TogetherAIInstrumentor {
           if (
             !prototype ||
             sharedState.patchedTargets.some(
-              (target) => target.prototype === prototype && target.method === spec.method,
+              (target) =>
+                target.prototype === prototype && target.method === spec.method,
             )
           ) {
             continue;
           }
 
-          const patchedTarget = patchResourceMethod(prototype, spec);
+          const patchedTarget = patchResourceMethod(prototype, spec, () =>
+            TogetherAIInstrumentor.captureOptions(),
+          );
           if (patchedTarget) sharedState.patchedTargets.push(patchedTarget);
         }
       }
@@ -164,23 +200,38 @@ export class TogetherAIInstrumentor {
 
       sharedState.activeInstances += 1;
       this._isInstrumented = true;
+      TogetherAIInstrumentor._owners.add(this);
     } catch (err) {
-      console.warn("[Respan] Failed to activate Together AI instrumentation:", err);
+      console.warn(
+        "[Respan] Failed to activate Together AI instrumentation:",
+        err,
+      );
     }
   }
 
   deactivate(): void {
+    this._generation += 1;
+    TogetherAIInstrumentor._owners.delete(this);
     if (!this._isInstrumented) return;
 
     const sharedState = TogetherAIInstrumentor._sharedState;
     sharedState.activeInstances = Math.max(0, sharedState.activeInstances - 1);
     this._isInstrumented = false;
 
-    if (sharedState.activeInstances > 0 || sharedState.patchedTargets.length === 0) return;
+    if (
+      sharedState.activeInstances > 0 ||
+      sharedState.patchedTargets.length === 0
+    )
+      return;
 
     try {
       for (const patchedTarget of sharedState.patchedTargets) {
-        patchedTarget.prototype[patchedTarget.method] = patchedTarget.original;
+        if (
+          patchedTarget.prototype[patchedTarget.method] ===
+          patchedTarget.wrapped
+        )
+          patchedTarget.prototype[patchedTarget.method] =
+            patchedTarget.original;
       }
     } catch {
       // Ignore teardown failures.

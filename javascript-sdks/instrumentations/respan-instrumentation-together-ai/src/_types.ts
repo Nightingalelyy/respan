@@ -22,4 +22,5 @@ export interface PatchedResourceTarget {
   prototype: Record<string, any>;
   method: "create" | "generate";
   original: any;
+  wrapped: any;
 }

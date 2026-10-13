@@ -1,136 +1,95 @@
-import { hrTime } from "@opentelemetry/core";
-import { emitErrorSpan, emitSuccessSpan, emitToolSpansFromMessages } from "./_span_emitter.js";
+import { context } from "@opentelemetry/api";
+import { dataValue, type CaptureOptions } from "./_capture.js";
+import {
+  startOperation,
+  finishOperation,
+  type Operation,
+} from "./_span_emitter.js";
 import { wrapStreamingResult } from "./_streaming.js";
 import type { PatchedResourceTarget, TogetherOperationSpec } from "./_types.js";
 
-function isStreamingRequest(spec: TogetherOperationSpec, request: any): boolean {
-  return (spec.kind === "chat" || spec.kind === "text" || spec.kind === "speech") &&
-    request?.stream === true;
-}
-
 export function instrumentCreateResult(
   result: any,
-  spec: TogetherOperationSpec,
-  request: any,
-  startTime: [number, number],
+  op: Operation,
+  streaming: boolean,
 ): any {
   if (!result || typeof result !== "object") {
-    emitSuccessSpan(spec, request, startTime, result);
+    finishOperation(op, result);
     return result;
   }
-
-  let hasHandled = false;
-
-  const handleSuccess = (value: any) => {
-    if (isStreamingRequest(spec, request)) {
-      return wrapStreamingResult(value, spec, request, startTime);
-    }
-
-    if (!hasHandled) {
-      hasHandled = true;
-      emitSuccessSpan(spec, request, startTime, value);
-    }
+  const complete = (value: any) => {
+    if (streaming) return wrapStreamingResult(value, op);
+    finishOperation(op, value);
     return value;
   };
-
-  const handleError = (err: unknown) => {
-    if (hasHandled) return;
-    hasHandled = true;
-    emitErrorSpan(spec, request, startTime, err);
+  const failed = (error: unknown) => {
+    finishOperation(op, undefined, error, true);
   };
-
-  const originalThen = typeof result.then === "function" ? result.then.bind(result) : null;
-  if (originalThen) {
-    result.then = function (onfulfilled?: any, onrejected?: any) {
-      return originalThen(
-        (value: any) => {
-          const instrumentedValue = handleSuccess(value);
-          return onfulfilled ? onfulfilled(instrumentedValue) : instrumentedValue;
-        },
-        (reason: any) => {
-          handleError(reason);
-          if (onrejected) return onrejected(reason);
-          throw reason;
-        },
-      );
+  let parsedStarted = false;
+  const parse =
+    typeof result.parse === "function" ? result.parse.bind(result) : undefined;
+  if (parse)
+    result.parse = function (...args: any[]) {
+      parsedStarted = true;
+      const promise = parse(...args);
+      promise
+        .then((value: any) => {
+          complete(value);
+        }, failed)
+        .catch(() => {});
+      return promise;
     };
-  }
-
-  const originalCatch = typeof result.catch === "function" ? result.catch.bind(result) : null;
-  if (originalCatch) {
-    result.catch = function (onrejected?: any) {
-      return originalCatch((reason: any) => {
-        handleError(reason);
-        if (onrejected) return onrejected(reason);
-        throw reason;
-      });
+  else if (typeof result.then === "function")
+    result
+      .then((value: any) => {
+        complete(value);
+      }, failed)
+      .catch(() => {});
+  else complete(result);
+  const asResponse =
+    typeof result.asResponse === "function"
+      ? result.asResponse.bind(result)
+      : undefined;
+  if (asResponse)
+    result.asResponse = function (...args: any[]) {
+      const rawOnly = !parsedStarted;
+      const promise = asResponse(...args);
+      promise
+        .then((value: any) => {
+          if (rawOnly && !parsedStarted) {
+            if (typeof value?.status === "number")
+              op.span.setAttribute("status_code", value.status);
+            finishOperation(op);
+          }
+        }, failed)
+        .catch(() => {});
+      return promise;
     };
-  }
-
-  const originalWithResponse =
-    typeof result.withResponse === "function" ? result.withResponse.bind(result) : null;
-  if (originalWithResponse) {
-    result.withResponse = async function () {
-      try {
-        const response = await originalWithResponse();
-        return {
-          ...response,
-          data: handleSuccess(response.data),
-        };
-      } catch (err) {
-        handleError(err);
-        throw err;
-      }
-    };
-  }
-
-  const originalAsResponse =
-    typeof result.asResponse === "function" ? result.asResponse.bind(result) : null;
-  if (originalAsResponse) {
-    result.asResponse = async function () {
-      try {
-        const response = await originalAsResponse();
-        handleSuccess(response);
-        return response;
-      } catch (err) {
-        handleError(err);
-        throw err;
-      }
-    };
-  }
-
-  if (!originalThen && !originalWithResponse && !originalAsResponse) {
-    handleSuccess(result);
-  }
-
   return result;
 }
-
 export function patchResourceMethod(
   prototype: Record<string, any>,
   spec: TogetherOperationSpec,
+  options: () => CaptureOptions = () => ({}),
 ): PatchedResourceTarget | null {
-  if (!prototype || typeof prototype[spec.method] !== "function") return null;
-
-  const patchedTarget: PatchedResourceTarget = {
-    prototype,
-    method: spec.method,
-    original: prototype[spec.method],
-  };
-
-  prototype[spec.method] = function (this: any, body: any, options?: any) {
-    const startTime = hrTime();
+  if (typeof prototype?.[spec.method] !== "function") return null;
+  const original = prototype[spec.method];
+  const wrapped = function (this: any, ...args: any[]) {
+    let op: Operation;
     try {
-      if (spec.kind === "chat") {
-        emitToolSpansFromMessages(body?.messages);
-      }
-      const result = patchedTarget.original.call(this, body, options);
-      return instrumentCreateResult(result, spec, body, startTime);
-    } catch (err) {
-      emitErrorSpan(spec, body, startTime, err);
-      throw err;
+      op = startOperation(spec, args[0], options());
+    } catch {
+      return original.apply(this, args);
+    }
+    try {
+      const streaming = dataValue(args[0], "stream") === true;
+      const result = context.with(op.ctx, () => original.apply(this, args));
+      return instrumentCreateResult(result, op, streaming);
+    } catch (error) {
+      finishOperation(op, undefined, error, true);
+      throw error;
     }
   };
-
-  return patchedTarget;
+  prototype[spec.method] = wrapped;
+  return { prototype, method: spec.method, original, wrapped };
 }

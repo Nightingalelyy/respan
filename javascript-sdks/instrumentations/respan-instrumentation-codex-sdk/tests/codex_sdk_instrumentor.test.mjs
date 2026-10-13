@@ -1,342 +1,565 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-
-import { trace } from "@opentelemetry/api";
-
-import { CodexSDKInstrumentor } from "../dist/index.js";
-
-const captureState = { spans: [] };
-const originalGetTracerProvider = trace.getTracerProvider.bind(trace);
-
-test.before(() => {
-  Object.defineProperty(trace, "getTracerProvider", {
-    configurable: true,
-    writable: true,
-    value() {
-      return {
-        activeSpanProcessor: {
-          onEnd(span) {
-            captureState.spans.push(span);
-          },
-        },
-      };
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { context, trace } from "@opentelemetry/api";
+import {
+  BasicTracerProvider,
+  SimpleSpanProcessor,
+  InMemorySpanExporter,
+  SamplingDecision,
+} from "@opentelemetry/sdk-trace-base";
+import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
+import { suppressTracing } from "@opentelemetry/core";
+import { CONTEXT_KEY_ALLOW_TRACE_CONTENT } from "@traceloop/ai-semantic-conventions";
+const native = await import(
+  process.env.CODEX_NATIVE_MODULE ?? "@openai/codex-sdk"
+);
+const { CodexSDKInstrumentor } = await import(
+  process.env.CODEX_TARGET_MODULE ?? "../dist/index.js"
+);
+const latest = process.env.CODEX_NATIVE_VERSION !== "0.141.0";
+let decision = SamplingDecision.RECORD_AND_SAMPLED;
+let samples = [];
+let starts = [];
+let onStart;
+const exporter = new InMemorySpanExporter();
+const provider = new BasicTracerProvider({
+  sampler: {
+    shouldSample(_ctx, _trace, name, _kind, attrs) {
+      samples.push({ name, attrs });
+      return { decision };
+    },
+    toString() {
+      return "native-test-sampler";
+    },
+  },
+  spanProcessors: [
+    {
+      onStart(s, c) {
+        starts.push(s);
+        onStart?.(s, c);
+      },
+      onEnd() {},
+      forceFlush: async () => {},
+      shutdown: async () => {},
+    },
+    new SimpleSpanProcessor(exporter),
+  ],
+});
+trace.setGlobalTracerProvider(provider);
+context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
+const owners = [];
+const fixture = new URL("./fixtures/controlled-codex.cjs", import.meta.url)
+  .pathname;
+function codex(scenario = "all", extra = {}) {
+  return new native.Codex({
+    codexPathOverride: fixture,
+    env: {
+      PATH: process.env.PATH,
+      CODEX_FIXTURE_SCENARIO: scenario,
+      CODEX_FIXTURE_CACHE_WRITE: latest ? "1" : "0",
+      ...extra,
     },
   });
-});
-
-test.after(() => {
-  Object.defineProperty(trace, "getTracerProvider", {
-    configurable: true,
-    writable: true,
-    value: originalGetTracerProvider,
+}
+function thread(scenario = "all", extra = {}) {
+  return codex(scenario, extra).startThread({
+    model: "controlled-model",
+    skipGitRepoCheck: true,
   });
-});
-
-function createFakeSDK() {
-  class FakeThread {
-    constructor() {
-      this._id = null;
-      this._threadOptions = {
-        model: "gpt-5.4",
-        workingDirectory: "/tmp/codex-demo",
-      };
-    }
-
-    get id() {
-      return this._id;
-    }
-
-    async run(input) {
-      this._id = "thread_run_123";
-      assert.equal(input, "Inspect the repository and summarize the result.");
-      return {
-        finalResponse: "The repository is ready.",
-        usage: {
-          input_tokens: 31,
-          cached_input_tokens: 4,
-          output_tokens: 9,
-          reasoning_output_tokens: 3,
-        },
-        items: [
-          {
-            id: "reasoning_1",
-            type: "reasoning",
-            text: "I need to inspect the files first.",
-          },
-          {
-            id: "cmd_1",
-            type: "command_execution",
-            command: "ls",
-            aggregated_output: "package.json\nsrc\n",
-            exit_code: 0,
-            status: "completed",
-          },
-          {
-            id: "mcp_1",
-            type: "mcp_tool_call",
-            server: "docs",
-            tool: "search",
-            arguments: { query: "Codex SDK" },
-            result: {
-              content: [{ type: "text", text: "Codex SDK docs" }],
-              structured_content: { ok: true },
-            },
-            status: "completed",
-          },
-          {
-            id: "web_1",
-            type: "web_search",
-            query: "OpenAI Codex SDK",
-          },
-          {
-            id: "file_1",
-            type: "file_change",
-            changes: [{ path: "README.md", kind: "update" }],
-            status: "completed",
-          },
-          {
-            id: "todo_1",
-            type: "todo_list",
-            items: [{ text: "Inspect repository", completed: true }],
-          },
-          {
-            id: "msg_1",
-            type: "agent_message",
-            text: "The repository is ready.",
-          },
-        ],
-      };
-    }
-
-    async runStreamed() {
-      this._id = "thread_stream_123";
-      return {
-        events: (async function*() {
-          yield { type: "thread.started", thread_id: "thread_stream_123" };
-          yield {
-            type: "item.started",
-            item: {
-              id: "cmd_stream",
-              type: "command_execution",
-              command: "pwd",
-              aggregated_output: "",
-              status: "in_progress",
-            },
-          };
-          yield {
-            type: "item.completed",
-            item: {
-              id: "cmd_stream",
-              type: "command_execution",
-              command: "pwd",
-              aggregated_output: "/tmp/codex-demo\n",
-              exit_code: 0,
-              status: "completed",
-            },
-          };
-          yield {
-            type: "item.completed",
-            item: {
-              id: "msg_stream",
-              type: "agent_message",
-              text: "Streaming turn complete.",
-            },
-          };
-          yield {
-            type: "turn.completed",
-            usage: {
-              input_tokens: 12,
-              cached_input_tokens: 0,
-              output_tokens: 4,
-              reasoning_output_tokens: 1,
-            },
-          };
-        })(),
-      };
-    }
+}
+async function activate(options = {}) {
+  const owner = new CodexSDKInstrumentor({ sdkModule: native, ...options });
+  owners.push(owner);
+  await owner.activate();
+  return owner;
+}
+function spans() {
+  return exporter.getFinishedSpans();
+}
+function agent() {
+  return spans().find(
+    (s) => s.attributes["respan.entity.log_type"] === "agent",
+  );
+}
+function metadata(s) {
+  return JSON.parse(s.attributes["respan.metadata"]);
+}
+function assertContract() {
+  for (const s of spans()) {
+    for (const key of [
+      "traceloop.span.kind",
+      "respan.span.tools",
+      "respan.span.tool_calls",
+      "tools",
+      "tool_calls",
+      "model",
+      "prompt_tokens",
+      "completion_tokens",
+      "status_code",
+    ])
+      assert.equal(s.attributes[key], undefined, key);
+    assert.equal(s.attributes["gen_ai.tool.call.id"], undefined);
+    assert.ok(
+      !Object.keys(s.attributes).some(
+        (k) =>
+          k.startsWith("gen_ai.prompt") || k.startsWith("gen_ai.completion"),
+      ),
+    );
   }
-
-  return { Thread: FakeThread };
-}
-
-function spanByLogType(logType) {
-  return captureState.spans.find(
-    (span) => span.attributes["respan.entity.log_type"] === logType,
+  assert.ok(
+    !spans().some((s) => s.attributes["respan.entity.log_type"] === "chat"),
   );
 }
-
-function spansByLogType(logType) {
-  return captureState.spans.filter(
-    (span) => span.attributes["respan.entity.log_type"] === logType,
-  );
-}
-
-function assertNoBannedAliases(span) {
-  assert.equal(span.attributes["traceloop.span.kind"], undefined);
-  assert.equal(span.attributes["respan.span.tools"], undefined);
-  assert.equal(span.attributes["respan.span.tool_calls"], undefined);
-  assert.equal(span.attributes.tools, undefined);
-  assert.equal(span.attributes.tool_calls, undefined);
-  assert.equal(span.attributes.model, undefined);
-  assert.equal(span.attributes.prompt_tokens, undefined);
-  assert.equal(span.attributes.completion_tokens, undefined);
-  assert.equal(span.attributes.total_request_tokens, undefined);
-}
-
-test("patches Thread.run and emits canonical Codex turn spans", async () => {
-  captureState.spans = [];
-  const sdk = createFakeSDK();
-  const originalRun = sdk.Thread.prototype.run;
-  const instrumentor = new CodexSDKInstrumentor({
-    sdkModule: sdk,
-    workflowName: "codex-sdk-run-test",
-    agentName: "codex-test-agent",
+test.beforeEach(() => {
+  exporter.reset();
+  samples = [];
+  starts = [];
+  decision = SamplingDecision.RECORD_AND_SAMPLED;
+  onStart = undefined;
+});
+test.afterEach(() => {
+  for (const owner of owners.splice(0)) owner.deactivate();
+  delete process.env.RESPAN_TRACE_CONTENT;
+  delete process.env.TRACELOOP_TRACE_CONTENT;
+});
+test.after(async () => {
+  await provider.shutdown();
+  context.disable();
+  trace.disable();
+});
+test("native buffered turn maps all real items and aggregate usage without an invented LLM", async () => {
+  await activate();
+  const result = await thread().run("controlled input");
+  assert.equal(result.items.length, 8);
+  assert.equal(spans().length, 8);
+  assert.equal(samples.length, 8);
+  const a = agent();
+  assert.deepEqual(metadata(a).codex_turn_usage, {
+    input_tokens: 31,
+    output_tokens: 9,
+    cached_input_tokens: 4,
+    ...(latest ? { cache_write_input_tokens: 2 } : {}),
+    reasoning_output_tokens: 3,
   });
-  await instrumentor.activate();
-
-  const thread = new sdk.Thread();
-  const result = await thread.run("Inspect the repository and summarize the result.");
-
-  assert.equal(result.finalResponse, "The repository is ready.");
-  assert.notEqual(sdk.Thread.prototype.run, originalRun);
-  assert.equal(captureState.spans.length, 9);
-
-  const workflowSpan = spanByLogType("workflow");
-  const agentSpan = spanByLogType("agent");
-  const chatSpan = spanByLogType("chat");
-  const toolSpans = spansByLogType("tool");
-  const taskSpans = spansByLogType("task");
-
-  assert.ok(workflowSpan);
-  assert.ok(agentSpan);
-  assert.ok(chatSpan);
-  assert.equal(toolSpans.length, 3);
-  assert.equal(taskSpans.length, 3);
-  assert.equal(workflowSpan.attributes["traceloop.workflow.name"], "codex-sdk-run-test");
-  assert.equal(agentSpan.attributes["traceloop.entity.name"], "codex-test-agent");
-  assert.equal(agentSpan.attributes["respan.metadata.agent_name"], "codex-test-agent");
-  assert.equal(chatSpan.attributes["traceloop.entity.name"], "codex.response");
-  assert.equal(chatSpan.attributes["gen_ai.system"], "openai");
-  assert.equal(chatSpan.attributes["llm.request.type"], "chat");
-  assert.equal(chatSpan.attributes["gen_ai.request.model"], "gpt-5.4");
-  assert.equal(chatSpan.attributes["gen_ai.usage.prompt_tokens"], 31);
-  assert.equal(chatSpan.attributes["gen_ai.usage.completion_tokens"], 9);
-  assert.equal(chatSpan.attributes["llm.usage.total_tokens"], 40);
-  assert.equal(chatSpan.attributes["gen_ai.prompt.0.role"], "user");
+  assert.equal(metadata(a).codex_model, "controlled-model");
   assert.equal(
-    chatSpan.attributes["gen_ai.prompt.0.content"],
-    "Inspect the repository and summarize the result.",
+    a.attributes["respan.threads.thread_identifier"],
+    "controlled-codex-thread",
   );
-  assert.equal(chatSpan.attributes["gen_ai.completion.0.role"], "assistant");
-  assert.equal(chatSpan.attributes["gen_ai.completion.0.content"], "The repository is ready.");
-  assert.deepEqual(JSON.parse(chatSpan.attributes["gen_ai.completion.0.tool_calls"]), [
-    {
-      id: "cmd_1",
-      type: "function",
-      function: {
-        name: "command_execution",
-        arguments: "{\"command\":\"ls\"}",
-      },
-    },
-    {
-      id: "mcp_1",
-      type: "function",
-      function: {
-        name: "mcp__docs__search",
-        arguments: "{\"query\":\"Codex SDK\"}",
-      },
-    },
-    {
-      id: "web_1",
-      type: "function",
-      function: {
-        name: "web_search",
-        arguments: "{\"query\":\"OpenAI Codex SDK\"}",
-      },
-    },
-  ]);
-
-  const commandSpan = toolSpans.find((span) => span.name === "codex.command");
-  assert.ok(commandSpan);
-  assert.deepEqual(JSON.parse(commandSpan.attributes["traceloop.entity.input"]), {
-    command: "ls",
-  });
-  assert.deepEqual(JSON.parse(commandSpan.attributes["traceloop.entity.output"]), {
-    aggregated_output: "package.json\nsrc\n",
-    exit_code: 0,
-    status: "completed",
-  });
-
-  for (const span of captureState.spans) {
-    assertNoBannedAliases(span);
-  }
-
-  instrumentor.deactivate();
-  assert.equal(sdk.Thread.prototype.run, originalRun);
+  assert.equal(a.attributes["gen_ai.request.model"], undefined);
+  for (const s of spans().filter((s) => s !== a))
+    assert.equal(s.parentSpanContext.spanId, a.spanContext().spanId);
+  assertContract();
 });
-
-test("wraps Thread.runStreamed and emits spans after stream consumption", async () => {
-  captureState.spans = [];
-  const sdk = createFakeSDK();
-  const instrumentor = new CodexSDKInstrumentor({ sdkModule: sdk });
-  await instrumentor.activate();
-
-  const thread = new sdk.Thread();
-  const streamed = await thread.runStreamed("Stream a concise result.");
-  const eventTypes = [];
-  for await (const event of streamed.events) {
-    eventTypes.push(event.type);
-  }
-
-  assert.deepEqual(eventTypes, [
-    "thread.started",
-    "item.started",
-    "item.completed",
-    "item.completed",
-    "turn.completed",
-  ]);
-  assert.equal(captureState.spans.length, 4);
-
-  const chatSpan = spanByLogType("chat");
-  const commandSpan = captureState.spans.find((span) => span.name === "codex.command");
-  assert.ok(chatSpan);
-  assert.ok(commandSpan);
-  assert.equal(chatSpan.attributes["gen_ai.completion.0.content"], "Streaming turn complete.");
-  assert.equal(chatSpan.attributes["gen_ai.usage.prompt_tokens"], 12);
-  assert.equal(chatSpan.attributes["gen_ai.usage.completion_tokens"], 4);
-  assert.equal(commandSpan.attributes["respan.threads.thread_identifier"], "thread_stream_123");
-
-  for (const span of captureState.spans) {
-    assertNoBannedAliases(span);
-  }
-
-  instrumentor.deactivate();
+test("native MCP input/result retain false zero null definitions vector image and _meta", async () => {
+  await activate();
+  await thread().run("controlled");
+  const m = spans().find((s) => metadata(s).codex_item_id === "mcp-1");
+  const input = JSON.parse(m.attributes["traceloop.entity.input"]);
+  const output = JSON.parse(m.attributes["traceloop.entity.output"]);
+  assert.equal(input.name, "mcp__fixture__lookup");
+  assert.equal(input.arguments.definitions.length, 82);
+  assert.equal(input.arguments.false, false);
+  assert.equal(input.arguments.zero, 0);
+  assert.equal(input.arguments.empty, "");
+  assert.equal(input.arguments.nullable, null);
+  assert.equal(output.structured_content.vector.length, 5001);
+  assert.equal(output.content[1].type, "image");
+  assert.deepEqual(output._meta, latest ? { controlled: true } : undefined);
+  assertContract();
 });
-
-
-test("failed turns add backend status attrs", async () => {
-  captureState.spans = [];
-  const sdk = createFakeSDK();
-  sdk.Thread.prototype.run = async function runFailed() {
-    throw new Error("Codex unavailable");
+test("native multimodal input retains typed local_image parts and order", async () => {
+  await activate();
+  await thread().run([
+    { type: "text", text: "first" },
+    { type: "local_image", path: "/controlled/image.png" },
+    { type: "text", text: "last" },
+  ]);
+  assert.deepEqual(
+    JSON.parse(agent().attributes["traceloop.entity.input"])[0].content,
+    [
+      { type: "text", text: "first" },
+      { type: "local_image", path: "/controlled/image.png" },
+      { type: "text", text: "last" },
+    ],
+  );
+});
+test("native streamed iterator retains identity and event objects", async () => {
+  await activate();
+  const t = thread();
+  const result = await t.runStreamed("controlled");
+  const iterator = result.events;
+  assert.equal(iterator[Symbol.asyncIterator](), iterator);
+  const first = await iterator.next();
+  assert.equal(first.value.type, "thread.started");
+  for await (const e of iterator) assert.ok(e.type);
+  assert.equal(result.events, iterator);
+  assert.equal(spans().length, 8);
+  assertContract();
+});
+test("native buffered failure keeps observed tool then native throw and ERROR agent", async () => {
+  await activate();
+  await assert.rejects(
+    thread("failure").run("controlled"),
+    /controlled turn failure/,
+  );
+  assert.equal(spans().length, 2);
+  assert.equal(agent().status.code, 2);
+  assert.equal(agent().attributes["traceloop.entity.output"], undefined);
+});
+test("native streamed failure remains an event and does not become an adapter throw", async () => {
+  await activate();
+  const { events } = await thread("failure").runStreamed("controlled");
+  const collected = [];
+  for await (const e of events) collected.push(e);
+  assert.equal(collected.at(-1).type, "turn.failed");
+  assert.equal(agent().status.code, 2);
+});
+test("native nonfatal ErrorItem marks only actual task error", async () => {
+  await activate();
+  await thread().run("controlled");
+  assert.equal(agent().status.code, 0);
+  const err = spans().find((s) => metadata(s).codex_item_type === "error");
+  assert.equal(err.status.code, 2);
+});
+for (const scenario of ["invalid-json", "process-error"])
+  test(`native ${scenario} throw parity`, async () => {
+    const bare = await thread(scenario)
+      .run("controlled")
+      .catch((e) => e);
+    await activate();
+    const wrapped = await thread(scenario)
+      .run("controlled")
+      .catch((e) => e);
+    assert.equal(wrapped.message, bare.message);
+    assert.equal(agent().status.code, 2);
+  });
+test("native stream error preserves event and final ERROR", async () => {
+  await activate();
+  const { events } = await thread("stream-error").runStreamed("controlled");
+  for await (const _ of events) {
+  }
+  assert.equal(agent().status.code, 2);
+});
+test("native early iterator return drains the started agent exactly once", async () => {
+  await activate();
+  const { events } = await thread().runStreamed("controlled");
+  await events.next();
+  await events.return();
+  await events.return();
+  assert.equal(spans().length, 1);
+  assert.equal(agent().status.code, 0);
+});
+test("native iterator return before first next closes admitted turn", async () => {
+  await activate();
+  const { events } = await thread().runStreamed("controlled");
+  await events.return();
+  assert.equal(spans().length, 1);
+});
+test("native AbortSignal rejection is preserved and closes actual span", async () => {
+  await activate();
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    thread().run("controlled", { signal: controller.signal }),
+    (e) => e.name === "AbortError",
+  );
+  assert.equal(agent().status.code, 2);
+});
+test("native schema is passed unchanged and response text retained", async () => {
+  const request = path.join(
+    await fs.mkdtemp(path.join(os.tmpdir(), "t7-codex-schema-")),
+    "request.json",
+  );
+  await activate();
+  const schema = {
+    type: "object",
+    properties: { ok: { type: "boolean" } },
+    required: ["ok"],
   };
-  const instrumentor = new CodexSDKInstrumentor({ sdkModule: sdk });
-  await instrumentor.activate();
-
-  const thread = new sdk.Thread();
-  await assert.rejects(() => thread.run("fail"), /Codex unavailable/);
-
-  const chatSpan = spanByLogType("chat");
-  const agentSpan = spanByLogType("agent");
-  assert.ok(chatSpan);
-  assert.ok(agentSpan);
-  assert.equal(chatSpan.attributes.status_code, 500);
-  assert.equal(chatSpan.attributes["error.message"], "Codex unavailable");
-  assert.equal(agentSpan.attributes.status_code, 500);
-
-  for (const span of captureState.spans) {
-    assertNoBannedAliases(span);
+  const r = await thread("structured", {
+    CODEX_FIXTURE_REQUEST_PATH: request,
+  }).run("structured", { outputSchema: schema });
+  assert.equal(r.finalResponse, '{"ok":true,"value":0}');
+  assert.deepEqual(
+    JSON.parse(await fs.readFile(request, "utf8")).schema,
+    schema,
+  );
+});
+test("native resumed thread identity is retained", async () => {
+  await activate();
+  const c = codex();
+  const first = c.startThread();
+  await first.run("first");
+  await c.resumeThread(first.id).run("second");
+  assert.equal(
+    spans().filter((s) => s.attributes["respan.entity.log_type"] === "agent")
+      .length,
+    2,
+  );
+  assert.ok(
+    spans().every(
+      (s) =>
+        s.attributes["respan.entity.log_type"] !== "agent" ||
+        s.attributes["respan.threads.thread_identifier"] === first.id,
+    ),
+  );
+});
+test("native empty finalResponse stays an explicit empty value", async () => {
+  await activate();
+  await thread("empty").run("controlled");
+  assert.equal(agent().attributes["traceloop.entity.output"], '""');
+});
+for (const value of [SamplingDecision.NOT_RECORD, SamplingDecision.RECORD])
+  test(`actual sampler ${value} avoids adapter payload getters`, async () => {
+    decision = value;
+    await activate();
+    let reads = 0;
+    const input = [
+      {
+        type: "text",
+        get text() {
+          reads++;
+          return "native-input";
+        },
+        get extra() {
+          throw new Error("adapter getter");
+        },
+      },
+    ];
+    await thread().run(input);
+    assert.equal(reads, 1);
+    assert.equal(spans().length, 0);
+    assert.ok(
+      !JSON.stringify(starts.map((s) => s.attributes)).includes(
+        "controlled MCP result",
+      ),
+    );
+    assert.equal(samples.length, 8);
+  });
+for (const lane of [
+  "option",
+  "respan-env",
+  "traceloop-env",
+  "context",
+  "suppression",
+  "parent",
+])
+  test(`${lane} privacy ceiling suppresses actual span payload`, async () => {
+    if (lane === "respan-env") process.env.RESPAN_TRACE_CONTENT = "false";
+    if (lane === "traceloop-env") process.env.TRACELOOP_TRACE_CONTENT = "false";
+    await activate(lane === "option" ? { traceContent: false } : {});
+    let ctx = context.active();
+    if (lane === "context")
+      ctx = ctx.setValue(CONTEXT_KEY_ALLOW_TRACE_CONTENT, false);
+    if (lane === "suppression") ctx = suppressTracing(ctx);
+    if (lane === "parent") {
+      const p = trace.getTracer("test").startSpan("parent");
+      p.setAttribute("allow_trace_content", false);
+      ctx = trace.setSpan(ctx, p);
+    }
+    await context.with(ctx, () => thread().run("private input"));
+    for (const s of spans()) {
+      assert.equal(s.attributes["traceloop.entity.input"], undefined);
+      assert.equal(s.attributes["traceloop.entity.output"], undefined);
+    }
+    if (lane !== "suppression")
+      assert.equal(metadata(agent()).codex_turn_usage.cached_input_tokens, 4);
+    else assert.equal(spans().length, 0);
+  });
+test("late actual parent false cannot be restored by true", async () => {
+  await activate();
+  const parent = trace.getTracer("test").startSpan("parent");
+  const streamed = await context.with(
+    trace.setSpan(context.active(), parent),
+    () => thread().runStreamed("private input"),
+  );
+  await streamed.events.next();
+  parent.setAttribute("allow_trace_content", false);
+  await streamed.events.next();
+  parent.setAttribute("allow_trace_content", true);
+  for await (const _ of streamed.events) {
   }
+  assert.equal(agent().attributes["traceloop.entity.input"], undefined);
+  assert.ok(
+    spans().every((s) => s.attributes["traceloop.entity.output"] === undefined),
+  );
+});
+test("actual recording span blocks late payload attributes events and status", async () => {
+  await activate({ traceContent: false });
+  onStart = (s) => {
+    if (s.name === "codex-agent")
+      setTimeout(() => {
+        s.setAttribute("private", ["secret"]);
+        s.addEvent("secret", { private: "secret" });
+        s.setStatus({ code: 2, message: "secret" });
+        s.attributes["private-direct"] = "secret";
+        s.events = [{ name: "secret" }];
+        s.status = { code: 2, message: "secret" };
+      }, 0);
+  };
+  await thread().run("controlled");
+  assert.ok(
+    !JSON.stringify(
+      spans().map((s) => ({
+        attrs: s.attributes,
+        events: s.events,
+        status: s.status,
+      })),
+    ).includes("secret"),
+  );
+});
+test("deactivation drains original buffered call and restores public methods", async () => {
+  const original = native.Thread.prototype.run;
+  const owner = await activate();
+  const pending = thread().run("controlled");
+  owner.deactivate();
+  await pending;
+  assert.equal(native.Thread.prototype.run, original);
+  assert.equal(spans().length, 8);
+});
+test("two owners apply most restrictive content and remaining owner recovers", async () => {
+  const a = await activate();
+  const b = await activate({ traceContent: false });
+  await thread().run("first");
+  assert.equal(agent().attributes["traceloop.entity.input"], undefined);
+  b.deactivate();
+  exporter.reset();
+  await thread().run("second");
+  assert.ok(agent().attributes["traceloop.entity.input"]);
+  assert.equal(a.isActive(), true);
+});
+test("activation coalesces and pending cancellation allows later reactivation", async () => {
+  const owner = new CodexSDKInstrumentor();
+  owners.push(owner);
+  const a = owner.activate();
+  assert.equal(owner.activate(), a);
+  owner.deactivate();
+  await a;
+  assert.equal(owner.isActive(), false);
+  await owner.activate();
+  assert.equal(owner.isActive(), true);
+});
+test("foreign method replacement is retained after deactivation", async () => {
+  const original = native.Thread.prototype.run;
+  const owner = await activate();
+  const foreign = function () {
+    return "foreign";
+  };
+  native.Thread.prototype.run = foreign;
+  owner.deactivate();
+  assert.equal(native.Thread.prototype.run, foreign);
+  native.Thread.prototype.run = original;
+});
+test("captureItemSpans false emits only actual turn", async () => {
+  await activate({ captureItemSpans: false });
+  await thread().run("controlled");
+  assert.equal(spans().length, 1);
+});
+test(
+  "current native configOverrides threadSource and cyber program reach transport",
+  { skip: !latest },
+  async () => {
+    const request = path.join(
+      await fs.mkdtemp(path.join(os.tmpdir(), "t7-codex-current-")),
+      "request.json",
+    );
+    await activate();
+    const c = new native.Codex({
+      codexPathOverride: fixture,
+      configOverrides: ['controlled_flag="raw"'],
+      env: {
+        PATH: process.env.PATH,
+        CODEX_FIXTURE_REQUEST_PATH: request,
+        CODEX_FIXTURE_CACHE_WRITE: "1",
+      },
+    });
+    await c
+      .startThread({
+        threadSource: "controlled-source",
+        modelReasoningEffort: "ultra",
+      })
+      .run("controlled", { cyberAccessProgram: "standard" });
+    const { args } = JSON.parse(await fs.readFile(request, "utf8"));
+    assert.ok(args.includes('controlled_flag="raw"'));
+    assert.ok(args.some((v) => v.includes("controlled-source")));
+    assert.ok(args.some((v) => v.includes("standard")));
+    assert.equal(
+      metadata(agent()).codex_turn_usage.cache_write_input_tokens,
+      2,
+    );
+  },
+);
 
-  instrumentor.deactivate();
+test("independently loaded native SDK prototypes have independent patch owners", async () => {
+  const moduleURL =
+    process.env.CODEX_NATIVE_MODULE ?? import.meta.resolve("@openai/codex-sdk");
+  const second = await import(moduleURL + "?independent=1");
+  assert.notEqual(second.Thread, native.Thread);
+  const original = second.Thread.prototype.run;
+  const first = await activate();
+  const other = new CodexSDKInstrumentor({ sdkModule: second });
+  owners.push(other);
+  await other.activate();
+  await new second.Codex({
+    codexPathOverride: fixture,
+    env: { PATH: process.env.PATH },
+  })
+    .startThread()
+    .run("controlled");
+  first.deactivate();
+  assert.notEqual(second.Thread.prototype.run, original);
+  other.deactivate();
+  assert.equal(second.Thread.prototype.run, original);
+  assert.equal(spans().length, 8);
+});
+test("late consuming context false vetoes captured content permanently", async () => {
+  await activate();
+  const stream = await thread().runStreamed("private initial input");
+  await stream.events.next();
+  await context.with(
+    context.active().setValue(CONTEXT_KEY_ALLOW_TRACE_CONTENT, false),
+    () => stream.events.next(),
+  );
+  for await (const _ of stream.events) {
+  }
+  assert.equal(agent().attributes["traceloop.entity.input"], undefined);
+  assert.ok(
+    spans().every((s) => s.attributes["traceloop.entity.output"] === undefined),
+  );
+});
+test("canonical inherited metadata merges without flattened aliases", async () => {
+  onStart = (s) =>
+    s.setAttribute(
+      "respan.metadata",
+      JSON.stringify({ run_id: "controlled-run", nested: { zero: 0 } }),
+    );
+  await activate();
+  await thread().run("controlled");
+  assert.equal(metadata(agent()).run_id, "controlled-run");
+  assert.deepEqual(metadata(agent()).nested, { zero: 0 });
+  assert.ok(
+    !Object.keys(agent().attributes).some((k) =>
+      k.startsWith("respan.metadata."),
+    ),
+  );
+});
+test("nonconfigurable actual span attributes obey privacy finalization", async () => {
+  onStart = (s) => {
+    s.setAttribute("private-constructor", "secret constructor");
+    Object.defineProperty(s, "attributes", {
+      value: s.attributes,
+      writable: true,
+      configurable: false,
+    });
+  };
+  await activate({ traceContent: false });
+  await thread().run("controlled");
+  assert.ok(
+    spans().every((s) => s.attributes["private-constructor"] === undefined),
+  );
 });

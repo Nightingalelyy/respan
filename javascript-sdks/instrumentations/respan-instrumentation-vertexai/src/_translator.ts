@@ -1,3 +1,4 @@
+import { types } from "node:util";
 import {
   ARGS_KEY,
   ASSISTANT_ROLE,
@@ -63,50 +64,30 @@ export function safeJson(value: unknown): string {
   }
 }
 
-export function toSerializableValue(value: any): any {
-  if (value === null) return null;
-  if (value === undefined) return undefined;
+export function toSerializableValue(
+  value: any,
+  seen = new WeakSet<object>(),
+): any {
   if (
+    value === null ||
+    value === undefined ||
     typeof value === "string" ||
-    typeof value === "number" ||
-    typeof value === "boolean"
-  ) {
+    typeof value === "boolean" ||
+    typeof value === "number"
+  )
     return value;
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value !== "object" || types.isProxy(value)) return undefined;
+  if (seen.has(value)) return "[Circular]";
+  seen.add(value);
+  const result: any = Array.isArray(value) ? [] : {};
+  for (const key of Object.keys(value)) {
+    const d = Object.getOwnPropertyDescriptor(value, key);
+    if (d && "value" in d && typeof d.value !== "function")
+      result[key] = toSerializableValue(d.value, seen);
   }
-  if (typeof value === "bigint") {
-    return value.toString();
-  }
-  if (value instanceof Date) {
-    return value.toISOString();
-  }
-  if (Array.isArray(value)) {
-    return value.map((item) => toSerializableValue(item));
-  }
-  if (typeof value === "object") {
-    if (typeof value.toJSON === "function") {
-      try {
-        return toSerializableValue(value.toJSON());
-      } catch {
-        // Continue with a structural copy.
-      }
-    }
-    if (typeof value.toObject === "function") {
-      try {
-        return toSerializableValue(value.toObject());
-      } catch {
-        // Continue with a structural copy.
-      }
-    }
-
-    const normalized: Record<string, unknown> = {};
-    for (const [key, itemValue] of Object.entries(value as Record<string, unknown>)) {
-      if (itemValue !== undefined) {
-        normalized[key] = toSerializableValue(itemValue);
-      }
-    }
-    return normalized;
-  }
-  return String(value);
+  seen.delete(value);
+  return result;
 }
 
 export function toJsonAttr(value: unknown): string {
@@ -143,24 +124,33 @@ function role(value: unknown, defaultRole = USER_ROLE): string {
 }
 
 function isContentLike(value: unknown): boolean {
-  return Boolean(value && typeof value === "object" && (
-    getField(value, PARTS_KEY) !== undefined ||
-    getField(value, ROLE_KEY) !== undefined
-  ));
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    (getField(value, PARTS_KEY) !== undefined ||
+      getField(value, ROLE_KEY) !== undefined),
+  );
 }
 
 function isPartLike(value: unknown): boolean {
   if (typeof value === "string") return true;
-  return Boolean(value && typeof value === "object" && (
-    getField(value, TEXT_KEY) !== undefined ||
-    getField(value, FUNCTION_CALL_KEY, FUNCTION_CALL_SNAKE_KEY) !== undefined ||
-    getField(value, FUNCTION_RESPONSE_KEY, FUNCTION_RESPONSE_SNAKE_KEY) !== undefined ||
-    getField(value, "inlineData", "inline_data") !== undefined ||
-    getField(value, "fileData", "file_data") !== undefined
-  ));
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    (getField(value, TEXT_KEY) !== undefined ||
+      getField(value, FUNCTION_CALL_KEY, FUNCTION_CALL_SNAKE_KEY) !==
+        undefined ||
+      getField(value, FUNCTION_RESPONSE_KEY, FUNCTION_RESPONSE_SNAKE_KEY) !==
+        undefined ||
+      getField(value, "inlineData", "inline_data") !== undefined ||
+      getField(value, "fileData", "file_data") !== undefined),
+  );
 }
 
-function normalizeFunctionCall(value: any): Record<string, unknown> {
+function normalizeFunctionCall(
+  value: any,
+  part?: unknown,
+): Record<string, unknown> {
   const functionCall: Record<string, any> = {
     [TYPE_KEY]: FUNCTION_TOOL_TYPE,
     [FUNCTION_KEY]: {},
@@ -173,12 +163,20 @@ function normalizeFunctionCall(value: any): Record<string, unknown> {
 
   const args = getField(value, ARGS_KEY);
   if (args !== undefined) {
-    functionCall[FUNCTION_KEY].arguments = toJsonAttr(toSerializableValue(args));
+    functionCall[FUNCTION_KEY].arguments = toJsonAttr(
+      toSerializableValue(args),
+    );
   }
+  const signature = getField(part, "thoughtSignature", "thought_signature");
+  if (signature !== undefined)
+    functionCall.thoughtSignature = toSerializableValue(signature);
   return functionCall;
 }
 
-function normalizeFunctionResponse(value: any): Record<string, unknown> {
+function normalizeFunctionResponse(
+  value: any,
+  part?: unknown,
+): Record<string, unknown> {
   const result: Record<string, any> = {
     [TYPE_KEY]: "function_response",
     [FUNCTION_KEY]: {},
@@ -186,10 +184,18 @@ function normalizeFunctionResponse(value: any): Record<string, unknown> {
   const name = getField(value, NAME_KEY);
   if (name) result[FUNCTION_KEY][NAME_KEY] = name;
 
+  const callId = getField(value, ID_KEY);
+  if (callId !== undefined) result[ID_KEY] = callId;
   const response = getField(value, RESPONSE_KEY);
   if (response !== undefined) {
     result[FUNCTION_KEY][RESPONSE_KEY] = toSerializableValue(response);
   }
+  const parts = getField(value, PARTS_KEY);
+  if (parts !== undefined)
+    result[FUNCTION_KEY][PARTS_KEY] = toSerializableValue(parts);
+  const signature = getField(part, "thoughtSignature", "thought_signature");
+  if (signature !== undefined)
+    result.thoughtSignature = toSerializableValue(signature);
   return result;
 }
 
@@ -197,26 +203,45 @@ function normalizePart(part: unknown): unknown {
   if (typeof part === "string") return part;
 
   const text = getField(part, TEXT_KEY);
-  if (text !== undefined) return text;
+  if (text !== undefined)
+    return part &&
+      typeof part === "object" &&
+      Object.keys(part).some((key) => key !== TEXT_KEY)
+      ? toSerializableValue(part)
+      : text;
 
-  const functionCall = getField(part, FUNCTION_CALL_KEY, FUNCTION_CALL_SNAKE_KEY);
+  const functionCall = getField(
+    part,
+    FUNCTION_CALL_KEY,
+    FUNCTION_CALL_SNAKE_KEY,
+  );
   if (functionCall !== undefined) {
-    return normalizeFunctionCall(functionCall);
+    return normalizeFunctionCall(functionCall, part);
   }
 
-  const functionResponse = getField(part, FUNCTION_RESPONSE_KEY, FUNCTION_RESPONSE_SNAKE_KEY);
+  const functionResponse = getField(
+    part,
+    FUNCTION_RESPONSE_KEY,
+    FUNCTION_RESPONSE_SNAKE_KEY,
+  );
   if (functionResponse !== undefined) {
-    return normalizeFunctionResponse(functionResponse);
+    return normalizeFunctionResponse(functionResponse, part);
   }
 
   const inlineData = getField(part, "inlineData", "inline_data");
   if (inlineData !== undefined) {
-    return { [TYPE_KEY]: "inline_data", inline_data: toSerializableValue(inlineData) };
+    return {
+      [TYPE_KEY]: "inline_data",
+      inline_data: toSerializableValue(inlineData),
+    };
   }
 
   const fileData = getField(part, "fileData", "file_data");
   if (fileData !== undefined) {
-    return { [TYPE_KEY]: "file_data", file_data: toSerializableValue(fileData) };
+    return {
+      [TYPE_KEY]: "file_data",
+      file_data: toSerializableValue(fileData),
+    };
   }
 
   return toSerializableValue(part);
@@ -238,7 +263,10 @@ function normalizeParts(parts: unknown): unknown {
   return normalizedParts;
 }
 
-function normalizeContent(content: unknown, defaultRole = USER_ROLE): Record<string, unknown> {
+function normalizeContent(
+  content: unknown,
+  defaultRole = USER_ROLE,
+): Record<string, unknown> {
   if (typeof content === "string") {
     return { [ROLE_KEY]: defaultRole, [CONTENT_KEY]: content };
   }
@@ -262,7 +290,10 @@ export function normalizeInputMessages(
     messages.push(
       isContentLike(systemInstruction)
         ? normalizeContent(systemInstruction, SYSTEM_ROLE)
-        : { [ROLE_KEY]: SYSTEM_ROLE, [CONTENT_KEY]: normalizeParts(systemInstruction) },
+        : {
+            [ROLE_KEY]: SYSTEM_ROLE,
+            [CONTENT_KEY]: normalizeParts(systemInstruction),
+          },
     );
   }
 
@@ -276,7 +307,10 @@ export function normalizeInputMessages(
     return messages;
   }
   if (isPartLike(contents)) {
-    messages.push({ [ROLE_KEY]: USER_ROLE, [CONTENT_KEY]: normalizePart(contents) });
+    messages.push({
+      [ROLE_KEY]: USER_ROLE,
+      [CONTENT_KEY]: normalizePart(contents),
+    });
     return messages;
   }
   if (Array.isArray(contents)) {
@@ -284,15 +318,24 @@ export function normalizeInputMessages(
       messages.push(...contents.map((item) => normalizeContent(item)));
       return messages;
     }
-    messages.push({ [ROLE_KEY]: USER_ROLE, [CONTENT_KEY]: normalizeParts(contents) });
+    messages.push({
+      [ROLE_KEY]: USER_ROLE,
+      [CONTENT_KEY]: normalizeParts(contents),
+    });
     return messages;
   }
 
-  messages.push({ [ROLE_KEY]: USER_ROLE, [CONTENT_KEY]: toSerializableValue(contents) });
+  messages.push({
+    [ROLE_KEY]: USER_ROLE,
+    [CONTENT_KEY]: toSerializableValue(contents),
+  });
   return messages;
 }
 
-export function formatInput(contents: unknown, systemInstruction?: unknown): string {
+export function formatInput(
+  contents: unknown,
+  systemInstruction?: unknown,
+): string {
   return safeJson(normalizeInputMessages(contents, systemInstruction));
 }
 
@@ -335,20 +378,34 @@ export function formatOutput(responseOrChunks: unknown): string {
   return responseText(responseOrChunks);
 }
 
-export function extractUsage(responseOrChunks: unknown): Record<string, number> {
+export function extractUsage(
+  responseOrChunks: unknown,
+): Record<string, number> {
   let response = responseOrChunks;
   if (Array.isArray(responseOrChunks)) {
-    response = [...responseOrChunks]
-      .reverse()
-      .find((chunk) => getField(chunk, USAGE_METADATA_KEY, USAGE_METADATA_SNAKE_KEY) !== undefined)
-      ?? responseOrChunks.at(-1);
+    response =
+      [...responseOrChunks]
+        .reverse()
+        .find(
+          (chunk) =>
+            getField(chunk, USAGE_METADATA_KEY, USAGE_METADATA_SNAKE_KEY) !==
+            undefined,
+        ) ?? responseOrChunks.at(-1);
   }
 
-  const usage = getField(response, USAGE_METADATA_KEY, USAGE_METADATA_SNAKE_KEY);
+  const usage = getField(
+    response,
+    USAGE_METADATA_KEY,
+    USAGE_METADATA_SNAKE_KEY,
+  );
   if (!usage) return {};
 
   const result: Record<string, number> = {};
-  const promptTokens = getField(usage, PROMPT_TOKEN_COUNT_KEY, PROMPT_TOKEN_COUNT_SNAKE_KEY);
+  const promptTokens = getField(
+    usage,
+    PROMPT_TOKEN_COUNT_KEY,
+    PROMPT_TOKEN_COUNT_SNAKE_KEY,
+  );
   const completionTokens = getField(
     usage,
     CANDIDATES_TOKEN_COUNT_KEY,
@@ -359,20 +416,31 @@ export function extractUsage(responseOrChunks: unknown): Record<string, number> 
     THOUGHTS_TOKEN_COUNT_KEY,
     THOUGHTS_TOKEN_COUNT_SNAKE_KEY,
   );
-  const totalTokens = getField(usage, TOTAL_TOKEN_COUNT_KEY, TOTAL_TOKEN_COUNT_SNAKE_KEY);
+  const totalTokens = getField(
+    usage,
+    TOTAL_TOKEN_COUNT_KEY,
+    TOTAL_TOKEN_COUNT_SNAKE_KEY,
+  );
 
-  if (typeof promptTokens === "number") result[PROMPT_TOKEN_COUNT_KEY] = promptTokens;
+  if (typeof promptTokens === "number")
+    result[PROMPT_TOKEN_COUNT_KEY] = promptTokens;
   if (typeof completionTokens === "number") {
     // Gemini reports thought tokens separately, but output usage includes them.
     result[CANDIDATES_TOKEN_COUNT_KEY] =
-      completionTokens + (typeof thoughtsTokens === "number" ? thoughtsTokens : 0);
+      completionTokens +
+      (typeof thoughtsTokens === "number" ? thoughtsTokens : 0);
   }
-  if (typeof totalTokens === "number") result[TOTAL_TOKEN_COUNT_KEY] = totalTokens;
+  if (typeof totalTokens === "number")
+    result[TOTAL_TOKEN_COUNT_KEY] = totalTokens;
   return result;
 }
 
-export function extractToolCalls(responseOrChunks: unknown): Array<Record<string, unknown>> {
-  const chunks = Array.isArray(responseOrChunks) ? responseOrChunks : [responseOrChunks];
+export function extractToolCalls(
+  responseOrChunks: unknown,
+): Array<Record<string, unknown>> {
+  const chunks = Array.isArray(responseOrChunks)
+    ? responseOrChunks
+    : [responseOrChunks];
   const toolCalls: Array<Record<string, unknown>> = [];
   const seen = new Set<string>();
 
@@ -381,9 +449,13 @@ export function extractToolCalls(responseOrChunks: unknown): Array<Record<string
       const parts = getField(content, PARTS_KEY) ?? [];
       if (!Array.isArray(parts)) continue;
       for (const part of parts) {
-        const functionCall = getField(part, FUNCTION_CALL_KEY, FUNCTION_CALL_SNAKE_KEY);
+        const functionCall = getField(
+          part,
+          FUNCTION_CALL_KEY,
+          FUNCTION_CALL_SNAKE_KEY,
+        );
         if (functionCall === undefined || functionCall === null) continue;
-        const normalized = normalizeFunctionCall(functionCall);
+        const normalized = normalizeFunctionCall(functionCall, part);
         const functionValue = normalized[FUNCTION_KEY];
         if (
           !functionValue ||
@@ -403,7 +475,9 @@ export function extractToolCalls(responseOrChunks: unknown): Array<Record<string
   return toolCalls;
 }
 
-function functionDeclarationTool(definition: unknown): Record<string, unknown> | undefined {
+function functionDeclarationTool(
+  definition: unknown,
+): Record<string, unknown> | undefined {
   const name = getField(definition, NAME_KEY);
   if (!name) return undefined;
 
@@ -411,11 +485,26 @@ function functionDeclarationTool(definition: unknown): Record<string, unknown> |
   const description = getField(definition, "description");
   if (description) functionValue.description = description;
 
-  const parameters = getField(definition, PARAMETERS_KEY);
+  const parameters = getField(
+    definition,
+    PARAMETERS_KEY,
+    "parametersJsonSchema",
+    "parameters_json_schema",
+  );
   if (parameters !== undefined) {
     functionValue[PARAMETERS_KEY] = toSerializableValue(parameters);
   }
 
+  const response = getField(definition, RESPONSE_KEY);
+  if (response !== undefined)
+    functionValue[RESPONSE_KEY] = toSerializableValue(response);
+  const responseJsonSchema = getField(
+    definition,
+    "responseJsonSchema",
+    "response_json_schema",
+  );
+  if (responseJsonSchema !== undefined)
+    functionValue.responseJsonSchema = toSerializableValue(responseJsonSchema);
   return { [TYPE_KEY]: FUNCTION_TOOL_TYPE, [FUNCTION_KEY]: functionValue };
 }
 
@@ -451,7 +540,7 @@ function firstArg(args: unknown[]): unknown {
 function requestObjectFromArgs(args: unknown[]): Record<string, any> {
   const value = firstArg(args);
   return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, any>
+    ? (value as Record<string, any>)
     : {};
 }
 
@@ -473,8 +562,15 @@ function modelName(instance: any): string | undefined {
   return undefined;
 }
 
-function systemInstruction(instance: any, request: Record<string, any>): unknown {
-  const requestValue = getField(request, SYSTEM_INSTRUCTION_KEY, SYSTEM_INSTRUCTION_SNAKE_KEY);
+function systemInstruction(
+  instance: any,
+  request: Record<string, any>,
+): unknown {
+  const requestValue = getField(
+    request,
+    SYSTEM_INSTRUCTION_KEY,
+    SYSTEM_INSTRUCTION_SNAKE_KEY,
+  );
   if (requestValue !== undefined) return requestValue;
 
   const instanceValue = getField(
@@ -486,7 +582,12 @@ function systemInstruction(instance: any, request: Record<string, any>): unknown
   );
   if (instanceValue !== undefined) return instanceValue;
 
-  const nestedModel = getField(instance, "model", "generativeModel", "modelInstance");
+  const nestedModel = getField(
+    instance,
+    "model",
+    "generativeModel",
+    "modelInstance",
+  );
   if (nestedModel && nestedModel !== instance) {
     return systemInstruction(nestedModel, request);
   }
@@ -500,14 +601,22 @@ function tools(instance: any, request: Record<string, any>): unknown {
   const instanceTools = getField(instance, TOOLS_KEY, "_tools");
   if (instanceTools !== undefined) return instanceTools;
 
-  const nestedModel = getField(instance, "model", "generativeModel", "modelInstance");
+  const nestedModel = getField(
+    instance,
+    "model",
+    "generativeModel",
+    "modelInstance",
+  );
   if (nestedModel && nestedModel !== instance) {
     return tools(nestedModel, request);
   }
   return undefined;
 }
 
-function generationConfig(instance: any, request: Record<string, any>): unknown {
+function generationConfig(
+  instance: any,
+  request: Record<string, any>,
+): unknown {
   return firstDefined(
     getField(request, GENERATION_CONFIG_KEY, GENERATION_CONFIG_SNAKE_KEY),
     getField(instance, GENERATION_CONFIG_KEY, GENERATION_CONFIG_SNAKE_KEY),
