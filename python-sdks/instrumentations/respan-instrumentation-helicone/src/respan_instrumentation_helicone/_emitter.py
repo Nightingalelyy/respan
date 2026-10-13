@@ -12,7 +12,8 @@ from dataclasses import dataclass
 from itertools import islice
 from typing import Any
 
-from opentelemetry import trace
+from opentelemetry import context, trace
+from opentelemetry.context import Context
 from opentelemetry.semconv._incubating.attributes.error_attributes import (
     ERROR_MESSAGE,
     ERROR_TYPE,
@@ -28,6 +29,8 @@ from opentelemetry.semconv.attributes.http_attributes import (
     HTTP_RESPONSE_STATUS_CODE,
 )
 from opentelemetry.semconv_ai import SpanAttributes
+from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
+from opentelemetry.trace.status import Status, StatusCode
 from respan_sdk.constants.llm_logging import (
     LOG_TYPE_CHAT,
     LOG_TYPE_EMBEDDING,
@@ -49,11 +52,7 @@ from respan_sdk.utils.data_processing.id_processing import (
     format_span_id,
     format_trace_id,
 )
-from respan_tracing.utils.span_factory import (
-    build_readable_span,
-    inject_span,
-    read_propagated_attributes,
-)
+from respan_tracing.utils.span_factory import read_propagated_attributes
 
 from respan_instrumentation_helicone._constants import (
     HELICONE_DATA_NAME_KEY,
@@ -66,6 +65,11 @@ from respan_instrumentation_helicone._constants import (
     HELICONE_TYPE_VECTOR_DB,
     MAX_COLLECTION_ITEMS,
     MAX_DEPTH,
+)
+from respan_instrumentation_helicone._policy import (
+    CapturePolicy,
+    capture_policy,
+    observe_policy,
 )
 from respan_instrumentation_helicone._serialization import (
     exception_message,
@@ -92,6 +96,114 @@ class HeliconeEmissionContext:
     trace_id: str | None
     parent_id: str | None
     propagated_attributes: Mapping[str, Any]
+    otel_context: Context | None = None
+    policy: CapturePolicy | None = None
+
+
+@dataclass
+class HeliconeCall:
+    snapshot: HeliconeEmissionContext
+    policy: CapturePolicy
+    span: Any = None
+    closed: bool = False
+
+
+def start_helicone_call(
+    request: Any,
+    *,
+    capture_content: bool,
+    owner: Any = None,
+    provider: str | None = None,
+    snapshot: HeliconeEmissionContext | None = None,
+    start_time_ns: int | None = None,
+) -> HeliconeCall:
+    try:
+        snapshot = snapshot or capture_emission_context(capture_content, owner=owner)
+        policy = snapshot.policy or capture_policy(capture_content, owner=owner)
+        observe_policy(policy)
+    except BaseException:
+        logger.debug("Failed to capture Helicone policy", exc_info=True)
+        return HeliconeCall(
+            snapshot=HeliconeEmissionContext(None, None, {}),
+            policy=CapturePolicy(False, False),
+        )
+    call = HeliconeCall(snapshot=snapshot, policy=policy)
+    if not policy.enabled:
+        return call
+    try:
+        request_map = request if isinstance(request, Mapping) else {}
+        event_type = request_map.get(HELICONE_TYPE_KEY)
+        kind = (
+            "tool"
+            if event_type == HELICONE_TYPE_TOOL
+            else (
+                "task"
+                if event_type in {HELICONE_TYPE_VECTOR_DB, HELICONE_TYPE_DATA}
+                else "llm"
+            )
+        )
+        model = request_map.get("model")
+        name = (
+            f"llm.{safe_text(model)[:128]}"
+            if kind == "llm" and isinstance(model, str)
+            else kind
+        )
+        log_type = (
+            LOG_TYPE_TOOL
+            if kind == "tool"
+            else LOG_TYPE_TASK
+            if kind == "task"
+            else (
+                LOG_TYPE_EMBEDDING
+                if event_type == HELICONE_TYPE_EMBEDDING
+                else LOG_TYPE_CHAT
+                if "messages" in request_map or "contents" in request_map
+                else LOG_TYPE_TEXT
+            )
+        )
+        initial_attributes = _base_attrs(
+            log_type=log_type,
+            entity_name="helicone.manual",
+            parent_id=snapshot.parent_id,
+        )
+        if isinstance(model, str) and model:
+            initial_attributes[SpanAttributes.LLM_REQUEST_MODEL] = safe_text(model)[
+                :128
+            ]
+        if provider is not None:
+            initial_attributes[GEN_AI_PROVIDER_NAME] = _label(provider, "custom")
+        parent_context = snapshot.otel_context
+        if parent_context is None and snapshot.trace_id and snapshot.parent_id:
+            parent_context = trace.set_span_in_context(
+                NonRecordingSpan(
+                    SpanContext(
+                        trace_id=int(snapshot.trace_id, 16),
+                        span_id=int(snapshot.parent_id, 16),
+                        is_remote=False,
+                        trace_flags=TraceFlags(TraceFlags.SAMPLED),
+                    )
+                )
+            )
+        call.span = trace.get_tracer("respan.instrumentation.helicone").start_span(
+            name,
+            context=parent_context,
+            start_time=start_time_ns,
+            attributes=initial_attributes,
+        )
+    except BaseException:
+        logger.debug("Failed to start Helicone span", exc_info=True)
+    return call
+
+
+def end_helicone_call(call: HeliconeCall, *, end_time_ns: int | None = None) -> None:
+    if call.closed:
+        return
+    call.closed = True
+    if call.span is not None:
+        try:
+            call.span.end(end_time=end_time_ns)
+        except BaseException:
+            logger.debug("Failed to end Helicone span", exc_info=True)
 
 
 def _label(value: Any, fallback: str) -> str:
@@ -177,7 +289,11 @@ def _snapshot_propagated_value(value: Any, *, depth: int = 0) -> Any:
     return value
 
 
-def capture_emission_context() -> HeliconeEmissionContext:
+def capture_emission_context(
+    capture_content: bool = True,
+    *,
+    owner: Any = None,
+) -> HeliconeEmissionContext:
     trace_id, parent_id = _current_ids()
     return HeliconeEmissionContext(
         trace_id=trace_id,
@@ -186,6 +302,8 @@ def capture_emission_context() -> HeliconeEmissionContext:
             key: _snapshot_propagated_value(value)
             for key, value in read_propagated_attributes().items()
         },
+        otel_context=context.get_current(),
+        policy=capture_policy(capture_content, owner=owner),
     )
 
 
@@ -935,14 +1053,18 @@ def _llm_attrs(
     if is_embedding:
         embedding_input, embedding_output = _embedding_values(request, response)
         attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = json_dumps(
-            embedding_input, preserve_large_vectors=True
+            embedding_input, preserve_large_vectors=True, preserve_full=True
         )
         attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = json_dumps(
-            embedding_output, preserve_large_vectors=True
+            embedding_output, preserve_large_vectors=True, preserve_full=True
         )
     else:
-        attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = json_dumps(request)
-        attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = json_dumps(response)
+        attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = json_dumps(
+            request, preserve_full=True
+        )
+        attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = json_dumps(
+            response, preserve_full=True
+        )
     for index, message in enumerate(_messages(request)):
         role = message.get("role")
         content = message.get("content")
@@ -956,7 +1078,9 @@ def _llm_attrs(
             attrs[f"{_PROMPT_PREFIX}{index}.tool_calls"] = json_dumps(tool_calls)
     tools = request.get("tools")
     if isinstance(tools, Sequence) and not isinstance(tools, str | bytes):
-        attrs[SpanAttributes.LLM_REQUEST_FUNCTIONS] = json_dumps(tools)
+        attrs[SpanAttributes.LLM_REQUEST_FUNCTIONS] = json_dumps(
+            tools, preserve_full=True
+        )
     if not is_embedding:
         output_message = _output_message(response)
         attrs[f"{_COMPLETION_PREFIX}0.role"] = "assistant"
@@ -991,9 +1115,11 @@ def _custom_attrs(
         if capture_content:
             arguments = request.get("input", request.get("arguments", request))
             attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = json_dumps(
-                {"name": name, "arguments": arguments}
+                {"name": name, "arguments": arguments}, preserve_full=True
             )
-            attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = json_dumps(response)
+            attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = json_dumps(
+                response, preserve_full=True
+            )
         return "tool", attrs
 
     if event_type == HELICONE_TYPE_VECTOR_DB:
@@ -1005,18 +1131,22 @@ def _custom_attrs(
         )
         if capture_content:
             attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = json_dumps(
-                request, preserve_large_vectors=True
+                request, preserve_large_vectors=True, preserve_full=True
             )
             attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = json_dumps(
-                response, preserve_large_vectors=True
+                response, preserve_large_vectors=True, preserve_full=True
             )
         return "task", attrs
 
     name = _display_text(request.get(HELICONE_DATA_NAME_KEY), "custom_data")
     attrs = _base_attrs(log_type=LOG_TYPE_TASK, entity_name=name, parent_id=parent_id)
     if capture_content:
-        attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = json_dumps(request)
-        attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = json_dumps(response)
+        attrs[SpanAttributes.TRACELOOP_ENTITY_INPUT] = json_dumps(
+            request, preserve_full=True
+        )
+        attrs[SpanAttributes.TRACELOOP_ENTITY_OUTPUT] = json_dumps(
+            response, preserve_full=True
+        )
     return "task", attrs
 
 
@@ -1032,10 +1162,34 @@ def emit_helicone_log(
     is_streaming: bool | None = None,
     context_snapshot: HeliconeEmissionContext | None = None,
     constructor_headers: Any = None,
+    call: HeliconeCall | None = None,
 ) -> bool:
     """Emit one Helicone sink call while never changing SDK behavior."""
 
+    if call is None:
+        options_map = options if isinstance(options, Mapping) else {}
+        start = _seconds(options_map.get("start_time"), time.time())
+        call = start_helicone_call(
+            request,
+            capture_content=capture_content,
+            snapshot=context_snapshot,
+            start_time_ns=int(start * 1_000_000_000),
+            provider=provider,
+        )
+    if call.closed:
+        return False
     try:
+        observe_policy(call.policy)
+        span = call.span
+        if (
+            span is None
+            or not span.is_recording()
+            or not span.get_span_context().trace_flags.sampled
+        ):
+            return False
+        capture_content = bool(
+            capture_content and call.policy.capture_content and call.policy.enabled
+        )
         request_map = request if isinstance(request, Mapping) else {"value": request}
         inferred_streaming = is_streaming
         if inferred_streaming is None:
@@ -1052,8 +1206,7 @@ def emit_helicone_log(
                 )
             )
         normalized_response = _normalized_response(response)
-        effective_context = context_snapshot or capture_emission_context()
-        trace_id = effective_context.trace_id
+        effective_context = call.snapshot
         parent_id = effective_context.parent_id
         event_type = request_map.get(HELICONE_TYPE_KEY)
         if event_type in {
@@ -1110,8 +1263,9 @@ def emit_helicone_log(
             resolved_status = response_status or 200
         attrs[HTTP_RESPONSE_STATUS_CODE] = resolved_status
         if message:
-            attrs[ERROR_MESSAGE] = message
             attrs[ERROR_TYPE] = error_type or "HeliconeError"
+            if capture_content:
+                attrs[ERROR_MESSAGE] = message
 
         now = time.time()
         start = _seconds(options_map.get("start_time"), now)
@@ -1125,18 +1279,31 @@ def emit_helicone_log(
             if semantic_kind == "llm" and isinstance(model, str)
             else semantic_kind
         )
-        span = build_readable_span(
-            name=span_name,
-            trace_id=trace_id,
-            parent_id=parent_id,
-            start_time_ns=int(start * 1_000_000_000),
-            end_time_ns=int(end * 1_000_000_000),
-            attributes=attrs,
-            status_code=resolved_status,
-            error_message=message,
-            merge_propagated=False,
+        span.update_name(span_name)
+        convenience = {
+            key: value
+            for key, value in attrs.items()
+            if key.startswith((_PROMPT_PREFIX, _COMPLETION_PREFIX))
+        }
+        span.set_attributes(convenience)
+        span.set_attributes(
+            {key: value for key, value in attrs.items() if key not in convenience}
         )
-        return inject_span(span=span)
+        span.set_status(
+            Status(
+                StatusCode.ERROR
+                if message or resolved_status >= 400
+                else StatusCode.OK,
+                message
+                if capture_content and (message or resolved_status >= 400)
+                else None,
+            )
+        )
+        start_ns = getattr(span, "start_time", None) or int(start * 1_000_000_000)
+        end_helicone_call(call, end_time_ns=max(start_ns, int(end * 1_000_000_000)))
+        return True
     except BaseException:
         logger.debug("Failed to emit Helicone manual logger span", exc_info=True)
         return False
+    finally:
+        end_helicone_call(call)

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
-import tomllib
 from respan_instrumentation_helicone import HeliconeInstrumentor, _instrumentation
 from respan_tracing.core.tracer import RespanTracer
 
@@ -405,11 +405,11 @@ def test_builder_async_error_context_reaches_sink(monkeypatch):
 
 def test_empty_builder_is_streaming_and_uses_creation_context(monkeypatch):
     emitted = []
-    snapshot = object()
+    snapshot = _instrumentation.capture_emission_context()
     monkeypatch.setattr(
         _instrumentation,
         "capture_emission_context",
-        lambda: snapshot,
+        lambda *_args, **_kwargs: snapshot,
     )
     monkeypatch.setattr(
         _instrumentation,
