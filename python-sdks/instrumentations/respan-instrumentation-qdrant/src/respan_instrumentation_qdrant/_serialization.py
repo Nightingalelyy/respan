@@ -1,277 +1,329 @@
-"""Bounded, privacy-safe serialization for Qdrant calls and results."""
+"""Serialize builtins and known native Qdrant storage without user hooks."""
 
 from __future__ import annotations
 
 import json
 import math
 import re
-from collections.abc import Mapping, Sequence
-from dataclasses import fields, is_dataclass
-from enum import Enum
-from itertools import islice
-from numbers import Integral, Real
+import types
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
-
-from respan_instrumentation_qdrant._constants import (
-    MAX_ATTRIBUTE_CHARS,
-    MAX_PREVIEW_ITEMS,
-    MAX_SERIALIZATION_DEPTH,
-    MAX_STRING_BYTES,
-    SENSITIVE_KEY_PARTS,
-)
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 REDACTED = "[REDACTED]"
-_VECTOR_KEY_PARTS = ("embedding", "vector")
-_SECRET_ASSIGNMENT = re.compile(
-    r"(?i)([\"']?(?:api[_-]?key|authorization|password|secret|session[_-]?token|token)[\"']?)"
-    r"(\s*[:=]\s*)([\"']?)([^\s,;}\"']+)([\"']?)"
+_SECRET = re.compile(
+    r"(?i)(api[_-]?key|authorization|password|secret|access[_-]?token|session[_-]?token|token|credentials?|private[_-]?key|cookie)$"
 )
-_BEARER_TOKEN = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]+")
-_MEMORY_ADDRESS = re.compile(r"(?i)\b0x[0-9a-f]{6,}\b")
+_AUTH = re.compile(
+    r"""(?i)\b(Bearer|Basic)\s+(?!\[REDACTED\])(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[A-Za-z0-9._~+/=-]+)"""
+)
+_ASSIGN = re.compile(
+    r"""(?ix)(["']?(?:api[_-]?key|authorization|password|secret|session[_-]?token|access[_-]?token|token|credentials?|private[_-]?key|cookie)["']?)(\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}&]+)"""
+)
+_URL = re.compile(r"https?://[^\s\"'<>]+")
 
 
-def _truncate_utf8(value: str, limit: int = MAX_STRING_BYTES) -> str:
-    encoded = value.encode("utf-8")
-    if len(encoded) <= limit:
-        return value
-    suffix = "...[truncated]"
-    budget = max(0, limit - len(suffix.encode("utf-8")))
-    return f"{encoded[:budget].decode('utf-8', errors='ignore')}{suffix}"
+def redact_text(value: str) -> str:
+    if value.lstrip().startswith(("{", "[")):
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            pass
+        else:
+            converted = json_value(parsed)
+            if converted == parsed:
+                return value
+            return json.dumps(
+                converted,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
 
+    def url(match: re.Match[str]) -> str:
+        try:
+            parsed = urlsplit(match.group())
+            host = parsed.netloc.rsplit("@", 1)[-1]
+            query = urlencode(
+                [
+                    (key, REDACTED if _SECRET.search(key) else item)
+                    for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+                ]
+            )
+            return urlunsplit(
+                (parsed.scheme, host, parsed.path, query, parsed.fragment)
+            )
+        except ValueError:
+            return REDACTED
 
-def _sanitize_url(value: str) -> str:
-    try:
-        parsed = urlsplit(value)
-    except ValueError:
-        return "<redacted-endpoint>"
-    if not parsed.scheme or not parsed.netloc:
-        return value
-    hostname = parsed.hostname
-    if not hostname:
-        return "<redacted-endpoint>"
-    netloc = hostname
-    if ":" in hostname and not hostname.startswith("["):
-        netloc = f"[{hostname}]"
-    try:
-        port = parsed.port
-    except ValueError:
-        return "<redacted-endpoint>"
-    if port is not None:
-        netloc = f"{netloc}:{port}"
-    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    value = _URL.sub(url, value)
+    # Plain diagnostic strings can contain literal backslash-quoted credentials,
+    # as well as JSON strings decoded above. Consume the whole native token.
+    value = re.sub(
+        r"""(?i)\b(Bearer|Basic)\s+(\\+)(["'])(?:[\s\S]*?)(?<!\\)\2\3""",
+        lambda m: f"{m.group(1)} {REDACTED}",
+        value,
+    )
+    value = _AUTH.sub(lambda m: f"{m.group(1)} {REDACTED}", value)
 
-
-def safe_text(value: Any, *, default: str = "") -> str:
-    if isinstance(value, str):
-        if "://" in value:
-            value = _sanitize_url(value)
-        value = _BEARER_TOKEN.sub(REDACTED, value)
-        value = _SECRET_ASSIGNMENT.sub(
-            lambda match: (
-                f"{match.group(1)}{match.group(2)}{match.group(3)}"
-                f"{REDACTED}{match.group(5)}"
-            ),
-            value,
+    def assignment(match: re.Match[str]) -> str:
+        raw = match.group(3)
+        replacement = (
+            json.dumps(REDACTED)
+            if raw.startswith('"')
+            else ("'" + REDACTED + "'" if raw.startswith("'") else REDACTED)
         )
-        value = _MEMORY_ADDRESS.sub("0x<redacted>", value)
-        return _truncate_utf8(value)
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, Integral):
-        return str(int(value))
-    if isinstance(value, Real) and math.isfinite(float(value)):
-        return str(float(value))
-    return f"<{type(value).__name__}>"
+        return match.group(1) + match.group(2) + replacement
+
+    return _ASSIGN.sub(assignment, value)
 
 
-def _key_text(key: Any) -> str:
-    if isinstance(key, Enum):
-        return _key_text(key.value)
-    return safe_text(key)[:256]
+def native_storage(value: Any, base: type) -> dict | None:
+    """Read a known native base's C storage descriptor, bypassing subclass getters."""
+    if not any(
+        item is base
+        for item in type.__dict__["__mro__"].__get__(type(value), type(type(value)))
+    ):
+        return None
+    for ancestor in type.__dict__["__mro__"].__get__(base, type(base)):
+        descriptor = (
+            type.__dict__["__dict__"].__get__(ancestor, type(ancestor)).get("__dict__")
+        )
+        if any(
+            type(descriptor) is t
+            for t in (types.GetSetDescriptorType, types.MemberDescriptorType)
+        ):
+            storage = descriptor.__get__(value, base)
+            return storage if type(storage) is dict else None
+    return None
 
 
-def _sensitive_key(key: Any) -> bool:
-    if not isinstance(key, str):
-        return False
-    normalized = re.sub(r"[^a-z0-9]", "", key.lower())
-    return any(
-        normalized.endswith(re.sub(r"[^a-z0-9]", "", part.lower()))
-        for part in SENSITIVE_KEY_PARTS
+_NATIVE_BASES = None
+_ENUM_BASES = None
+_PROTO_TYPES = ()
+
+
+def initialize_native_types():
+    global _NATIVE_BASES, _ENUM_BASES, _PROTO_TYPES
+    if _NATIVE_BASES is not None:
+        return
+    import importlib
+    from enum import Enum
+
+    bases, enums = [], []
+    for name in (
+        "qdrant_client.http.models.models",
+        "qdrant_client.fastembed_common",
+    ):
+        try:
+            module = importlib.import_module(name)
+        except ImportError:
+            continue
+        for value in vars(module).values():
+            if isinstance(value, type):
+                data = type.__dict__["__dict__"].__get__(value, type(value))
+                if type(data.get("__module__")) is str and data["__module__"] == name:
+                    if issubclass(value, Enum):
+                        enums.append(value)
+                    else:
+                        bases.append(value)
+    _NATIVE_BASES, _ENUM_BASES = tuple(bases), tuple(enums)
+    from google.protobuf.message import Message
+    from qdrant_client import grpc
+
+    _PROTO_TYPES = tuple(
+        value
+        for value in vars(grpc).values()
+        if isinstance(value, type)
+        and any(
+            base is Message
+            for base in type.__dict__["__mro__"].__get__(value, type(value))
+        )
     )
 
 
-def _vector_key(key: str) -> bool:
-    normalized = key.lower()
-    return any(part in normalized for part in _VECTOR_KEY_PARTS)
+def native_dict(value):
+    if type(value) is dict:
+        return value
+    initialize_native_types()
+    from pydantic import BaseModel
+
+    for base in _NATIVE_BASES:
+        data = native_storage(value, base)
+        if data is not None:
+            if any(
+                t is BaseModel
+                for t in type.__dict__["__mro__"].__get__(base, type(base))
+            ):
+                result = dict(native_storage(value, BaseModel) or data)
+                descriptor = (
+                    type.__dict__["__dict__"]
+                    .__get__(BaseModel, type(BaseModel))
+                    .get("__pydantic_extra__")
+                )
+                if any(
+                    type(descriptor) is item
+                    for item in (types.GetSetDescriptorType, types.MemberDescriptorType)
+                ):
+                    extra = descriptor.__get__(value, BaseModel)
+                    if type(extra) is dict:
+                        result.update(extra)
+                return result
+            return data
+    return None
 
 
-def _trusted_length(value: Any) -> int | str:
-    if type(value) in {list, tuple, dict, range}:
-        return len(value)
-    return f">{MAX_PREVIEW_ITEMS}"
-
-
-def _is_numeric_vector(value: Any) -> bool:
-    if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
-        return False
-    try:
-        sample = list(islice(iter(value), MAX_PREVIEW_ITEMS + 1))
-    except Exception:  # noqa: BLE001 - hostile sequences become summaries.
-        return False
-    return bool(sample) and all(
-        isinstance(item, Real) and not isinstance(item, bool) for item in sample
+def _schema(data):
+    valid_types = {"object", "array", "string", "integer", "number", "boolean", "null"}
+    if type(data.get("type")) is str and data["type"] in valid_types:
+        return True
+    if type(data.get("$schema")) is str:
+        return True
+    properties = data.get("properties")
+    return (
+        type(properties) is dict
+        and bool(properties)
+        and all(
+            type(item) is bool
+            or (
+                type(item) is dict
+                and any(
+                    key in item
+                    for key in (
+                        "type",
+                        "$ref",
+                        "enum",
+                        "const",
+                        "allOf",
+                        "anyOf",
+                        "oneOf",
+                        "properties",
+                        "default",
+                        "example",
+                        "examples",
+                        "items",
+                    )
+                )
+            )
+            for item in properties.values()
+        )
     )
 
 
 def json_value(
     value: Any,
     *,
-    depth: int = 0,
-    vector_context: bool = False,
     seen: set[int] | None = None,
+    schema_names: bool = False,
+    schema: bool = False,
+    credential_schema: bool = False,
 ) -> Any:
-    if value is None or isinstance(value, bool):
+    if value is None or any(type(value) is t for t in (bool, int)):
         return value
-    if isinstance(value, str):
-        return safe_text(value)
-    if isinstance(value, Integral):
-        return int(value)
-    if isinstance(value, Real):
-        number = float(value)
-        return number if math.isfinite(number) else None
-    if isinstance(value, bytes | bytearray | memoryview):
-        return {"length": len(value), "type": type(value).__name__}
-    if isinstance(value, Enum):
+    if type(value) is float:
+        return value if math.isfinite(value) else None
+    if type(value) is str:
+        return redact_text(value)
+    from datetime import date, datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    if type(value) is date:
+        return date.isoformat(value)
+    if type(value) is datetime:
+        tz = datetime.tzinfo.__get__(value)
+        if tz is None or type(tz) is timezone or type(tz) is ZoneInfo:
+            return datetime.isoformat(value)
+        return None
+    if type(value) is bytes:
+        try:
+            return redact_text(bytes.decode(value, "utf-8"))
+        except UnicodeDecodeError:
+            return {"bytes_hex": bytes.hex(value)}
+    initialize_native_types()
+    if any(type(value) is item for item in _PROTO_TYPES):
+        from google.protobuf.json_format import MessageToDict
+
         return json_value(
-            value.value,
-            depth=depth + 1,
-            vector_context=vector_context,
-            seen=seen,
+            MessageToDict(value, preserving_proto_field_name=True), seen=seen
         )
-    if depth >= MAX_SERIALIZATION_DEPTH:
-        return {"truncated": "max_depth", "type": type(value).__name__}
+    for base in _ENUM_BASES:
+        data = native_storage(value, base)
+        if data is not None:
+            return json_value(data.get("_value_"), seen=seen)
+    from uuid import UUID
 
+    import numpy as np
+
+    if type(value) is UUID:
+        return UUID.__str__(value)
+    if type(value) is np.ndarray:
+        return json_value(np.ndarray.tolist(value), seen=seen)
+    if any(
+        type(value) is t
+        for t in (
+            np.float16,
+            np.float32,
+            np.float64,
+            np.int8,
+            np.int16,
+            np.int32,
+            np.int64,
+            np.uint8,
+            np.uint16,
+            np.uint32,
+            np.uint64,
+            np.bool_,
+        )
+    ):
+        return json_value(value.item(), seen=seen)
     active = seen if seen is not None else set()
-    identity = id(value)
-    if identity in active:
-        return "<cycle>"
-    active.add(identity)
+    if id(value) in active:
+        return None
+    active.add(id(value))
     try:
-        if is_dataclass(value) and not isinstance(value, type):
-            selected = list(islice(fields(value), MAX_PREVIEW_ITEMS + 1))
-            converted = {
-                field.name: getattr(value, field.name)
-                for field in selected[:MAX_PREVIEW_ITEMS]
-            }
-            if len(selected) > MAX_PREVIEW_ITEMS:
-                converted["__truncated_items__"] = True
-            return json_value(converted, depth=depth + 1, seen=active)
-
-        if isinstance(value, Mapping):
-            result: dict[str, Any] = {}
-            items = list(islice(value.items(), MAX_PREVIEW_ITEMS + 1))
-            for key, item in items[:MAX_PREVIEW_ITEMS]:
-                key_text = _key_text(key)
-                result[key_text] = (
-                    REDACTED
-                    if _sensitive_key(key)
-                    else json_value(
-                        item,
-                        depth=depth + 1,
-                        vector_context=vector_context or _vector_key(key_text),
-                        seen=active,
+        data = native_dict(value)
+        if data is not None:
+            is_schema = schema or _schema(data)
+            result = {}
+            for key, item in data.items():
+                if type(key) is tuple and all(type(part) is str for part in key):
+                    key = json.dumps(list(key), separators=(",", ":"))
+                if any(type(key) is t for t in (int, bool, type(None))):
+                    key = json.dumps(key)
+                if type(key) is not str:
+                    continue
+                sensitive = bool(_SECRET.search(key))
+                if (
+                    sensitive
+                    and (
+                        not schema_names
+                        or not any(type(item) is t for t in (dict, bool))
                     )
-                )
-            if len(items) > MAX_PREVIEW_ITEMS:
-                result["__truncated_items__"] = True
+                ) or (
+                    credential_schema
+                    and key in ("default", "const", "enum", "examples", "example")
+                ):
+                    result[key] = REDACTED
+                else:
+                    result[key] = json_value(
+                        item,
+                        seen=active,
+                        schema_names=is_schema
+                        and key in ("properties", "$defs", "definitions"),
+                        schema=is_schema,
+                        credential_schema=schema_names and sensitive,
+                    )
             return result
-
-        if isinstance(value, Sequence) and not isinstance(
-            value, str | bytes | bytearray
-        ):
-            is_vector = vector_context or _is_numeric_vector(value)
-            items = list(islice(iter(value), MAX_PREVIEW_ITEMS + 1))
-            converted = [
-                json_value(
-                    item,
-                    depth=depth + 1,
-                    vector_context=is_vector,
-                    seen=active,
-                )
-                for item in items[:MAX_PREVIEW_ITEMS]
+        if any(type(value) is t for t in (list, tuple, set, frozenset)):
+            return [
+                json_value(item, seen=active, credential_schema=credential_schema)
+                for item in value
             ]
-            if len(items) > MAX_PREVIEW_ITEMS:
-                return {
-                    "count": _trusted_length(value),
-                    "items": converted,
-                    "kind": "vector" if is_vector else "sequence",
-                    "truncated": True,
-                }
-            return converted
-
-        for method_name in ("model_dump", "to_dict", "dict"):
-            try:
-                method = getattr(value, method_name, None)
-            except Exception:  # noqa: BLE001 - hostile vendor objects are summarized.
-                method = None
-            if not callable(method):
-                continue
-            try:
-                converted = method()
-            except Exception:  # noqa: BLE001,S112 - conversion hooks are untrusted.
-                continue
-            if isinstance(converted, Mapping):
-                return json_value(converted, depth=depth + 1, seen=active)
-        return {"type": type(value).__name__}
-    except Exception:  # noqa: BLE001 - serialization must not break Qdrant.
-        return {"type": type(value).__name__, "unserializable": True}
+        return None
     finally:
-        active.discard(identity)
+        active.discard(id(value))
 
 
-def json_dumps(value: Any) -> str:
-    encoded = json.dumps(
-        json_value(value),
-        allow_nan=False,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
+def json_string(value: Any) -> str:
+    return json.dumps(
+        json_value(value), ensure_ascii=False, separators=(",", ":"), allow_nan=False
     )
-    encoded_bytes = len(encoded.encode("utf-8"))
-    if encoded_bytes <= MAX_ATTRIBUTE_CHARS:
-        return encoded
-    low = 0
-    high = min(len(encoded), MAX_ATTRIBUTE_CHARS)
-    result = ""
-    while low <= high:
-        midpoint = (low + high) // 2
-        candidate = json.dumps(
-            {
-                "original_bytes": encoded_bytes,
-                "preview": encoded[:midpoint],
-                "truncated": True,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        if len(candidate.encode("utf-8")) <= MAX_ATTRIBUTE_CHARS:
-            result = candidate
-            low = midpoint + 1
-        else:
-            high = midpoint - 1
-    return result
-
-
-def exception_message(exc: BaseException) -> str:
-    try:
-        arguments = exc.args
-    except Exception:  # noqa: BLE001 - hostile exception attributes are ignored.
-        arguments = ()
-    for argument in arguments:
-        if isinstance(argument, str | bool | int | float):
-            return safe_text(argument)
-    return type(exc).__name__

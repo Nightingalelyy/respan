@@ -37,6 +37,13 @@ ASYNC_RESPONSES_CLASS = "AsyncResponses"
 CREATE_METHOD = "create"
 PARSE_METHOD = "parse"
 
+# Every request's raw httpx response passes through this method on the base
+# clients; it is where the Respan gateway's log-id response header is read.
+BASE_CLIENT_MODULE = "openai._base_client"
+SYNC_BASE_CLIENT_CLASS = "SyncAPIClient"
+ASYNC_BASE_CLIENT_CLASS = "AsyncAPIClient"
+PROCESS_RESPONSE_METHOD = "_process_response"
+
 # --- request-type values (what the backend keys on via llm.request.type) ----
 
 REQUEST_TYPE_CHAT = "chat"
@@ -45,6 +52,16 @@ REQUEST_TYPE_EMBEDDING = "embedding"
 
 # ``opentelemetry-semantic-conventions-ai`` 0.5.x does not expose this key.
 GEN_AI_RESPONSE_ID = "gen_ai.response.id"
+
+# --- Respan gateway link ------------------------------------------------------
+# Same values as ``respan_sdk.constants`` RESPAN_LOG_ID_RESPONSE_HEADER /
+# RESPAN_GATEWAY_LOG_ID; restated here so this package keeps working on the
+# released respan-sdk floor.
+
+# The Respan gateway returns the unique_id of the log row it wrote here.
+RESPAN_LOG_ID_RESPONSE_HEADER = "X-Respan-Log-Id"
+# A span whose call that row records carries the id and no usage/content.
+RESPAN_GATEWAY_LOG_ID = "respan.gateway.log_id"
 
 # --- response / message field keys ------------------------------------------
 

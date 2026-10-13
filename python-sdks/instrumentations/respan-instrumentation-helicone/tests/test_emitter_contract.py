@@ -39,12 +39,8 @@ from respan_tracing.exporters.respan import _span_to_otlp_json
 
 
 @pytest.fixture
-def captured(monkeypatch):
-    spans = []
-    monkeypatch.setattr(
-        _emitter, "inject_span", lambda span: spans.append(span) or True
-    )
-    return spans
+def captured(otel_spans):
+    return otel_spans
 
 
 def emit(captured, *, request, response, provider=None, error=None, capture=True):
@@ -747,7 +743,7 @@ def test_capture_content_false_keeps_identity_usage_and_error(captured):
 
     assert attrs[RESPAN_LOG_TYPE] == "chat"
     assert attrs[SpanAttributes.LLM_REQUEST_MODEL] == "private"
-    assert attrs[ERROR_MESSAGE] == "safe failure"
+    assert ERROR_MESSAGE not in attrs
     assert attrs[ERROR_TYPE] == "RuntimeError"
     assert attrs[HTTP_RESPONSE_STATUS_CODE] == 500
     assert "status_code" not in attrs
