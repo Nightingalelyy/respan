@@ -1,7 +1,8 @@
 import { RespanLogType } from "@respan/respan-sdk";
 
 export const LIVEKIT_INSTRUMENTATION_NAME = "livekit";
-export const LIVEKIT_INSTRUMENTATION_PACKAGE = "@respan/instrumentation-livekit";
+export const LIVEKIT_INSTRUMENTATION_PACKAGE =
+  "@respan/instrumentation-livekit";
 export const LIVEKIT_LOG_METHOD_TS_TRACING = "ts_tracing";
 
 export const LIVEKIT_SPAN_NAMES = {
@@ -104,8 +105,10 @@ export const LK_AMD_TRANSCRIPT = "lk.amd.transcript";
 export const LK_IS_INTERRUPTION = "lk.is_interruption";
 export const LK_INTERRUPTION_PROBABILITY = "lk.interruption.probability";
 export const LK_INTERRUPTION_TOTAL_DURATION = "lk.interruption.total_duration";
-export const LK_INTERRUPTION_PREDICTION_DURATION = "lk.interruption.prediction_duration";
-export const LK_INTERRUPTION_DETECTION_DELAY = "lk.interruption.detection_delay";
+export const LK_INTERRUPTION_PREDICTION_DURATION =
+  "lk.interruption.prediction_duration";
+export const LK_INTERRUPTION_DETECTION_DELAY =
+  "lk.interruption.detection_delay";
 export const LK_LLM_METRICS = "lk.llm_metrics";
 export const LK_TTS_METRICS = "lk.tts_metrics";
 export const LK_REALTIME_MODEL_METRICS = "lk.realtime_model_metrics";

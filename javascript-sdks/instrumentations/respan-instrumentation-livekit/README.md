@@ -1,11 +1,8 @@
 # @respan/instrumentation-livekit
 
-Respan instrumentation for the LiveKit Agents TypeScript SDK.
-
-The instrumentor registers a span transformer with the active Respan tracing
-runtime and points LiveKit's dynamic tracer at that OpenTelemetry provider
-during `activate()`. It does not patch OpenTelemetry providers or LiveKit span
-methods.
+Translate the LiveKit Agents TypeScript SDK's native OpenTelemetry spans through
+Respan's tracing runtime. Tested with `@livekit/agents` 1.4.0 and 1.9.2; requires
+`@respan/tracing` 1.6.1 or newer.
 
 ```ts
 import { Respan } from "@respan/respan";
@@ -15,20 +12,62 @@ const respan = new Respan({
   apiKey: process.env.RESPAN_API_KEY,
   instrumentations: [new LiveKitInstrumentor()],
 });
-
 await respan.initialize();
+// Start your normal LiveKit AgentSession after initialization.
 ```
 
-Captured LiveKit spans include agent sessions, agent turns, LLM nodes, function
-tools, user turns, and TTS spans. LiveKit raw `lk.*` attributes are consumed
-during translation and removed before export, while Respan canonical fields
-such as `respan.entity.log_type`, `traceloop.entity.input`, `gen_ai.prompt.*`,
-and `gen_ai.completion.0.content` are added for ingestion.
+The adapter uses LiveKit's public dynamic tracer and the active Respan provider.
+It preserves native session, tool, promise, stream, chunk, and error behavior.
+`activate()` calls coalesce; `deactivate()` releases the registration while
+already-started spans finish through their original transformer lease.
+`isActive()` reports the registration state.
 
-Useful transport correlation values such as provider request IDs are retained
-inside the canonical `respan.metadata` JSON object.
+Session, agent/user turn, LLM, tool, and TTS spans map to canonical Respan fields.
+Both the older `lk.*` fields and current `lk.pii.*`/GenAI message fields are
+supported. Logical LLM nodes receive their native request's usage and content;
+correlated transport wrappers are omitted in semantic naming mode, while retry
+attempts remain visible. Standalone native LLM requests remain chats. Translation
+and raw-key removal happen on an export copy, preserving the original vendor
+span's attributes for other processors.
 
-LiveKit emits a transport-level `llm_request` beneath each logical `llm_node`.
-The transformer merges request model, provider, token, and timing details into
-the node, drops only that correlated wrapper in semantic-name mode, and keeps
-retry/error attempt spans visible. Standalone `llm_request` spans remain chats.
+Tool executions contain `{name, arguments}` input and the actual result, with
+`gen_ai.tool.call.id` when LiveKit emitted one. Tool definitions, history, and
+structured/multimodal content are preserved without translator length limits.
+Provider request IDs and native timing measurements merge into the canonical
+`respan.metadata` JSON object. Usage comes from native emitted values.
+
+```ts
+const instrumentor = new LiveKitInstrumentor({
+  traceContent: false, // omit content from every supported native span
+  // recordInputs: false,  // independently disable the input lane
+  // recordOutputs: false, // independently disable the output lane
+});
+```
+
+`RESPAN_TRACE_CONTENT=false`, `TRACELOOP_TRACE_CONTENT=false`, Traceloop's canonical
+content context, tracing suppression, and observed ancestor/span
+`allow_trace_content=false` also impose capture ceilings. A later `true` cannot
+restore denied content on an admitted span. The adapter runs after the real
+OpenTelemetry sampler and guards native recording/readable span attributes,
+events, and status against late content writes. DROP and RECORD_ONLY spans do
+not enter adapter payload translation.
+
+LiveKit's own telemetry has version-specific limits:
+
+- Its LLM node serializes its own chat context even when the sampler drops the
+  span. The adapter prevents its own copying and recording after denial; it does
+  not change LiveKit's internal serialization.
+- Native tool-definition telemetry provides names on 1.4.0 and names/descriptions
+  on 1.9.2. Parameter schemas reach the provider but are absent from those native
+  telemetry records. Minimum-version execution spans also omit call IDs.
+- Native chat-context serialization omits image/audio bodies by default. Current
+  GenAI request telemetry can retain image URI/audio descriptors; omitted native
+  bytes are not reconstructed. Direct TTS request spans expose model/metrics but
+  do not expose the input text or audio bytes.
+- LiveKit 1.4.0 emits an unhandled rejection after a provider failure from its
+  background task. A bare-SDK comparison confirms the same behavior with this
+  adapter. The adapter preserves it and does not synthesize a completion.
+
+The paired examples use genuine `AgentSession`, function tools, handoffs, and the
+official OpenAI provider plugin with controlled fetch/SSE/PCM transport. No
+LiveKit room or paid provider call is required.
