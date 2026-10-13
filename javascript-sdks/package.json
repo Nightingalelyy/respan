@@ -40,6 +40,8 @@
     "instrumentations/respan-instrumentation-eve"
   ],
   "resolutions": {
+    "@google/adk/js-yaml": "4.3.2",
+    "gray-matter/js-yaml": "3.14.2",
     "@ai-sdk/provider-utils@npm:4.0.14": "4.0.57",
     "@ai-sdk/provider-utils@npm:4.0.57": "4.0.57",
     "ai@npm:^6.0.77": "6.0.302",
